@@ -339,7 +339,7 @@ export default function RightPanel({ open, width, workspace, loadedModelId = nul
           </header>
           <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
             {activeView === "files" ? (
-              <FilesTab workspace={workspace} requestedPath={requestedPath} onRequestHandled={onRequestHandled ?? (() => undefined)} onPreviewInBrowser={handlePreviewInBrowser} />
+              <FilesTab workspace={workspace} requestedPath={requestedPath} onRequestHandled={onRequestHandled ?? (() => undefined)} onPreviewInBrowser={handlePreviewInBrowser} onNotify={onNotify} />
             ) : activeView === "terminal" ? (
               <TerminalTab
                 sessions={terminalSessions}

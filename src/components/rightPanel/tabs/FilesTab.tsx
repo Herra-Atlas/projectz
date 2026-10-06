@@ -40,9 +40,11 @@ type FilesTabProps = {
    * the shell opens the view -- one hop, no context.
    */
   onPreviewInBrowser: (fileUrl: string) => void;
+  /** Reported so a refused address reaches the app's one notification stack. */
+  onNotify?: (tone: "success" | "error", message: string) => void;
 };
 
-export default function FilesTab({ workspace, requestedPath, onRequestHandled, onPreviewInBrowser }: FilesTabProps) {
+export default function FilesTab({ workspace, requestedPath, onRequestHandled, onPreviewInBrowser, onNotify }: FilesTabProps) {
   const [preview, setPreview] = useState<TreeEntry | null>(null);
   const [query, setQuery] = useState("");
   const { root, error, loadingPath, isExpanded, childrenOf, toggle, refresh } = useFileTree();
@@ -101,7 +103,7 @@ export default function FilesTab({ workspace, requestedPath, onRequestHandled, o
   // A file opened under a folder that has since changed may no longer exist, so
   // returning to the tree is the only way to see what is there now.
   if (preview) {
-    return <FilePreview entry={preview} workspace={workspace} onBack={() => setPreview(null)} onPreviewInBrowser={onPreviewInBrowser} />;
+    return <FilePreview entry={preview} workspace={workspace} onBack={() => setPreview(null)} onPreviewInBrowser={onPreviewInBrowser} onNotify={onNotify} />;
   }
 
   if (!workspace) {

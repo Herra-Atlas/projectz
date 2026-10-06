@@ -158,6 +158,57 @@ pub fn panel_read_preview(relative: String) -> Result<String, String> {
         .map_err(|error| format!("Could not read {}: {error}", resolved.display()))
 }
 
+/// Overwriting a file from the panel's editor.
+///
+/// The user's own save path, kept apart from `ai/tools/` for the same reason the
+/// listing is: it has no `ToolSpec`, no effect class, and never passes the
+/// permission gate. It shares the boundary -- `resolve_within` -- and the atomic
+/// temp+rename write, so there is one containment rule and one way a file lands.
+#[tauri::command]
+pub fn panel_write_file(relative: String, content: String) -> Result<(), String> {
+    let root = require_workspace()?;
+    write_in(&root, &relative, &content)
+}
+
+/// Overwriting one file inside the workspace.
+///
+/// Takes the root separately so the tests can point it at a temporary folder
+/// without touching the process-global, the same split as [`list_in`].
+fn write_in(root: &Path, relative: &str, content: &str) -> Result<(), String> {
+    const MAX_WRITE_BYTES: u64 = 2 * 1024 * 1024;
+    if content.len() as u64 > MAX_WRITE_BYTES {
+        return Err(format!(
+            "{} is larger than 2 MB, so it cannot be saved here",
+            relative
+        ));
+    }
+    let requested = if relative.is_empty() { "." } else { relative };
+    let resolved = resolve_within(root, requested)?;
+
+    if resolved.is_dir() {
+        return Err(format!("{} is a folder", relative));
+    }
+
+    let parent = resolved
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", resolved.display()))?;
+    let temporary = parent.join(format!(
+        ".{}.projectz-partial",
+        resolved
+            .file_name()
+            .map(|name| name.to_string_lossy())
+            .unwrap_or_default()
+    ));
+
+    std::fs::write(&temporary, content.as_bytes())
+        .map_err(|error| format!("Could not write {}: {error}", temporary.display()))?;
+    if let Err(error) = std::fs::rename(&temporary, &resolved) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(format!("Could not replace {}: {error}", resolved.display()));
+    }
+    Ok(())
+}
+
 /// Folders that are never worth listing.
 ///
 /// Shared with `tools::search`, which skips the same set when grepping. Two
@@ -351,6 +402,39 @@ mod tests {
         let entries = list_in(&root, "").expect("list");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].path, "a.txt", "the root path should be bare");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A write lands atomically at the path it names, with no partial file left
+    /// behind and no escape outside the root.
+    #[test]
+    fn a_panel_write_replaces_the_file_it_names() {
+        let root = temp_dir("panel-write");
+        write(&root, "a.txt");
+
+        write_in(&root, "a.txt", "new contents").expect("write");
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).expect("read back"),
+            "new contents"
+        );
+        assert!(
+            std::fs::read_dir(&root).expect("read").count() == 1,
+            "a partial file was left behind"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_panel_write_outside_the_workspace_is_refused() {
+        let root = temp_dir("panel-write-escape");
+        write(&root, "ok.txt");
+
+        let error = write_in(&root, "../escaped.txt", "x").expect_err("refused");
+        assert!(
+            error.contains("outside") || error.contains(".."),
+            "the escape was not named in the error: {error}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

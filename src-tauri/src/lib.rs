@@ -163,6 +163,7 @@ pub fn run() {
             commands::local_model_unload,
             panel::fs::panel_fs_list,
             panel::fs::panel_read_preview,
+            panel::fs::panel_write_file,
             panel::terminal::panel_terminal_run,
             panel::browser::panel_browser_navigate,
             panel::browser::panel_browser_open_tab,
