@@ -1,0 +1,67 @@
+[package]
+name = "projectz"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2021"
+
+[features]
+# Off by default. Turning it on links `ash` and, at runtime, requires the system
+# Vulkan loader to be present -- a native dependency that can be missing, and an
+# app that will not start without it is worse than one that cannot quote a VRAM
+# figure. With it off the memory estimate still works; only the fit verdict is
+# unavailable. See `ai/local/device.rs`.
+vulkan-query = ["dep:ash"]
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "projectz_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# `unstable` is what `Window::add_child` lives behind, and the right panel's
+# browser view is a child webview: a nested browsing surface inside the app's own
+# window rather than a separate one. Tauri has no stable API for this, and the
+# alternative -- a second `WebviewWindow` -- would be a real OS window with its
+# own taskbar entry, which is not a panel.
+tauri = { version = "2", features = ["tray-icon", "unstable"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-util = "0.3"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+dirs = "6"
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+sha2 = "0.10"
+# Already in the tree as a transitive dependency of tauri; promoted to direct so
+# the tool cache can stamp UTC ISO-8601 timestamps in the same format the
+# frontend writes. Those timestamps are compared as strings, so the format is a
+# correctness requirement and not just a display choice.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
+pdf-extract = "0.12.1"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+kestrel-rs = "11"
+# Optional: only with the `vulkan-query` feature, which is off by default. See the
+# feature note above.
+ash = { version = "0.38", optional = true }
+
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

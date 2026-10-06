@@ -1,0 +1,153 @@
+@import "tailwindcss";
+
+:root {
+  font-family: Inter, "Segoe UI", system-ui, sans-serif;
+  color: #e8e9e2;
+  background: #111511;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-optical-sizing: auto;
+  --page: #111511;
+  --rail: #171c17;
+  --panel: #1c221d;
+  --raised: #232a24;
+  --line: #303932;
+  --text: #e8e9e2;
+  --muted: #a0a89e;
+  --quiet: #737e73;
+  --accent: #d6ad78;
+  --accent-ink: #21190f;
+  --danger: #e28a7c;
+  /* Diff additions and removals. --removed is deliberately not --danger: a
+     deleted line is an ordinary edit, not an error, and sharing the colour would
+     make every removal read as something went wrong. It is the same hue held
+     back in saturation and value so the two are recognisably a pair without
+     being the same signal — the difference is visible side by side in a diff but
+     neither shouts. --added is the app's one green, so the added/removed pair
+     reads as a single figure of speech wherever it appears: in the header
+     totals, in the per-file rows, and in the diff view itself. */
+  --added: #8fc98a;
+  --removed: #cf8a80;
+  /* Categorical series, for charts that plot one line per model rather than a
+     few totals. Hues rather than steps of the surface tokens: a series must be
+     told apart from its neighbours, and three shades of grey cannot do that.
+     Ordered so neighbouring entries stay far apart on the wheel, and each is
+     light enough to read on --panel. Read in order by the per-model chart. */
+  --series-1: #d6ad78;
+  --series-2: #7fb2c9;
+  --series-3: #b39ddb;
+  --series-4: #8fc98a;
+  --series-5: #d98fa8;
+  --series-6: #c9c07a;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-width: 320px;
+  height: 100%;
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow: hidden;
+  background: var(--page);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+p {
+  margin: 0;
+  color: inherit;
+  line-height: 1.65;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  margin: 0;
+  color: var(--text);
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+/* Buttons inherit the surrounding colour, but through the base layer rather
+   than as an unlayered rule. Unlayered CSS outranks every `@layer`, so a bare
+   `button { color: inherit }` silently beat Tailwind's own `text-*` utilities
+   and left white icons on the white send button until hover. Declaring the
+   layer puts these defaults underneath the utilities, which is where a
+   component's own colour class belongs. */
+@layer base {
+  button {
+    color: inherit;
+  }
+}
+
+::selection {
+  color: var(--accent-ink);
+  background: var(--accent);
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+* {
+  scrollbar-color: #485249 transparent;
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: #485249;
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: #657064;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
