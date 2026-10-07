@@ -1,21 +1,6 @@
-import { ChevronRight, FileCode2, FileText, Folder } from "lucide-react";
+import { ChevronRight, Edit, Eye, FileCode2, FileText, Folder, Trash2 } from "lucide-react";
 import type { TreeEntry } from "../../../features/rightPanel/useFileTree";
-
-/**
- * One row of the file tree, and the rows under it.
- *
- * **Recursive rather than a flattened list.** A tree held flat has to be built
- * depth-first on every render and every row has to know its absolute depth to
- * draw its indent -- so a folder ten levels down needs the whole subtree above it
- * in memory just to be positioned. Recursing means a row needs its depth and its
- * entry, and the renderer stops at a collapsed folder without descending at all.
- *
- * **No state here.** Expanded-ness and the loaded children live in `useFileTree`
- * because they have to survive a collapse of an ancestor: unmounting the subtree
- * would lose every folder the user had opened inside it, so expanding a sibling
- * again would start from nothing. What this component owns is only whether its own
- * subtree is drawn, which it is told.
- */
+import { useEffect, useState } from "react";
 
 type FileTreeRowProps = {
   entry: TreeEntry;
@@ -25,6 +10,9 @@ type FileTreeRowProps = {
   loadingPath: string | null;
   onToggle: (path: string) => void;
   onOpenFile: (entry: TreeEntry) => void;
+  onNotify?: (tone: "success" | "error", message: string) => void;
+  onRename: (path: string, newName: string) => Promise<void>;
+  onDelete: (path: string) => Promise<void>;
 };
 
 /** Icon by file extension, falling back to a generic page for anything unknown. */
@@ -36,10 +24,66 @@ function FileIcon({ name }: { name: string }) {
     : <FileText size={14} className="shrink-0 text-[var(--muted)]" />;
 }
 
-export default function FileTreeRow({ entry, depth, isExpanded, childrenOf, loadingPath, onToggle, onOpenFile }: FileTreeRowProps) {
+export default function FileTreeRow({ entry, depth, isExpanded, childrenOf, loadingPath, onToggle, onOpenFile, onNotify, onRename, onDelete }: FileTreeRowProps) {
   const expanded = entry.isDir && isExpanded(entry.path);
   const children = expanded ? childrenOf(entry.path) : undefined;
   const isLoading = loadingPath === entry.path;
+  const [anchorPoint, setAnchorPoint] = useState<{x: number, y: number} | null>(null);
+
+  // Close context menu when clicking outside or pressing Escape
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (!anchorPoint) return;
+      const target = event.target as HTMLElement;
+      // Don't close if clicking on the menu itself or its children
+      if (target.closest('[data-context-menu]')) return;
+      setAnchorPoint(null);
+    };
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && anchorPoint) {
+        setAnchorPoint(null);
+      }
+    };
+
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [anchorPoint]);
+
+  const handleView = () => {
+    onOpenFile(entry);
+  };
+
+  const handleRename = async () => {
+    const newName = window.prompt("Enter new name:", entry.name);
+    if (newName === null) return;
+    if (!newName.trim()) {
+      onNotify?.("error", "Name cannot be empty");
+      return;
+    }
+    if (newName === entry.name) return;
+    try {
+      await onRename(entry.path, newName);
+    } catch (error) {
+      onNotify?.("error", `Failed to rename: ${(error as Error).message}`);
+    }
+    setAnchorPoint(null);
+  };
+
+  const handleDelete = async () => {
+    const confirmed = window.confirm(`Delete "${entry.name}"?`);
+    if (!confirmed) return;
+    try {
+      await onDelete(entry.path);
+    } catch (error) {
+      onNotify?.("error", `Failed to delete: ${(error as Error).message}`);
+    }
+    setAnchorPoint(null);
+  };
 
   return (
     <>
@@ -49,6 +93,10 @@ export default function FileTreeRow({ entry, depth, isExpanded, childrenOf, load
         // or background on the level rather than the row.
         style={{ paddingLeft: `${depth * 12 + 8}px` }}
         className="group flex min-h-7 w-full items-center gap-1 rounded-md pr-2 text-[13px] text-[var(--text)] transition-colors hover:bg-[var(--raised)]"
+        onContextMenu={(event) => {
+          event.preventDefault(); // Prevent browser context menu
+          setAnchorPoint({ x: event.clientX, y: event.clientY });
+        }}
       >
         {entry.isDir ? (
           <button
@@ -95,8 +143,52 @@ export default function FileTreeRow({ entry, depth, isExpanded, childrenOf, load
           loadingPath={loadingPath}
           onToggle={onToggle}
           onOpenFile={onOpenFile}
+          onNotify={onNotify}
+          onRename={onRename}
+          onDelete={onDelete}
         />
       ))}
+
+      {/* Context menu */}
+      {anchorPoint && (
+        <div
+          data-context-menu
+          className="fixed z-50"
+          style={{
+            left: Math.min(anchorPoint.x, window.innerWidth - 150), // prevent off-screen right
+            top: Math.min(anchorPoint.y, window.innerHeight - 100), // prevent off-screen bottom
+          }}
+        >
+          <div className="relative rounded-md shadow-lg bg-[var(--page)] ring-1 ring-black ring-opacity-5 p-1">
+            {/* View button */}
+            <div
+              className="flex items-center px-2 py-1 text-sm text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] cursor-default"
+              onClick={handleView}
+            >
+              <Eye size={14} className="shrink-0 mr-2" />
+              <span>View</span>
+            </div>
+            
+            {/* Rename button */}
+            <div
+              className="flex items-center px-2 py-1 text-sm text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] cursor-default"
+              onClick={handleRename}
+            >
+              <Edit size={14} className="shrink-0 mr-2" />
+              <span>Rename</span>
+            </div>
+            
+            {/* Delete button */}
+            <div
+              className="flex items-center px-2 py-1 text-sm text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] cursor-default"
+              onClick={handleDelete}
+            >
+              <Trash2 size={14} className="shrink-0 mr-2" />
+              <span>Delete</span>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

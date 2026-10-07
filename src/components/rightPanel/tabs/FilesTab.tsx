@@ -47,7 +47,7 @@ type FilesTabProps = {
 export default function FilesTab({ workspace, requestedPath, onRequestHandled, onPreviewInBrowser, onNotify }: FilesTabProps) {
   const [preview, setPreview] = useState<TreeEntry | null>(null);
   const [query, setQuery] = useState("");
-  const { root, error, loadingPath, isExpanded, childrenOf, toggle, refresh } = useFileTree();
+  const { root, error, loadingPath, isExpanded, childrenOf, toggle, refresh, rename, delete: deleteFile } = useFileTree();
 
   /**
    * Shows a file asked for from outside the panel.
@@ -136,22 +136,27 @@ export default function FilesTab({ workspace, requestedPath, onRequestHandled, o
         />
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto py-1">
+      <div
+        className="min-h-0 flex-1 overflow-y-auto py-1"
+      >
         {error && <p className="px-3 py-2 text-xs text-[var(--danger)]">{error}</p>}
         {filtered === null && !error && <p className="px-3 py-2 text-xs text-[var(--quiet)]">Reading…</p>}
         {filtered?.length === 0 && <p className="px-3 py-2 text-xs text-[var(--quiet)]">Nothing here.</p>}
         {filtered?.map((entry) => (
-          <FileTreeRow
-            key={entry.path}
-            entry={entry}
-            depth={0}
-            isExpanded={isExpanded}
-            childrenOf={childrenOf}
-            loadingPath={loadingPath}
-            onToggle={(path) => void toggle(path)}
-            onOpenFile={setPreview}
-          />
-        ))}
+            <FileTreeRow
+              key={entry.path}
+              entry={entry}
+              depth={0}
+              isExpanded={isExpanded}
+              childrenOf={childrenOf}
+              loadingPath={loadingPath}
+              onToggle={(path) => void toggle(path)}
+              onOpenFile={setPreview}
+              onNotify={onNotify}
+              onRename={rename}
+              onDelete={deleteFile}
+            />
+          ))}
       </div>
     </div>
   );

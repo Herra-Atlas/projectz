@@ -11,6 +11,21 @@ export type TreeEntry = {
   hasChildren: boolean;
 };
 
+/** Normalize a path to workspace-relative format (forward slashes, no leading ./ or absolute paths). */
+export function normalizePath(path: string): string {
+  // Strip Windows extended-length prefix \\?\ (4 chars: \, \, ?, \)
+  if (path.startsWith("\\\\?\\")) {
+    path = path.slice(4);
+  }
+  // Convert backslashes to forward slashes
+  let normalized = path.replace(/\\/g, "/");
+  // Remove leading ./ if present
+  if (normalized.startsWith("./")) {
+    normalized = normalized.slice(2);
+  }
+  return normalized;
+}
+
 /** Listing one folder. `path` is `""` for the workspace root. */
 export async function listFolder(relative: string): Promise<TreeEntry[]> {
   return invoke<TreeEntry[]>("panel_fs_list", { relative });
@@ -43,9 +58,9 @@ export function useFileTree() {
     try {
       const entries = await listFolder(relative);
       setChildrenByPath((current) => ({ ...current, [relative]: entries }));
-      // The root also gets its own slot, because the tree reads the root through
-      // the same map. Without it the first level needs a second code path.
-      if (relative === "") setRoot(entries);
+      if (relative === "") {
+        setRoot(entries);
+      }
       return entries;
     } catch (reason) {
       setError(String(reason));
@@ -100,5 +115,47 @@ export function useFileTree() {
     await load("");
   }, [load]);
 
-  return { root, error, loadingPath, isExpanded, childrenOf, toggle, collapseAll, refresh };
+  /**
+   * Renames a file or directory.
+   *
+   * @param sourcePath The workspace-relative path of the item to rename.
+   * @param newName The new name for the item (without path).
+   */
+  const rename = useCallback(async (sourcePath: string, newName: string) => {
+    try {
+      const normalizedPath = normalizePath(sourcePath);
+      await invoke("panel_rename_file", { relative: normalizedPath, newName });
+      await refresh();
+    } catch (reason) {
+      throw new Error(String(reason));
+    }
+  }, [refresh]);
+
+  /**
+   * Deletes a file or directory.
+   *
+   * @param path The workspace-relative path of the item to delete.
+   */
+  const del = useCallback(async (path: string) => {
+    try {
+      const normalizedPath = normalizePath(path);
+      await invoke("panel_delete_file", { relative: normalizedPath });
+      await refresh();
+    } catch (reason) {
+      throw new Error(String(reason));
+    }
+  }, [refresh]);
+
+  return { 
+    root, 
+    error, 
+    loadingPath, 
+    isExpanded, 
+    childrenOf, 
+    toggle, 
+    collapseAll, 
+    refresh,
+    rename,
+    delete: del,
+  };
 }

@@ -1,18 +1,3 @@
-//! Listing a workspace folder for the right panel's file tree.
-//!
-//! **Not a model tool.** `ai/tools/` holds the nine things a *model* may call,
-//! and a file tree is app chrome the *user* drives -- it has no `ToolSpec`, no
-//! effect class, and never passes through the permission gate. Putting it in the
-//! registry would advertise it to the model in every request's `tools` array,
-//! where it does not belong, and would make adding a panel feature look like
-//! adding an agent capability.
-//!
-//! It reuses the boundary rather than writing a second one: [`list`] resolves
-//! every path through `tools::file::resolve_within`, the same function the
-//! model's own file tools are checked against. A second containment check would
-//! be a second thing to keep correct, and the failure would be the app reading a
-//! folder the user never opened.
-
 use std::path::Path;
 
 use serde::Serialize;
@@ -127,7 +112,10 @@ pub fn list_in(root: &Path, relative: &str) -> Result<Vec<TreeEntry>, String> {
 /// genuinely has 500 entries.
 #[tauri::command]
 pub fn panel_fs_list(relative: String) -> Result<Vec<TreeEntry>, String> {
-    list(&relative)
+    eprintln!("[panel_fs_list] called with relative='{}'", relative);
+    let result = list(&relative);
+    eprintln!("[panel_fs_list] returning {} entries", result.as_ref().map_or(0, |v| v.len()));
+    result
 }
 
 /// Reading a file for the panel's preview.
@@ -183,7 +171,7 @@ fn write_in(root: &Path, relative: &str, content: &str) -> Result<(), String> {
         ));
     }
     let requested = if relative.is_empty() { "." } else { relative };
-    let resolved = resolve_within(root, requested)?;
+    let resolved = resolve_within(&root, requested)?;
 
     if resolved.is_dir() {
         return Err(format!("{} is a folder", relative));
@@ -206,6 +194,72 @@ fn write_in(root: &Path, relative: &str, content: &str) -> Result<(), String> {
         let _ = std::fs::remove_file(&temporary);
         return Err(format!("Could not replace {}: {error}", resolved.display()));
     }
+    Ok(())
+}
+
+/// Renaming a file or directory in the panel.
+///
+/// The user's own rename path, kept apart from `ai/tools/` for the same reason the
+/// listing is: it has no `ToolSpec`, no effect class, and never passes the
+/// permission gate. It shares the boundary -- `resolve_within` -- and the atomic
+/// rename, so there is one containment rule and one way a file lands.
+#[tauri::command]
+pub fn panel_rename_file(relative: String, new_name: String) -> Result<(), String> {
+    eprintln!("[panel_rename_file] called with relative='{}', new_name='{}'", relative, new_name);
+    let root = require_workspace()?;
+    let source = if relative.is_empty() { "." } else { &relative };
+    let source_resolved = resolve_within(&root, source)?;
+    eprintln!("[panel_rename_file] source_resolved='{}'", source_resolved.display());
+
+    // Construct the destination relative path: parent relative path + new_name
+    let parent_relative = if relative.contains('/') {
+        let parts: Vec<&str> = relative.split('/').collect();
+        parts[..parts.len() - 1].join("/")
+    } else {
+        String::new()
+    };
+    let dest_relative = if parent_relative.is_empty() {
+        new_name.clone()
+    } else {
+        format!("{}/{}", parent_relative, new_name)
+    };
+    eprintln!("[panel_rename_file] dest_relative='{}'", dest_relative);
+
+    // Ensure the destination is within the workspace
+    let _ = resolve_within(&root, &dest_relative)?;
+
+    let source_resolved = resolve_within(&root, source)?;
+    let dest_resolved = resolve_within(&root, &dest_relative)?;
+    eprintln!("[panel_rename_file] source_resolved='{}'", source_resolved.display());
+    eprintln!("[panel_rename_file] dest_resolved='{}'", dest_resolved.display());
+
+    if dest_resolved.exists() {
+        return Err(format!("{} already exists", dest_resolved.display()));
+    }
+
+    // Perform the rename
+    std::fs::rename(&source_resolved, &dest_resolved)
+        .map_err(|error| format!("Could not rename {}: {error}", source_resolved.display()))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn panel_delete_file(relative: String) -> Result<(), String> {
+    eprintln!("[panel_delete_file] called with relative='{}'", relative);
+    let root = require_workspace()?;
+    let target = if relative.is_empty() { "." } else { &relative };
+    let target_resolved = resolve_within(&root, target)?;
+    eprintln!("[panel_delete_file] target_resolved='{}'", target_resolved.display());
+
+    if target_resolved.is_dir() {
+        std::fs::remove_dir_all(&target_resolved)
+            .map_err(|error| format!("Could not delete directory {}: {error}", target_resolved.display()))?;
+    } else {
+        std::fs::remove_file(&target_resolved)
+            .map_err(|error| format!("Could not delete file {}: {error}", target_resolved.display()))?;
+    }
+
     Ok(())
 }
 
@@ -431,6 +485,95 @@ mod tests {
         write(&root, "ok.txt");
 
         let error = write_in(&root, "../escaped.txt", "x").expect_err("refused");
+        assert!(
+            error.contains("outside") || error.contains(".."),
+            "the escape was not named in the error: {error}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Test renaming a file.
+    #[test]
+    fn panel_rename_file_works() {
+        let root = temp_dir("panel-rename");
+        write(&root, "old.txt");
+
+        // Rename the file
+        panel_rename_file("old.txt".to_string(), "new.txt".to_string()).expect("rename failed");
+
+        // Check the old file is gone and the new file exists
+        assert!(!root.join("old.txt").exists(), "old file still exists");
+        assert!(root.join("new.txt").exists(), "new file not created");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Test renaming a directory.
+    #[test]
+    fn panel_rename_directory_works() {
+        let root = temp_dir("panel-rename-dir");
+        std::fs::create_dir_all(root.join("old_dir")).expect("create dir");
+        write(&root.join("old_dir"), "file.txt");
+
+        // Rename the directory
+        panel_rename_file("old_dir".to_string(), "new_dir".to_string()).expect("rename failed");
+
+        // Check the old directory is gone and the new directory exists with contents
+        assert!(!root.join("old_dir").exists(), "old directory still exists");
+        assert!(root.join("new_dir").exists(), "new directory not created");
+        assert!(root.join("new_dir/file.txt").exists(), "file not found in renamed directory");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Test renaming to an invalid path (outside workspace) is refused.
+    #[test]
+    fn panel_rename_file_outside_workspace_is_refused() {
+        let root = temp_dir("panel-rename-escape");
+        write(&root, "ok.txt");
+
+        let error = panel_rename_file("ok.txt".to_string(), "../escaped.txt".to_string()).expect_err("rename should fail");
+        assert!(
+            error.contains("outside") || error.contains(".."),
+            "the escape was not named in the error: {error}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Test deleting a file.
+    #[test]
+    fn panel_delete_file_works() {
+        let root = temp_dir("panel-delete");
+        write(&root, "to_delete.txt");
+
+        // Delete the file
+        panel_delete_file("to_delete.txt".to_string()).expect("delete failed");
+
+        // Check the file is gone
+        assert!(!root.join("to_delete.txt").exists(), "file still exists after delete");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Test deleting a directory (recursively).
+    #[test]
+    fn panel_delete_directory_works() {
+        let root = temp_dir("panel-delete-dir");
+        std::fs::create_dir_all(root.join("to_delete_dir/nested")).expect("create dir");
+        write(&root.join("to_delete_dir/nested"), "file.txt");
+
+        // Delete the directory
+        panel_delete_file("to_delete_dir".to_string()).expect("delete failed");
+
+        // Check the directory and its contents are gone
+        assert!(!root.join("to_delete_dir").exists(), "directory still exists after delete");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Test deleting a path outside the workspace is refused.
+    #[test]
+    fn panel_delete_file_outside_workspace_is_refused() {
+        let root = temp_dir("panel-delete-escape");
+        write(&root, "ok.txt");
+
+        let error = panel_delete_file("../escaped.txt".to_string()).expect_err("delete should fail");
         assert!(
             error.contains("outside") || error.contains(".."),
             "the escape was not named in the error: {error}"
