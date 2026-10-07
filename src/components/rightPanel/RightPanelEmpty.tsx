@@ -39,37 +39,48 @@ const VIEWS: { id: PanelViewId; label: string; description: string; icon: React.
 
 type RightPanelEmptyProps = {
   onOpen: (view: PanelViewId) => void;
+  /**
+   * Whether a workspace folder is open.
+   *
+   * The Files view has nothing to show without one, so it is offered greyed out
+   * rather than opening an empty pane that reads as broken. Terminal and Browser
+   * do not depend on a folder, so they stay live.
+   */
+  hasWorkspace: boolean;
 };
 
 const AVAILABLE: PanelViewId[] = ["files", "browser", "terminal"];
 
-export default function RightPanelEmpty({ onOpen }: RightPanelEmptyProps) {
+export default function RightPanelEmpty({ onOpen, hasWorkspace }: RightPanelEmptyProps) {
   return (
     <div className="flex h-full flex-col justify-center px-5 py-8">
       <h3 className="text-sm font-medium text-[var(--text)]">Nothing open</h3>
       <p className="mt-1 text-[13px] text-[var(--muted)]">Pick a view, or press its shortcut.</p>
 
       <ul className="mt-5 flex flex-col">
-        {VIEWS.map((view) => (
-          <li key={view.id}>
-            <button
-              type="button"
-              // Terminal renders nothing yet, so it is marked unavailable rather
-              // than opening an empty pane. `aria-disabled` keeps it in the tab
-              // order and still hoverable; a `disabled` button greys out and reads
-              // as broken rather than pending.
-              aria-disabled={!AVAILABLE.includes(view.id)}
-              onClick={() => onOpen(view.id)}
-              className="flex w-full items-center gap-3 rounded-md px-2 py-2.5 text-left transition-colors hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--accent)] aria-disabled:pointer-events-none aria-disabled:opacity-50"
-            >
-              {/* `w-5` so every row's label starts at the same x whatever the
-                  icon, rather than the text stepping in and out with the glyph. */}
-              <span className="grid w-5 shrink-0 place-items-center">{view.icon}</span>
-              <span className="w-[5.5rem] shrink-0 text-[13px] text-[var(--text)]">{view.label}</span>
-              <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--accent)]">{view.description}</span>
-            </button>
-          </li>
-        ))}
+        {VIEWS.map((view) => {
+          // Files needs a folder to browse; without one it is unavailable, like a
+          // view that has not been built yet. `aria-disabled` keeps it in the tab
+          // order and still hoverable, where `disabled` would read as broken.
+          const unavailable = !AVAILABLE.includes(view.id) || (view.id === "files" && !hasWorkspace);
+          return (
+            <li key={view.id}>
+              <button
+                type="button"
+                aria-disabled={unavailable}
+                title={unavailable && view.id === "files" && !hasWorkspace ? "Open a folder first" : undefined}
+                onClick={() => onOpen(view.id)}
+                className="flex w-full items-center gap-3 rounded-md px-2 py-2.5 text-left transition-colors hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--accent)] aria-disabled:pointer-events-none aria-disabled:opacity-50"
+              >
+                {/* `w-5` so every row's label starts at the same x whatever the
+                    icon, rather than the text stepping in and out with the glyph. */}
+                <span className="grid w-5 shrink-0 place-items-center">{view.icon}</span>
+                <span className="w-[5.5rem] shrink-0 text-[13px] text-[var(--text)]">{view.label}</span>
+                <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--accent)]">{view.description}</span>
+              </button>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );

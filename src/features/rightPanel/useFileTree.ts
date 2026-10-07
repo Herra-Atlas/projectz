@@ -26,6 +26,12 @@ export function normalizePath(path: string): string {
   return normalized;
 }
 
+/** The folder a workspace-relative path lives in. The empty string is the root. */
+export function parentOf(path: string): string {
+  const slash = path.lastIndexOf("/");
+  return slash === -1 ? "" : path.slice(0, slash);
+}
+
 /** Listing one folder. `path` is `""` for the workspace root. */
 export async function listFolder(relative: string): Promise<TreeEntry[]> {
   return invoke<TreeEntry[]>("panel_fs_list", { relative });
@@ -103,6 +109,18 @@ export function useFileTree() {
   }, []);
 
   /**
+   * Opens a folder without toggling it shut, fetching its children the first time.
+   *
+   * Used before creating inside a folder: the new row is drawn among that
+   * folder's children, so the folder has to be open for it to be visible -- and
+   * [`toggle`] cannot serve here, because on an already-open folder it closes it.
+   */
+  const expand = useCallback(async (relative: string) => {
+    setExpanded((current) => (current.has(relative) ? current : new Set(current).add(relative)));
+    if (!(relative in childrenByPath)) await load(relative);
+  }, [childrenByPath, load]);
+
+  /**
    * Discards the cache so the tree re-reads from disk.
    *
    * The `refreshKey` is bumped by the caller when it knows something changed --
@@ -118,33 +136,84 @@ export function useFileTree() {
   /**
    * Renames a file or directory.
    *
+   * Re-reads the item's own folder rather than the whole tree: a rename keeps the
+   * item where it was, and `refresh` would collapse every open folder and drop
+   * the cache just to show one name change.
+   *
    * @param sourcePath The workspace-relative path of the item to rename.
    * @param newName The new name for the item (without path).
    */
   const rename = useCallback(async (sourcePath: string, newName: string) => {
+    const normalizedPath = normalizePath(sourcePath);
     try {
-      const normalizedPath = normalizePath(sourcePath);
       await invoke("panel_rename_file", { relative: normalizedPath, newName });
-      await refresh();
+      await load(parentOf(normalizedPath));
     } catch (reason) {
       throw new Error(String(reason));
     }
-  }, [refresh]);
+  }, [load]);
 
   /**
-   * Deletes a file or directory.
+   * Deletes a file or directory. Re-reads the item's folder, for the reason the
+   * rename does.
    *
    * @param path The workspace-relative path of the item to delete.
    */
   const del = useCallback(async (path: string) => {
+    const normalizedPath = normalizePath(path);
     try {
-      const normalizedPath = normalizePath(path);
       await invoke("panel_delete_file", { relative: normalizedPath });
-      await refresh();
+      await load(parentOf(normalizedPath));
     } catch (reason) {
       throw new Error(String(reason));
     }
-  }, [refresh]);
+  }, [load]);
+
+  /**
+   * Creates a file or folder inside `parent` and re-reads just that folder.
+   *
+   * The user opened the folder in order to put something in it, so the tree stays
+   * exactly as it was and only the one listing is fetched again to reveal the new
+   * row -- `refresh` would close every open folder to show it.
+   *
+   * @param parent The workspace-relative folder to create in. `""` is the root.
+   * @param name The new name (no path).
+   * @param isDir Whether to create a folder rather than an empty file.
+   */
+  const create = useCallback(async (parent: string, name: string, isDir: boolean) => {
+    const target = normalizePath(parent);
+    try {
+      await invoke(isDir ? "panel_create_folder" : "panel_create_file", { relative: target, name });
+      await load(target);
+    } catch (reason) {
+      throw new Error(String(reason));
+    }
+  }, [load]);
+
+  /**
+   * Moves a file or folder into another folder, then re-reads both folders.
+   *
+   * Two listings rather than one because a move is the only action that changes
+   * *two* places at once: the row has to disappear from where it was and appear
+   * where it landed. Re-reading the whole tree would do that too, but would also
+   * close every folder the user had opened.
+   *
+   * @param path The workspace-relative path of the item being moved.
+   * @param targetDir The workspace-relative folder to move it into. `""` is root.
+   */
+  const move = useCallback(async (path: string, targetDir: string) => {
+    const source = normalizePath(path);
+    const target = normalizePath(targetDir);
+    try {
+      await invoke("panel_move_file", { relative: source, target });
+      const from = parentOf(source);
+      if (from === target) { await load(target); return; }
+      await load(from);
+      await load(target);
+    } catch (reason) {
+      throw new Error(String(reason));
+    }
+  }, [load]);
 
   return { 
     root, 
@@ -153,8 +222,11 @@ export function useFileTree() {
     isExpanded, 
     childrenOf, 
     toggle, 
+    expand,
     collapseAll, 
     refresh,
+    create,
+    move,
     rename,
     delete: del,
   };

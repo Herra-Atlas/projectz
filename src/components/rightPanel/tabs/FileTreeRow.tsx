@@ -1,6 +1,9 @@
-import { ChevronRight, Edit, Eye, FileCode2, FileText, Folder, Trash2 } from "lucide-react";
+import { ChevronRight, FileCode2, FileText, Folder } from "lucide-react";
+import type { MouseEvent } from "react";
+import { CreateNameRow, default as NameInput } from "./NameInput";
+import type { FileEdit } from "../../../features/rightPanel/fileEdit";
+import type { TreeDrag } from "../../../features/rightPanel/fileTreeDrag";
 import type { TreeEntry } from "../../../features/rightPanel/useFileTree";
-import { useEffect, useState } from "react";
 
 type FileTreeRowProps = {
   entry: TreeEntry;
@@ -10,9 +13,14 @@ type FileTreeRowProps = {
   loadingPath: string | null;
   onToggle: (path: string) => void;
   onOpenFile: (entry: TreeEntry) => void;
-  onNotify?: (tone: "success" | "error", message: string) => void;
-  onRename: (path: string, newName: string) => Promise<void>;
-  onDelete: (path: string) => Promise<void>;
+  /** Right-click, raised to the tab so one menu serves the whole tree. */
+  onContextMenu: (entry: TreeEntry, event: MouseEvent) => void;
+  /** The one in-progress rename or create, or null when nothing is being named. */
+  edit: FileEdit | null;
+  onCommitEdit: (name: string) => void;
+  onCancelEdit: () => void;
+  /** Drag state and the one handler that starts a drag, shared by every row. */
+  drag: TreeDrag;
 };
 
 /** Icon by file extension, falling back to a generic page for anything unknown. */
@@ -24,66 +32,30 @@ function FileIcon({ name }: { name: string }) {
     : <FileText size={14} className="shrink-0 text-[var(--muted)]" />;
 }
 
-export default function FileTreeRow({ entry, depth, isExpanded, childrenOf, loadingPath, onToggle, onOpenFile, onNotify, onRename, onDelete }: FileTreeRowProps) {
+/**
+ * One row of the workspace tree, and (when open) its subtree.
+ *
+ * The row owns no menu of its own: a right-click is reported up to `FilesTab`,
+ * which draws one shared menu at the pointer. A drag is the same story -- the row
+ * marks itself with `data-entry-path` and reports the press; `FilesTab` decides
+ * what the pointer is over and what a drop means.
+ */
+export default function FileTreeRow({ entry, depth, isExpanded, childrenOf, loadingPath, onToggle, onOpenFile, onContextMenu, edit, onCommitEdit, onCancelEdit, drag }: FileTreeRowProps) {
   const expanded = entry.isDir && isExpanded(entry.path);
   const children = expanded ? childrenOf(entry.path) : undefined;
   const isLoading = loadingPath === entry.path;
-  const [anchorPoint, setAnchorPoint] = useState<{x: number, y: number} | null>(null);
+  const renaming = edit?.kind === "rename" && edit.path === entry.path;
+  // A create lands as the first child of its parent, so the row that *is* that
+  // parent draws the field -- which is also why the parent has to be expanded.
+  const creatingHere = edit?.kind === "create" && edit.parent === entry.path;
+  const dragging = drag.source === entry.path;
+  // A folder lights up while a draggable is over it, but only when the drop would
+  // actually be accepted; an unreachable target must not look like a live one.
+  const dropping = entry.isDir && drag.target === entry.path;
 
-  // Close context menu when clicking outside or pressing Escape
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (!anchorPoint) return;
-      const target = event.target as HTMLElement;
-      // Don't close if clicking on the menu itself or its children
-      if (target.closest('[data-context-menu]')) return;
-      setAnchorPoint(null);
-    };
-
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && anchorPoint) {
-        setAnchorPoint(null);
-      }
-    };
-
-    document.addEventListener("mousedown", handleClickOutside);
-    document.addEventListener("keydown", handleEscape);
-    return () => {
-      document.removeEventListener("mousedown", handleClickOutside);
-      document.removeEventListener("keydown", handleEscape);
-    };
-  }, [anchorPoint]);
-
-  const handleView = () => {
-    onOpenFile(entry);
-  };
-
-  const handleRename = async () => {
-    const newName = window.prompt("Enter new name:", entry.name);
-    if (newName === null) return;
-    if (!newName.trim()) {
-      onNotify?.("error", "Name cannot be empty");
-      return;
-    }
-    if (newName === entry.name) return;
-    try {
-      await onRename(entry.path, newName);
-    } catch (error) {
-      onNotify?.("error", `Failed to rename: ${(error as Error).message}`);
-    }
-    setAnchorPoint(null);
-  };
-
-  const handleDelete = async () => {
-    const confirmed = window.confirm(`Delete "${entry.name}"?`);
-    if (!confirmed) return;
-    try {
-      await onDelete(entry.path);
-    } catch (error) {
-      onNotify?.("error", `Failed to delete: ${(error as Error).message}`);
-    }
-    setAnchorPoint(null);
-  };
+  const icon = entry.isDir
+    ? <Folder size={14} className="shrink-0 text-[var(--muted)]" />
+    : <FileIcon name={entry.name} />;
 
   return (
     <>
@@ -92,11 +64,16 @@ export default function FileTreeRow({ entry, depth, isExpanded, childrenOf, load
         // make the indent a layout change on every expand and would put a border
         // or background on the level rather than the row.
         style={{ paddingLeft: `${depth * 12 + 8}px` }}
-        className="group flex min-h-7 w-full items-center gap-1 rounded-md pr-2 text-[13px] text-[var(--text)] transition-colors hover:bg-[var(--raised)]"
-        onContextMenu={(event) => {
-          event.preventDefault(); // Prevent browser context menu
-          setAnchorPoint({ x: event.clientX, y: event.clientY });
-        }}
+        // The drag reads these two marks back off the element under the pointer;
+        // `data-entry-dir` is present only on a folder, which is the only row a
+        // drop may land on.
+        data-entry-path={entry.path}
+        data-entry-dir={entry.isDir ? "true" : undefined}
+        className={`group flex min-h-7 w-full items-center gap-1 rounded-md pr-2 text-[13px] text-[var(--text)] transition-[background-color,opacity] hover:bg-[var(--raised)] ${dragging ? "opacity-40" : ""} ${dropping ? "bg-[color-mix(in_srgb,var(--accent)_12%,transparent)] ring-1 ring-inset ring-[var(--accent)]" : ""}`}
+        onContextMenu={(event) => onContextMenu(entry, event)}
+        // Not draggable while its name is being typed: a press in the field is for
+        // editing, and the hook also ignores presses that land in an input.
+        onPointerDown={renaming ? undefined : (event) => drag.onPointerDown(entry, event)}
       >
         {entry.isDir ? (
           <button
@@ -115,21 +92,35 @@ export default function FileTreeRow({ entry, depth, isExpanded, childrenOf, load
           <span className="size-4 shrink-0" />
         )}
 
-        <button
-          type="button"
-          onClick={() => (entry.isDir ? onToggle(entry.path) : onOpenFile(entry))}
-          className="flex min-w-0 flex-1 items-center gap-1.5 py-1 text-left focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--accent)]"
-        >
-          {entry.isDir
-            ? <Folder size={14} className="shrink-0 text-[var(--muted)]" />
-            : <FileIcon name={entry.name} />}
-          <span className="truncate">{entry.name}</span>
-        </button>
+        {renaming ? (
+          // The name button is replaced in place, so the row keeps its caret,
+          // indent and metrics and only the label becomes editable.
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 py-1">
+            {icon}
+            <NameInput initialValue={edit.name} selectStem={!entry.isDir} onCommit={onCommitEdit} onCancel={onCancelEdit} />
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => (entry.isDir ? onToggle(entry.path) : onOpenFile(entry))}
+            className="flex min-w-0 flex-1 items-center gap-1.5 py-1 text-left focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--accent)]"
+          >
+            {icon}
+            <span className="truncate">{entry.name}</span>
+          </button>
+        )}
 
         {/* A spinner on the row being fetched, rather than a panel-wide one: it
             says which folder is loading, which is the only useful fact. */}
         {isLoading && <span className="size-3 shrink-0 animate-spin rounded-full border-2 border-[var(--line)] border-t-[var(--accent)]" />}
       </div>
+
+      {/* The create field sits above the children so the new row appears where
+          it will land, and only while the folder is open -- the same reason a
+          collapsed subtree is not drawn at all. */}
+      {expanded && creatingHere && (
+        <CreateNameRow depth={depth + 1} isDir={edit.isDir} onCommit={onCommitEdit} onCancel={onCancelEdit} />
+      )}
 
       {/* Children render below their folder only while it is open. A collapsed
           subtree is not drawn at all, so a deep tree costs only what is visible. */}
@@ -143,52 +134,13 @@ export default function FileTreeRow({ entry, depth, isExpanded, childrenOf, load
           loadingPath={loadingPath}
           onToggle={onToggle}
           onOpenFile={onOpenFile}
-          onNotify={onNotify}
-          onRename={onRename}
-          onDelete={onDelete}
+          onContextMenu={onContextMenu}
+          edit={edit}
+          onCommitEdit={onCommitEdit}
+          onCancelEdit={onCancelEdit}
+          drag={drag}
         />
       ))}
-
-      {/* Context menu */}
-      {anchorPoint && (
-        <div
-          data-context-menu
-          className="fixed z-50"
-          style={{
-            left: Math.min(anchorPoint.x, window.innerWidth - 150), // prevent off-screen right
-            top: Math.min(anchorPoint.y, window.innerHeight - 100), // prevent off-screen bottom
-          }}
-        >
-          <div className="relative rounded-md shadow-lg bg-[var(--page)] ring-1 ring-black ring-opacity-5 p-1">
-            {/* View button */}
-            <div
-              className="flex items-center px-2 py-1 text-sm text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] cursor-default"
-              onClick={handleView}
-            >
-              <Eye size={14} className="shrink-0 mr-2" />
-              <span>View</span>
-            </div>
-            
-            {/* Rename button */}
-            <div
-              className="flex items-center px-2 py-1 text-sm text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] cursor-default"
-              onClick={handleRename}
-            >
-              <Edit size={14} className="shrink-0 mr-2" />
-              <span>Rename</span>
-            </div>
-            
-            {/* Delete button */}
-            <div
-              className="flex items-center px-2 py-1 text-sm text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] cursor-default"
-              onClick={handleDelete}
-            >
-              <Trash2 size={14} className="shrink-0 mr-2" />
-              <span>Delete</span>
-            </div>
-          </div>
-        </div>
-      )}
     </>
   );
 }

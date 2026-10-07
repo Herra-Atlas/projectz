@@ -1,8 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { Search } from "lucide-react";
 import FileTreeRow from "./FileTreeRow";
 import FilePreview from "./FilePreview";
+import { CreateNameRow } from "./NameInput";
+import ContextMenu from "../menu/ContextMenu";
+import { buildFileMenuItems } from "../menu/fileMenu";
 import { useFileTree, type TreeEntry } from "../../../features/rightPanel/useFileTree";
+import type { FileEdit } from "../../../features/rightPanel/fileEdit";
+import { useTreeDrag } from "../../../features/rightPanel/fileTreeDrag";
 import { workspaceLabel } from "../../../features/workspace/useWorkspaces";
 
 /**
@@ -12,6 +17,10 @@ import { workspaceLabel } from "../../../features/workspace/useWorkspaces";
  * visible and they share the same tree state -- a preview that forgot to render
  * its "back" row would strand the user in a file with no way to the tree.
  * Everything expensive is in `useFileTree` and the preview is its own file.
+ *
+ * The right-click menu and the drag are the two pieces of tree state that are
+ * *not* per row: both are owned here and shared by every row, so a create or a
+ * drop knows which folder it was aimed at rather than only the row it started on.
  */
 
 type FilesTabProps = {
@@ -47,7 +56,12 @@ type FilesTabProps = {
 export default function FilesTab({ workspace, requestedPath, onRequestHandled, onPreviewInBrowser, onNotify }: FilesTabProps) {
   const [preview, setPreview] = useState<TreeEntry | null>(null);
   const [query, setQuery] = useState("");
-  const { root, error, loadingPath, isExpanded, childrenOf, toggle, refresh, rename, delete: deleteFile } = useFileTree();
+  const { root, error, loadingPath, isExpanded, childrenOf, toggle, refresh, expand, create, move, rename, delete: deleteFile } = useFileTree();
+
+  /** The right-click being answered, or null. `target: null` is the blank space. */
+  const [menu, setMenu] = useState<{ point: { x: number; y: number }; target: TreeEntry | null } | null>(null);
+  /** The one rename or create field currently open, or null. */
+  const [edit, setEdit] = useState<FileEdit | null>(null);
 
   /**
    * Shows a file asked for from outside the panel.
@@ -93,12 +107,111 @@ export default function FilesTab({ workspace, requestedPath, onRequestHandled, o
       if (previous === workspace) return;
       setPreview(null);
       setQuery("");
+      setEdit(null);
+      setMenu(null);
     }
     // First run: read the tree, but leave a requested file alone. It is on its way
     // in from the click that opened this panel, and clearing it here is what made
     // the first click on a changed file look lost.
     void refresh();
   }, [workspace, refresh]);
+
+  const closeMenu = useCallback(() => setMenu(null), []);
+
+  // A row's right-click is answered here, and stopped from bubbling so the blank
+  // space underneath does not claim it as its own.
+  const openRowMenu = useCallback((entry: TreeEntry, event: MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setMenu({ point: { x: event.clientX, y: event.clientY }, target: entry });
+  }, []);
+
+  const openBlankMenu = useCallback((event: MouseEvent) => {
+    event.preventDefault();
+    setMenu({ point: { x: event.clientX, y: event.clientY }, target: null });
+  }, []);
+
+  const startRename = useCallback((entry: TreeEntry) => {
+    setEdit({ kind: "rename", path: entry.path, name: entry.name, isDir: entry.isDir });
+  }, []);
+
+  const startCreate = useCallback(async (parent: TreeEntry | null, isDir: boolean) => {
+    const parentPath = parent?.path ?? "";
+    // A folder has to be open for the new row to land visibly inside it. The
+    // root is always drawn, so only a real folder needs expanding.
+    if (parentPath) await expand(parentPath);
+    setEdit({ kind: "create", parent: parentPath, isDir });
+  }, [expand]);
+
+  const remove = useCallback(async (entry: TreeEntry) => {
+    const described = entry.isDir ? `folder "${entry.name}" and everything in it` : `"${entry.name}"`;
+    if (!window.confirm(`Delete ${described}?`)) return;
+    try {
+      await deleteFile(entry.path);
+    } catch (reason) {
+      onNotify?.("error", `Could not delete ${entry.name}: ${(reason as Error).message}`);
+    }
+  }, [deleteFile, onNotify]);
+
+  /**
+   * Applies the open field.
+   *
+   * On failure the field is left open: the name is the thing that was wrong, and
+   * making the user reopen the menu to retype it would be the wrong lesson.
+   */
+  const commitEdit = useCallback(async (name: string) => {
+    if (!edit) return;
+    try {
+      if (edit.kind === "rename") {
+        if (name === edit.name) { setEdit(null); return; }
+        await rename(edit.path, name);
+      } else {
+        await create(edit.parent, name, edit.isDir);
+      }
+      setEdit(null);
+    } catch (reason) {
+      onNotify?.("error", (reason as Error).message);
+    }
+  }, [edit, rename, create, onNotify]);
+
+  const cancelEdit = useCallback(() => setEdit(null), []);
+
+  /**
+   * Moves a dragged entry and re-reads both folders. Failures -- a name already
+   * taken, a folder into itself -- reach the notification stack rather than being
+   * swallowed, because a row that just stays put reads as a bug.
+   */
+  const dropTo = useCallback(async (source: string, targetDir: string) => {
+    try {
+      await move(source, targetDir);
+    } catch (reason) {
+      onNotify?.("error", (reason as Error).message);
+    }
+  }, [move, onNotify]);
+
+  // One drag state for the whole tree, handed to every row: which row is carried,
+  // which folder it is over, and the press that begins it. The validity rules and
+  // the pointer tracking live in the hook, so this file stays about the tree.
+  const treeDrag = useTreeDrag((source, targetDir) => void dropTo(source, targetDir));
+
+  // A click that is the tail of a drag must not also open the file it ended on.
+  const openFile = useCallback((entry: TreeEntry) => {
+    if (treeDrag.shouldIgnoreClick()) return;
+    setPreview(entry);
+  }, [treeDrag]);
+
+  const toggleEntry = useCallback((path: string) => {
+    if (treeDrag.shouldIgnoreClick()) return;
+    void toggle(path);
+  }, [treeDrag, toggle]);
+
+  const items = useMemo(() => buildFileMenuItems(menu?.target ?? null, {
+    onView: setPreview,
+    onRename: startRename,
+    onDelete: (entry) => void remove(entry),
+    onCreateFile: (parent) => void startCreate(parent, false),
+    onCreateFolder: (parent) => void startCreate(parent, true),
+  }), [menu, startRename, remove, startCreate]);
 
   // A file opened under a folder that has since changed may no longer exist, so
   // returning to the tree is the only way to see what is there now.
@@ -136,12 +249,23 @@ export default function FilesTab({ workspace, requestedPath, onRequestHandled, o
         />
       </div>
 
+      {/* The whole column answers a right-click on its blank space with the root's
+          creates, and is the drop target that means "move to the root". The mark
+          is what the drag reads under the pointer; there are no drop handlers to
+          wire, because the pointer tracking is global in `useTreeDrag`. */}
       <div
-        className="min-h-0 flex-1 overflow-y-auto py-1"
+        data-drop-root
+        className={`min-h-0 flex-1 overflow-y-auto py-1 ${treeDrag.target === "" ? "bg-[color-mix(in_srgb,var(--accent)_6%,transparent)]" : ""}`}
+        onContextMenu={openBlankMenu}
       >
         {error && <p className="px-3 py-2 text-xs text-[var(--danger)]">{error}</p>}
         {filtered === null && !error && <p className="px-3 py-2 text-xs text-[var(--quiet)]">Reading…</p>}
         {filtered?.length === 0 && <p className="px-3 py-2 text-xs text-[var(--quiet)]">Nothing here.</p>}
+        {/* A create aimed at the root has no row to hang off, so it is drawn as
+            the first thing in the list. */}
+        {edit?.kind === "create" && edit.parent === "" && (
+          <CreateNameRow depth={0} isDir={edit.isDir} onCommit={commitEdit} onCancel={cancelEdit} />
+        )}
         {filtered?.map((entry) => (
             <FileTreeRow
               key={entry.path}
@@ -150,14 +274,25 @@ export default function FilesTab({ workspace, requestedPath, onRequestHandled, o
               isExpanded={isExpanded}
               childrenOf={childrenOf}
               loadingPath={loadingPath}
-              onToggle={(path) => void toggle(path)}
-              onOpenFile={setPreview}
-              onNotify={onNotify}
-              onRename={rename}
-              onDelete={deleteFile}
+              onToggle={toggleEntry}
+              onOpenFile={openFile}
+              onContextMenu={openRowMenu}
+              edit={edit}
+              onCommitEdit={commitEdit}
+              onCancelEdit={cancelEdit}
+              drag={treeDrag}
             />
           ))}
       </div>
+
+      {menu && (
+        <ContextMenu
+          point={menu.point}
+          label={menu.target ? `${menu.target.name} actions` : "File actions"}
+          items={items}
+          onClose={closeMenu}
+        />
+      )}
     </div>
   );
 }

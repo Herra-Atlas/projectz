@@ -197,6 +197,112 @@ fn write_in(root: &Path, relative: &str, content: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Creating an empty file inside a folder of the panel.
+///
+/// The user's own create path, kept beside the panel's other file commands for
+/// the same reason the write is: no `ToolSpec`, no effect class, and never past
+/// the permission gate. It shares the boundary -- `resolve_within` -- so there is
+/// one containment rule for everything the panel writes.
+#[tauri::command]
+pub fn panel_create_file(relative: String, name: String) -> Result<(), String> {
+    let root = require_workspace()?;
+    create_in(&root, &relative, &name, false)
+}
+
+/// Creating a folder inside a folder of the panel. See [`panel_create_file`].
+#[tauri::command]
+pub fn panel_create_folder(relative: String, name: String) -> Result<(), String> {
+    let root = require_workspace()?;
+    create_in(&root, &relative, &name, true)
+}
+
+/// Creating one entry inside `parent` (the empty string is the workspace root).
+///
+/// Takes the root separately so the tests can point it at a temporary folder
+/// without touching the process-global, the same split as [`list_in`] and
+/// [`write_in`]. `name` is a *name* and not a path: rejecting separators and
+/// `.`/`..` up front means the destination can only ever sit beside its parent,
+/// so the resolve below has nothing surprising to catch.
+fn create_in(root: &Path, parent: &str, name: &str, is_dir: bool) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("A name is required".to_string());
+    }
+    if name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+        return Err(format!("{name} is not a valid name"));
+    }
+
+    let parent_resolved = resolve_within(root, if parent.is_empty() { "." } else { parent })?;
+    if !parent_resolved.is_dir() {
+        return Err(format!("{parent} is not a folder"));
+    }
+
+    let dest_relative = join_relative(parent, name);
+    let dest = resolve_within(root, &dest_relative)?;
+    if dest.exists() {
+        return Err(format!("{name} already exists"));
+    }
+
+    if is_dir {
+        std::fs::create_dir(&dest)
+            .map_err(|error| format!("Could not create folder {name}: {error}"))?;
+    } else {
+        std::fs::write(&dest, b"")
+            .map_err(|error| format!("Could not create file {name}: {error}"))?;
+    }
+    Ok(())
+}
+
+/// Moving a file or folder into a different folder of the panel.
+///
+/// The drag-and-drop path, kept beside the panel's other file commands for the
+/// same reason the create is: no `ToolSpec`, no effect class, and never past the
+/// permission gate. It shares the boundary -- `resolve_within` -- so a drop can
+/// only ever land inside the workspace.
+#[tauri::command]
+pub fn panel_move_file(relative: String, target: String) -> Result<(), String> {
+    let root = require_workspace()?;
+    move_in(&root, &relative, &target)
+}
+
+/// Moving the entry at `source` into the folder `target` (the empty string is
+/// the workspace root).
+///
+/// Takes the root separately so the tests can point it at a temporary folder
+/// without touching the process-global, the same split as [`list_in`].
+fn move_in(root: &Path, source: &str, target: &str) -> Result<(), String> {
+    if source.is_empty() || source == "." {
+        return Err("The workspace root cannot be moved".to_string());
+    }
+
+    let source_resolved = resolve_within(root, source)?;
+    if !source_resolved.exists() {
+        return Err(format!("{source} no longer exists"));
+    }
+
+    let target_resolved = resolve_within(root, if target.is_empty() { "." } else { target })?;
+    if !target_resolved.is_dir() {
+        return Err(format!("{target} is not a folder"));
+    }
+
+    // Dropping a folder onto itself or into one of its own descendants would move
+    // it inside itself. `fs::rename` does refuse this, but with a message that
+    // does not say why; naming the rule here gives the honest error.
+    if target == source || target.starts_with(&format!("{source}/")) {
+        return Err("A folder cannot be moved into itself".to_string());
+    }
+
+    let name = source.rsplit('/').next().unwrap_or(source);
+    let dest_relative = join_relative(target, name);
+    let dest_resolved = resolve_within(root, &dest_relative)?;
+    if dest_resolved.exists() {
+        return Err(format!("{name} already exists there"));
+    }
+
+    std::fs::rename(&source_resolved, &dest_resolved)
+        .map_err(|error| format!("Could not move {name}: {error}"))
+}
+
 /// Renaming a file or directory in the panel.
 ///
 /// The user's own rename path, kept apart from `ai/tools/` for the same reason the
@@ -578,6 +684,121 @@ mod tests {
             error.contains("outside") || error.contains(".."),
             "the escape was not named in the error: {error}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A new file lands beside its parent, empty, and shows up in that folder's
+    /// listing -- the create the user's next refresh would reveal.
+    #[test]
+    fn a_created_file_appears_in_its_folder() {
+        let root = temp_dir("panel-create-file");
+        create_in(&root, "", "notes.txt", false).expect("create");
+
+        assert!(root.join("notes.txt").is_file(), "the file was not written");
+        let entries = list_in(&root, "").expect("list");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "notes.txt");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A new folder is created inside the folder that was named, not at the root.
+    #[test]
+    fn a_created_folder_lands_inside_its_parent() {
+        let root = temp_dir("panel-create-folder");
+        std::fs::create_dir_all(root.join("src")).expect("dir");
+
+        create_in(&root, "src", "components", true).expect("create");
+
+        assert!(root.join("src/components").is_dir(), "the folder was not created");
+        assert!(!root.join("components").exists(), "the folder landed at the root");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A name is a name: a separator would walk the new entry somewhere the user
+    /// did not point at, so it is refused before anything touches the disk.
+    #[test]
+    fn a_name_with_a_separator_is_refused() {
+        let root = temp_dir("panel-create-separator");
+        write(&root, "ok.txt");
+
+        let error = create_in(&root, "", "sub/file.txt", false).expect_err("refused");
+        assert!(error.contains("not a valid name"), "unexpected error: {error}");
+        assert!(!root.join("sub").exists(), "a folder was created anyway");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Creating over an existing entry is refused rather than overwriting it --
+    /// the create path must never be a way to lose a file's contents.
+    #[test]
+    fn creating_over_an_existing_name_is_refused() {
+        let root = temp_dir("panel-create-existing");
+        write(&root, "a.txt");
+
+        let error = create_in(&root, "", "a.txt", false).expect_err("refused");
+        assert!(error.contains("already exists"), "unexpected error: {error}");
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).expect("read"), "x");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An empty name has nothing to create and is refused with a plain message.
+    #[test]
+    fn an_empty_name_is_refused() {
+        let root = temp_dir("panel-create-empty");
+        let error = create_in(&root, "", "   ", true).expect_err("refused");
+        assert!(error.contains("name is required"), "unexpected error: {error}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A moved entry leaves its old folder and appears in the new one, keeping
+    /// its name and contents.
+    #[test]
+    fn a_moved_file_lands_in_the_target_folder() {
+        let root = temp_dir("panel-move-file");
+        write(&root, "note.txt");
+        std::fs::create_dir_all(root.join("docs")).expect("dir");
+
+        move_in(&root, "note.txt", "docs").expect("move");
+
+        assert!(!root.join("note.txt").exists(), "the source was left behind");
+        assert!(root.join("docs/note.txt").is_file(), "the file did not arrive");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Dropping a folder onto itself is refused rather than half-done. `fs::rename`
+    /// would also fail, but the point is that the rule is stated, not stumbled into.
+    #[test]
+    fn a_folder_cannot_be_moved_into_itself() {
+        let root = temp_dir("panel-move-self");
+        std::fs::create_dir_all(root.join("src")).expect("dir");
+
+        let error = move_in(&root, "src", "src").expect_err("refused");
+        assert!(error.contains("into itself"), "unexpected error: {error}");
+        assert!(root.join("src").is_dir(), "the folder was disturbed");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A folder dropped into one of its own descendants would swallow itself, so
+    /// that is refused too -- the case `fs::rename` reports least clearly.
+    #[test]
+    fn a_folder_cannot_be_moved_into_its_descendant() {
+        let root = temp_dir("panel-move-descendant");
+        std::fs::create_dir_all(root.join("src/app")).expect("dir");
+
+        let error = move_in(&root, "src", "src/app").expect_err("refused");
+        assert!(error.contains("into itself"), "unexpected error: {error}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A move onto a name that already exists is refused, so a drag can never
+    /// silently overwrite the file it lands on.
+    #[test]
+    fn moving_onto_an_existing_name_is_refused() {
+        let root = temp_dir("panel-move-existing");
+        write(&root, "note.txt");
+        write(&root, "docs/note.txt");
+
+        let error = move_in(&root, "note.txt", "docs").expect_err("refused");
+        assert!(error.contains("already exists"), "unexpected error: {error}");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -357,7 +357,7 @@ export default function RightPanel({ open, width, workspace, loadedModelId = nul
               // webview, rather than hiding it and leaving its page alive.
               <BrowserTab mounted={open} initialUrl={browserRequest?.url} requestKey={browserRequest?.nonce} onRequestHandled={() => setBrowserRequest(null)} onLastTabClosed={handleLastBrowserTabClosed} onNotify={onNotify} />
             ) : (
-              <RightPanelEmpty onOpen={openView} />
+              <RightPanelEmpty onOpen={openView} hasWorkspace={Boolean(workspace)} />
             )}
           </div>
         </div>
