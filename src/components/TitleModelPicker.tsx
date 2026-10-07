@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChevronDown, Cpu, Plus, Search } from "lucide-react";
 import { MAX_TITLE_MODELS } from "../features/models/usePreferences";
 import type { ModelGroup } from "../features/models/useModelRegistry";
 import type { LocalModel, ModelSelection } from "../features/models/types";
+import { selectionId, useModelOptions } from "./ModelSelectionPicker";
 
 type TitleModelPickerProps = {
   /** Models in priority order. The first is tried first. */
@@ -11,9 +12,6 @@ type TitleModelPickerProps = {
   groups: ModelGroup[];
   localModels: LocalModel[];
 };
-
-const selectionId = (selection: ModelSelection) =>
-  selection.localModelId ? `local:${selection.localModelId}` : `${selection.endpointId ?? ""}:${selection.model ?? ""}`;
 
 /**
  * Single-row control for the models that name new conversations.
@@ -40,20 +38,7 @@ export default function TitleModelPicker({ models, onChange, groups, localModels
     };
   }, []);
 
-  const options = useMemo(() => [
-    ...groups.flatMap((group) => group.models.map((model) => ({
-      selection: { endpointId: group.endpoint.id, model },
-      label: model,
-      group: group.endpoint.name,
-      local: false,
-    }))),
-    ...localModels.map((model) => ({
-      selection: { localModelId: model.id },
-      label: model.name,
-      group: "Local",
-      local: true,
-    })),
-  ], [groups, localModels]);
+  const options = useModelOptions(groups, localModels);
 
   const normalized = query.trim().toLowerCase();
   const filtered = options.filter((option) => `${option.label} ${option.group}`.toLowerCase().includes(normalized));

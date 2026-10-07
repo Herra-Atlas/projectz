@@ -2,6 +2,7 @@ pub mod local;
 pub mod prompts;
 pub mod remote;
 pub mod runtime;
+pub mod subagent;
 pub mod tools;
 pub mod types;
 

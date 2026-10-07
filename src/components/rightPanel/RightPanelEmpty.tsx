@@ -1,4 +1,4 @@
-import { FileText, Globe2, Terminal } from "lucide-react";
+import { Bot, FileText, Globe2, Terminal } from "lucide-react";
 import type { PanelViewId } from "../../features/rightPanel/usePanelViews";
 
 /**
@@ -35,6 +35,12 @@ const VIEWS: { id: PanelViewId; label: string; description: string; icon: React.
     description: "Preview your app or any page",
     icon: <Globe2 size={16} className="shrink-0 text-[var(--muted)]" />,
   },
+  {
+    id: "subagents",
+    label: "Sub agents",
+    description: "Watch the agents this chat spawned",
+    icon: <Bot size={16} className="shrink-0 text-[var(--muted)]" />,
+  },
 ];
 
 type RightPanelEmptyProps = {
@@ -49,7 +55,7 @@ type RightPanelEmptyProps = {
   hasWorkspace: boolean;
 };
 
-const AVAILABLE: PanelViewId[] = ["files", "browser", "terminal"];
+const AVAILABLE: PanelViewId[] = ["files", "browser", "terminal", "subagents"];
 
 export default function RightPanelEmpty({ onOpen, hasWorkspace }: RightPanelEmptyProps) {
   return (

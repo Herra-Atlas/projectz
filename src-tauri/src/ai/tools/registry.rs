@@ -16,6 +16,7 @@
 use serde_json::Value;
 
 use super::output;
+use super::run::{RunHandle, SubAgentNotice};
 
 /// One tool as advertised to the model.
 #[derive(Clone, Debug)]
@@ -74,6 +75,12 @@ pub struct ToolContext {
     /// session, which is what keeps a tool unable to answer one conversation from
     /// another's rows.
     pub database: Option<std::sync::Arc<crate::database::Database>>,
+    /// The run this call belongs to, for a tool that has to start work of its own.
+    ///
+    /// Only `spawn_agent` reads it today. `None` means the call has no run behind
+    /// it — a tool's own unit test — and such a tool reports a clean error rather
+    /// than reaching for a model it does not have. See [`super::run::RunHandle`].
+    pub run: Option<std::sync::Arc<RunHandle>>,
 }
 
 /// Sinks a tool's structured output back to the running session.
@@ -92,6 +99,7 @@ pub struct ToolContext {
 pub struct Sink {
     searches: std::sync::Arc<std::sync::Mutex<Vec<crate::websearch::WebSearchOutput>>>,
     diffs: std::sync::Arc<std::sync::Mutex<Vec<super::diff::Diff>>>,
+    subagents: std::sync::Arc<std::sync::Mutex<Vec<SubAgentNotice>>>,
 }
 
 impl ToolContext {
@@ -119,6 +127,17 @@ impl ToolContext {
             diffs.push(diff);
         }
     }
+
+    /// Queues a finished sub-agent for the run to announce.
+    ///
+    /// The panel reads the transcript from the database; this only tells it that
+    /// there is something new to read, so a sub-agent that finished while its tab
+    /// was closed is not invisible until the next launch.
+    pub fn report_subagent(&self, notice: SubAgentNotice) {
+        if let Ok(mut subagents) = self.sink.subagents.lock() {
+            subagents.push(notice);
+        }
+    }
 }
 
 impl Sink {
@@ -138,6 +157,14 @@ impl Sink {
         self.diffs
             .lock()
             .map(|mut diffs| std::mem::take(&mut *diffs))
+            .unwrap_or_default()
+    }
+
+    /// Takes the sub-agents that finished since the last drain.
+    pub fn drain_subagents(&self) -> Vec<SubAgentNotice> {
+        self.subagents
+            .lock()
+            .map(|mut subagents| std::mem::take(&mut *subagents))
             .unwrap_or_default()
     }
 }
@@ -456,6 +483,7 @@ mod tests {
             cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sink: Sink::default(),
             database: None,
+            run: None,
         };
         match tokio::runtime::Builder::new_current_thread()
             .build()

@@ -118,6 +118,8 @@ pub fn run() {
             commands::database_import_frontend,
             commands::database_list_sessions,
             commands::database_list_session_headers,
+            commands::database_list_subagents,
+            commands::ai_running_subagents,
             commands::database_list_session_messages,
             commands::database_save_session,
             commands::database_delete_session,

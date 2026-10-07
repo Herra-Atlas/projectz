@@ -32,6 +32,21 @@ export function parentOf(path: string): string {
   return slash === -1 ? "" : path.slice(0, slash);
 }
 
+/**
+ * The absolute, on-disk path of a workspace-relative entry.
+ *
+ * Joined with the separator the workspace root already uses, so the result is
+ * what the OS would accept -- `\` on Windows, `/` elsewhere -- rather than a
+ * web-style path the user has to translate before pasting it anywhere useful.
+ * The relative side is always forward-slashed (that is how the tree carries it),
+ * so it is normalised on the way in.
+ */
+export function absolutePath(root: string, relative: string): string {
+  const separator = root.includes("\\") ? "\\" : "/";
+  const base = root.replace(/[\\/]+$/, "");
+  return `${base}${separator}${relative.split("/").join(separator)}`;
+}
+
 /** Listing one folder. `path` is `""` for the workspace root. */
 export async function listFolder(relative: string): Promise<TreeEntry[]> {
   return invoke<TreeEntry[]>("panel_fs_list", { relative });

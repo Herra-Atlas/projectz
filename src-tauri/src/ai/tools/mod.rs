@@ -9,6 +9,7 @@
 //! round trip per tool call would add latency to every step of an agent loop
 //! while putting the permission boundary somewhere it could be bypassed.
 
+pub mod agent;
 mod approval;
 mod cache;
 mod diff;
@@ -17,6 +18,7 @@ mod file;
 mod output;
 mod policy;
 mod registry;
+mod run;
 mod search;
 pub mod skills;
 mod terminal;
@@ -27,6 +29,7 @@ pub use approval::{Approval, ApprovalGate, ApprovalRequest};
 pub use cache::ToolCache;
 pub use policy::{Decision, PermissionMode};
 pub use registry::{Effect, Sink, ToolContext, ToolRegistry, ToolSpec};
+pub use run::{RunHandle, SubAgentNotice};
 pub use ui::ToolSummary;
 
 /// The path boundary, for the file tree in `panel/`.
@@ -80,7 +83,27 @@ pub enum ToolMode {
 /// The result is sorted by name inside `ToolRegistry`, so the order tools are
 /// added here cannot affect the cached request prefix.
 pub fn registry_for(mode: ToolMode, web_search_enabled: bool) -> ToolRegistry {
+    registry_for_with(mode, web_search_enabled, true)
+}
+
+/// The same set, with sub-agent spawning optionally withheld.
+///
+/// A sub-agent is built with `allow_subagents = false`, which is what keeps
+/// delegation one level deep: a spawned agent has every workspace tool its parent
+/// has *except* the one that would let it spawn again. One flag rather than a
+/// depth counter because a depth of more than one was never wanted, and a counter
+/// invites a limit that is only ever discovered by exceeding it.
+pub fn registry_for_with(
+    mode: ToolMode,
+    web_search_enabled: bool,
+    allow_subagents: bool,
+) -> ToolRegistry {
     let mut registry = ToolRegistry::for_mode(mode);
+    // Agent-only: delegation is a tool the model reaches for, so it has no place
+    // in a Chat conversation that has no tools at all.
+    if allow_subagents && mode == ToolMode::Agent {
+        registry.add(agent::SPAWN_AGENT);
+    }
     if web_search_enabled {
         registry.add(websearch::spec());
         // Fetching a specific URL only makes sense once searching is on: a model
@@ -167,10 +190,37 @@ mod tests {
                 "search_web",
                 "skill_manage",
                 "skill_read",
+                "spawn_agent",
                 "web_fetch",
                 "write_file"
             ]
         );
+    }
+
+    /// A sub-agent gets every tool its parent has except the one that would let it
+    /// delegate again. Delegation is one level deep by construction, not by a depth
+    /// counter that has to be checked at runtime.
+    #[test]
+    fn a_sub_agent_cannot_spawn_another_sub_agent() {
+        let names = registry_for_with(ToolMode::Agent, true, false).names();
+        assert!(!names.contains(&"spawn_agent"), "{names:?}");
+        // Everything else it needs to do work is still there.
+        for tool in ["read_file", "write_file", "run_terminal", "search_web"] {
+            assert!(names.contains(&tool), "{tool} missing: {names:?}");
+        }
+    }
+
+    /// The gap between a parent's tool set and a sub-agent's is exactly one tool,
+    /// so a future addition to the agent tools is not silently withheld.
+    #[test]
+    fn the_only_difference_is_the_spawn_tool() {
+        let parent = registry_for_with(ToolMode::Agent, true, true).names();
+        let child = registry_for_with(ToolMode::Agent, true, false).names();
+        let difference = parent
+            .into_iter()
+            .filter(|name| !child.contains(name))
+            .collect::<Vec<_>>();
+        assert_eq!(difference, vec!["spawn_agent"]);
     }
 
     #[test]
@@ -190,6 +240,7 @@ mod tests {
                 "search_web",
                 "skill_manage",
                 "skill_read",
+                "spawn_agent",
                 "web_fetch",
                 "write_file"
             ]
@@ -205,6 +256,7 @@ mod tests {
                 "search_files",
                 "skill_manage",
                 "skill_read",
+                "spawn_agent",
                 "write_file"
             ]
         );

@@ -8,10 +8,13 @@ import EnginesSettingsPage from "./EnginesSettingsPage";
 import EnginePicker, { engineLabel } from "./EnginePicker";
 import RuntimeSettingsPage, { type LocalRuntimeSettings } from "./RuntimeSettingsPage";
 import SkillsPage from "./SkillsPage";
+import SkillFormPage from "./skills/SkillFormPage";
 import TitleModelPicker from "./TitleModelPicker";
+import SingleModelPicker from "./ModelSelectionPicker";
 import { Segmented, SettingRow, SettingsSection, Toggle } from "./SettingsSection";
 import type { Preferences } from "../features/models/usePreferences";
 import type { Endpoint, LocalModel } from "../features/models/types";
+import type { Skill } from "../features/skills/types";
 import type { InstalledEngine } from "../features/models/useInstalledEngines";
 import { useClaimNotificationHost } from "../features/notifications/notificationHost";
 import type { Notify } from "../features/notifications/types";
@@ -33,9 +36,39 @@ function fileLabel(path: string): string {
   return path.replace(/^\\\\\?\\/, "");
 }
 
+/**
+ * The line under "Settings" naming the page the reader is on.
+ *
+ * A function rather than the chained ternary it replaces: with a page per
+ * provider, model, skill and engine the list outgrew a single expression, and a
+ * `?:` chain that long stops being read.
+ */
+function pageTitle(page: SettingsPage): string {
+  switch (page.view) {
+    case "form":
+      return page.endpoint ? "Edit provider" : "Add provider";
+    case "model":
+      return page.model.name;
+    case "skill":
+      return page.skill ? "Edit skill" : "New skill";
+    case "general":
+      return "General";
+    case "preferences":
+      return "Preferences";
+    case "skills":
+      return "Skills";
+    case "local":
+      return "Local models";
+    case "engines":
+      return "Engines";
+    default:
+      return "Providers";
+  }
+}
+
 type EndpointDraft = { id: string; name: string; base_url: string; api_key: string; models: string[]; enabled: boolean };
 type SettingsModalProps = { open: boolean; onClose: () => void; onEndpointsChanged: () => void; onClearSessions: () => Promise<number>; preferences: Preferences; onPreferencesChange: (preferences: Preferences) => void; notify: Notify };
-type SettingsPage = { view: "providers" } | { view: "local" } | { view: "engines" } | { view: "general" } | { view: "preferences" } | { view: "skills" } | { view: "model"; model: LocalModel } | { view: "form"; endpoint: Endpoint | null };
+type SettingsPage = { view: "providers" } | { view: "local" } | { view: "engines" } | { view: "general" } | { view: "preferences" } | { view: "skills" } | { view: "skill"; skill: Skill | null } | { view: "model"; model: LocalModel } | { view: "form"; endpoint: Endpoint | null };
 type GeneralSettings = {
   instructions: string;
   responseNotifications: boolean;
@@ -432,6 +465,15 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
     }
   };
 
+  // Where each drilled-in page returns to, and what the back control is called.
+  // The provider form and the skill form are the same shape -- a whole page
+  // standing in for a list -- so the header treats them the same way.
+  const isSubPage = page.view === "form" || page.view === "model" || page.view === "skill";
+  const backTarget: SettingsPage =
+    page.view === "model" ? { view: "local" } : page.view === "skill" ? { view: "skills" } : { view: "providers" };
+  const backLabel =
+    page.view === "model" ? "Back to local models" : page.view === "skill" ? "Back to skills" : "Back to providers";
+
   return (
     <dialog
       ref={setDialog}
@@ -443,8 +485,8 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
       <div className="mx-auto flex h-full w-full max-w-[1040px] flex-col overflow-hidden border-x border-[var(--line)] bg-[var(--page)] shadow-2xl sm:my-[5vh] sm:h-[90vh] sm:rounded-xl sm:border">
         <header className="flex min-h-[58px] items-center justify-between border-b border-[var(--line)] px-4 sm:px-6">
           <div className="flex items-center gap-2.5">
-            {(page.view === "form" || page.view === "model") && <button type="button" onClick={() => setPage({ view: page.view === "model" ? "local" : "providers" })} className="grid size-9 place-items-center rounded-md text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label={page.view === "model" ? "Back to local models" : "Back to providers"}><ArrowLeft size={17} /></button>}
-            <div><h1 id="settings-title" className="text-sm font-semibold">Settings</h1><p className="text-[11px] text-[var(--quiet)]">{page.view === "form" ? page.endpoint ? "Edit provider" : "Add provider" : page.view === "model" ? page.model.name : page.view === "general" ? "General" : page.view === "preferences" ? "Preferences" : page.view === "skills" ? "Skills" : page.view === "local" ? "Local models" : page.view === "engines" ? "Engines" : "Providers"}</p></div>
+            {isSubPage && <button type="button" onClick={() => setPage(backTarget)} className="grid size-9 place-items-center rounded-md text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label={backLabel}><ArrowLeft size={17} /></button>}
+            <div><h1 id="settings-title" className="text-sm font-semibold">Settings</h1><p className="text-[11px] text-[var(--quiet)]">{pageTitle(page)}</p></div>
           </div>
           <button type="button" onClick={onClose} className="grid size-9 place-items-center rounded-md text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]" aria-label="Close settings"><X size={18} /></button>
         </header>
@@ -453,7 +495,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
           <nav aria-label="Settings sections" className="flex shrink-0 gap-1 overflow-x-auto border-b border-[var(--line)] bg-[var(--rail)] px-3 py-2 sm:w-[184px] sm:flex-col sm:gap-0 sm:overflow-visible sm:border-b-0 sm:border-r sm:py-3">
             <button type="button" onClick={() => setPage({ view: "general" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-sm ${page.view === "general" ? "bg-[var(--raised)] text-[var(--text)]" : "text-[var(--muted)] hover:bg-[var(--raised)]"}`}><SlidersHorizontal size={15} />General</button>
             <button type="button" onClick={() => setPage({ view: "preferences" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-sm ${page.view === "preferences" ? "bg-[var(--raised)] text-[var(--text)]" : "text-[var(--muted)] hover:bg-[var(--raised)]"}`}><Sparkles size={15} />Preferences</button>
-            <button type="button" onClick={() => setPage({ view: "skills" })} className={`mt-1 flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-sm ${page.view === "skills" ? "bg-[var(--raised)] text-[var(--text)]" : "text-[var(--muted)] hover:bg-[var(--raised)]"}`}><BookMarked size={15} />Skills</button>
+            <button type="button" onClick={() => setPage({ view: "skills" })} className={`mt-1 flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-sm ${page.view === "skills" || page.view === "skill" ? "bg-[var(--raised)] text-[var(--text)]" : "text-[var(--muted)] hover:bg-[var(--raised)]"}`}><BookMarked size={15} />Skills</button>
             <p className="px-2 pb-1.5 pt-4 text-[11px] font-normal text-[color-mix(in_srgb,var(--quiet)_72%,transparent)]">Workspace</p>
             <button type="button" onClick={() => setPage({ view: "providers" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-sm ${page.view === "providers" ? "bg-[var(--raised)] text-[var(--text)]" : "text-[var(--muted)] hover:bg-[var(--raised)]"}`}><Server size={15} />Providers</button>
             <button type="button" onClick={() => setPage({ view: "local" })} className={`mt-1 flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-sm ${page.view === "local" || page.view === "model" ? "bg-[var(--raised)] text-[var(--text)]" : "text-[var(--muted)] hover:bg-[var(--raised)]"}`}><Cpu size={15} />Local</button>
@@ -631,7 +673,25 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                   groups={providerModelGroups}
                   localModels={localModels}
                 />
-              </> : page.view === "skills" ? <SkillsPage notify={notify} /> : <>
+                {/* The same row shape as the picker above, because the two are the
+                    same kind of setting: a model choice for a background task.
+                    "Same as chat" is the default and names what it does rather
+                    than reading as an empty field. */}
+                <div className="flex min-h-[68px] items-center gap-3 border-b border-[var(--line)] py-3 last:border-b-0">
+                  <div className="min-w-0 flex-1">
+                    <h3 className="text-sm font-medium">Sub-agent model</h3>
+                    <p className="text-xs text-[var(--quiet)]">The model spawned agents run on. Defaults to whatever the chat is using.</p>
+                  </div>
+                  <SingleModelPicker
+                    value={preferences.subagentModel ?? null}
+                    onChange={(subagentModel) => { setFormError(""); onPreferencesChange({ ...preferences, subagentModel }); }}
+                    groups={providerModelGroups}
+                    localModels={localModels}
+                    emptyLabel="Same as chat"
+                    label="Default sub-agent model"
+                  />
+                </div>
+              </> : page.view === "skills" ? <SkillsPage notify={notify} onOpenForm={(skill) => setPage({ view: "skill", skill })} /> : page.view === "skill" ? <SkillFormPage key={page.skill?.id ?? "new"} skill={page.skill} onSaved={() => setPage({ view: "skills" })} onCancel={() => setPage({ view: "skills" })} notify={notify} /> : <>
                 <div className="mb-6 border-b border-[var(--line)] pb-4"><h2 className="text-xl font-semibold tracking-tight">{page.endpoint ? "Edit provider" : "Add provider"}</h2><p className="mt-1 text-sm text-[var(--muted)]">Connect an OpenAI-compatible API endpoint.</p></div>
                 <form onSubmit={(event) => void saveEndpoint(event)} className="max-w-xl space-y-4">
                   <label className="block text-sm text-[var(--muted)]">Provider name<input ref={nameRef} required value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} className="mt-1.5 h-10 w-full rounded-md border border-[var(--line)] bg-[var(--rail)] px-3 text-sm text-[var(--text)] outline-none placeholder:text-[var(--quiet)] focus:border-[var(--accent)]" placeholder="e.g. Local Ollama" /></label>

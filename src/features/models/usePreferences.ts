@@ -16,9 +16,21 @@ export type Preferences = {
    * An empty list switches the feature off.
    */
   sessionTitleModels: ModelSelection[];
+  /**
+   * The model sub-agents run on when their parent does not name one.
+   *
+   * A single selection, not a chain: a sub-agent is one request, so there is no
+   * fallback to try. `null` means "use whatever model the parent is using", which
+   * is the honest default — a sub-agent on the same model it was spawned from
+   * needs no setup.
+   *
+   * Same shape as a title entry, so a remote `{endpointId, model}` and a local
+   * `{localModelId}` both fit and both resolve through the same backend path.
+   */
+  subagentModel: ModelSelection | null;
 };
 
-const DEFAULT_PREFERENCES: Preferences = { sessionTitleModels: [] };
+const DEFAULT_PREFERENCES: Preferences = { sessionTitleModels: [], subagentModel: null };
 
 /**
  * Loads `app.preferences` once per enabled run and exposes a setter that
@@ -38,7 +50,12 @@ export function usePreferences(enabled: boolean) {
         // rather than silently discarded.
         const legacy = (saved as { sessionTitleModel?: ModelSelection | null } | null)?.sessionTitleModel;
         const models = saved?.sessionTitleModels ?? (legacy ? [legacy] : []);
-        setPreferences({ sessionTitleModels: models.slice(0, MAX_TITLE_MODELS) });
+        setPreferences({
+          sessionTitleModels: models.slice(0, MAX_TITLE_MODELS),
+          // Absent on a record written before sub-agents existed, which reads as
+          // "same as the parent" rather than failing.
+          subagentModel: saved?.subagentModel ?? null,
+        });
       })
       .catch(() => undefined);
     return () => { mounted = false; };

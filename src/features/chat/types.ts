@@ -229,6 +229,23 @@ export type ChatSessionHeader = {
    * before this existed behave identically.
    */
   permission?: "ask" | "auto_safe" | "auto_writes" | "full";
+  /**
+   * What kind of conversation this is: an ordinary chat, or one sub-agent run.
+   *
+   * Both live in the same table because both are transcripts the same panel can
+   * draw. The kind is what keeps them apart: the sidebar lists chats and must not
+   * show a run, and the Sub agents panel lists runs and must not show a chat, so
+   * each query filters on this rather than one list being asked to show both.
+   *
+   * `undefined` reads as `chat`, which is what every conversation saved before
+   * sub-agents existed is.
+   */
+  kind?: "chat" | "subagent";
+  /**
+   * The conversation that spawned this run, present only when `kind` is
+   * `subagent`. The panel groups runs under the chat they came from.
+   */
+  parentSessionId?: string;
 };
 
 export type ChatSession = ChatSessionHeader & {

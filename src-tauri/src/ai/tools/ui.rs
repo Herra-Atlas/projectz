@@ -196,6 +196,17 @@ fn detail_for(tool: &str, arguments: &Value) -> String {
             None => pattern,
         };
     }
+    // A sub-agent is identified by the label the caller gave it, and only failing
+    // that by the task itself. The prompt is the fallback because it is what the
+    // row is *about* when nothing shorter was provided, and it is trimmed to one
+    // line so a paragraph-long brief does not push the row's outcome off screen.
+    if tool == "spawn_agent" {
+        return string_at(arguments, "label")
+            .or_else(|| {
+                string_at(arguments, "prompt").map(|prompt| first_line(&prompt).to_string())
+            })
+            .unwrap_or_default();
+    }
     let fields: &[&str] = if matches!(tool, "search_web" | "web_fetch" | "run_terminal") {
         &["query", "url", "command", "path", "pattern"]
     } else {
@@ -229,6 +240,7 @@ fn label_for(tool: &str) -> &'static str {
         "web_fetch" => "Open page",
         "skill_read" => "Read skill",
         "skill_manage" => "Save skill",
+        "spawn_agent" => "Run agent",
         _ => "Tool call",
     }
 }

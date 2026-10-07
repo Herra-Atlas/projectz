@@ -1,4 +1,4 @@
-import { FileText, Globe2, Terminal, X, type LucideIcon } from "lucide-react";
+import { Bot, FileText, Globe2, Terminal, X, type LucideIcon } from "lucide-react";
 import type { PanelViewId } from "../../features/rightPanel/usePanelViews";
 
 /**
@@ -19,6 +19,7 @@ const TABS: Record<PanelViewId, { label: string; icon: LucideIcon }> = {
   files: { label: "Files", icon: FileText },
   terminal: { label: "Terminal", icon: Terminal },
   browser: { label: "Browser", icon: Globe2 },
+  subagents: { label: "Sub agents", icon: Bot },
 };
 
 type PanelTabsProps = {

@@ -39,6 +39,7 @@ import { EMPTY_TITLE_MODELS, type AiEvent, type AttachedFile, type BackgroundRun
 import type { ActivityStep, ChatMessage, ChatSession, SessionRunStatus } from "../../features/chat/types";
 
 import { closeOpenSteps } from "./closeOpenSteps";
+import { MARKDOWN_STYLES } from "./markdownStyles";
 import { useAttachments } from "./useAttachments";
 import ContextRing from "./composer/ContextRing";
 import EffortControl from "./composer/EffortControl";
@@ -172,8 +173,17 @@ export default function ChatPage({ endpointId, model, localModelId, session, ses
 // conversation has to opt into.
 const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   const [permission, setPermission] = useState<PermissionMode>(session?.permission ?? DEFAULT_PERMISSION);
-  /** The tool call the agent is blocked on, or null when nothing is waiting. */
-  const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
+  /**
+   * The tool calls the agent is blocked on, oldest first.
+   *
+   * A queue rather than a single slot, because more than one can be waiting at
+   * once: an agent that spawns several sub-agents in a turn gives each of them its
+   * own tools, and in `Ask` mode two of them can be sitting on a prompt at the
+   * same moment. A single slot would show the second and silently strand the
+   * first, which the run cannot recover from — it is parked until answered or
+   * cancelled. The oldest is shown; the rest follow as they are answered.
+   */
+  const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
   const [contextLimit, setContextLimit] = useState<number | null>(null);
   // What the selected model's provider says it supports. Null until it has been
   // read, and every field inside it may still be unknown.
@@ -480,6 +490,16 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     if (sessionId) onMessagesChange(sessionId, next);
   };
 
+  /**
+   * Removes one answered prompt, leaving any others a concurrent agent raised.
+   *
+   * By id rather than by clearing the list, so answering one of two stacked
+   * prompts does not dismiss the other before the user has seen it.
+   */
+  const dismissApproval = (approvalId: string) => {
+    setPendingApprovals((current) => current.filter((approval) => approval.approvalId !== approvalId));
+  };
+
   useEffect(() => {
     const unlistenPromise = getCurrentWebview().onDragDropEvent((event) => {
       if (event.payload.type === "enter" || event.payload.type === "over") setDraggingFiles(true);
@@ -535,14 +555,18 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         attachSearch(run, payload.search);
       } else if (payload.kind === "tool_approval" && payload.metrics?.approval_id) {
         // The run is parked in Rust until this is answered, so the dialog is the
-        // only thing standing between the agent and a tool call.
-        setPendingApproval({
+        // only thing standing between the agent and a tool call. Queued rather
+        // than replacing, because concurrent sub-agents can each be waiting.
+        const approval: PendingApproval = {
           runId: payload.run_id,
           approvalId: payload.metrics.approval_id,
           tool: payload.metrics.tool ?? "tool",
           command: payload.metrics.command ?? "",
           arguments: payload.metrics.arguments ?? {},
-        });
+        };
+        // Guarded against a repeat of the same id, which a re-emitted event would
+        // otherwise queue twice and then answer with one click.
+        setPendingApprovals((current) => current.some((entry) => entry.approvalId === approval.approvalId) ? current : [...current, approval]);
       } else if (payload.kind === "web_search_failed") {
         attachSearch(run, { query: payload.text ?? "", results: [] });
       } else if (payload.kind === "reasoning_delta" && payload.text) {
@@ -701,7 +725,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           if (isActive) setMessages(partial);
         }
         if (isActive) {
-          setPendingApproval(null);
+          setPendingApprovals([]);
           setSearching(false);
           setRunning(false);
           streamTextRef.current = "";
@@ -1022,7 +1046,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     if (run) run.activity = closeOpenSteps(run.activity);
     if (sessionId && sessionRunIdsRef.current.get(sessionId) === runId) sessionRunIdsRef.current.delete(sessionId);
     if (run && sessionId) onActivityRef.current(sessionId, null);
-    setPendingApproval(null);
+    setPendingApprovals([]);
     if (sessionId === sessionIdRef.current) {
       runIdRef.current = "";
       setRunning(false);
@@ -1258,25 +1282,25 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       />}
 
       <div className="px-5 pb-2 sm:px-8 sm:pb-2">
-        <style>{`.markdown-content > :first-child{margin-top:0}.markdown-content > :last-child{margin-bottom:0}.markdown-content p{margin:.65rem 0;line-height:1.75}.markdown-content h1,.markdown-content h2,.markdown-content h3{margin:1.1rem 0 .5rem;font-weight:600}.markdown-content h1{font-size:1.35rem}.markdown-content h2{font-size:1.2rem}.markdown-content h3{font-size:1.05rem}.markdown-content ul,.markdown-content ol{margin:.65rem 0;padding-left:1.5rem}.markdown-content ul{list-style:disc}.markdown-content ol{list-style:decimal}.markdown-content li{padding-left:.2rem}.markdown-content a{color:var(--accent);text-decoration:underline;text-underline-offset:3px}.markdown-content blockquote{margin:.8rem 0;border-left:2px solid var(--accent);padding-left:1rem;color:var(--muted)}.markdown-content :not(pre)>code{border:1px solid var(--line);border-radius:4px;background:var(--raised);padding:.12rem .35rem;font-family:ui-monospace,SFMono-Regular,monospace;font-size:.9em}.markdown-content pre{max-width:100%;max-height:24rem;overflow:auto;overscroll-behavior:contain;border:1px solid var(--line);border-radius:8px;background:var(--rail);padding:1rem}.markdown-content pre code{font-family:ui-monospace,SFMono-Regular,monospace;font-size:.9em}.markdown-content table{display:block;max-width:100%;overflow-x:auto;border-collapse:collapse}.markdown-content th,.markdown-content td{border:1px solid var(--line);padding:.4rem .65rem;text-align:left}.markdown-content th{background:var(--raised)}.markdown-content hr{margin:1rem 0;border-color:var(--line)}`}</style>
+        <style>{MARKDOWN_STYLES}</style>
         <form onSubmit={handleSubmit} className="mx-auto w-full max-w-3xl">
           {/* The prompt sits above the composer rather than inside it. Inside, it
               read as another attachment on a draft the user is still editing; above,
               it is plainly a question about the run, and the composer stays
               exactly as it was. The gap is one `mb` because it belongs to the
               transcript above, not to the control below. */}
-          {pendingApproval && (
+          {pendingApprovals.length > 0 && (
             <div className="mb-2">
               <ToolApproval
-                request={pendingApproval}
+                request={pendingApprovals[0]}
                 onAnswer={(approvalId, allow) => {
                   void invoke("ai_answer_approval", { approvalId, allow }).catch(() => {
                     // The run was already stopped, so there was nothing to answer.
                     // Closing the prompt is the right outcome either way.
                   });
-                  setPendingApproval(null);
+                  dismissApproval(approvalId);
                 }}
-                onCancel={() => setPendingApproval(null)}
+                onCancel={() => dismissApproval(pendingApprovals[0].approvalId)}
               />
             </div>
           )}

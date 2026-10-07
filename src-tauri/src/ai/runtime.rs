@@ -22,6 +22,23 @@ const TITLE_MAX_TOKENS: u32 = 24;
 /// a model that is consistently wrong still fails fast.
 const TITLE_ATTEMPTS: u32 = 2;
 
+/// One sub-agent at work, as the panel needs to know it.
+///
+/// The same facts the start event carries, held so the panel can list an agent
+/// that began before it was opened. Field names are camelCase for the frontend,
+/// matching the session headers the panel already reads.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunningSubAgent {
+    pub id: String,
+    pub label: String,
+    pub session_id: Option<String>,
+    pub prompt: String,
+    pub model: String,
+    pub provider: String,
+    pub started_at: String,
+}
+
 #[derive(Clone)]
 pub struct AiRuntime {
     endpoints: Arc<EndpointRegistry>,
@@ -34,6 +51,14 @@ pub struct AiRuntime {
     /// session change. A completion for this session is already on screen, so it must
     /// not raise a notification.
     viewed_session: Arc<Mutex<Option<String>>>,
+    /// The sub-agents running right now, keyed by their run id.
+    ///
+    /// A run is only written to the database when it finishes, so a panel that
+    /// read only storage would be blind to an agent already at work. Held in
+    /// memory because that is exactly the window storage cannot cover: an entry
+    /// is added when a sub-agent starts and removed when it ends, and a process
+    /// that dies takes its stale entries with it.
+    running_subagents: Arc<Mutex<HashMap<String, RunningSubAgent>>>,
     /// The permission gate for tool calls.
     ///
     /// Owned by the runtime rather than built per run because the answer to a
@@ -57,6 +82,7 @@ impl AiRuntime {
             local_runs: Arc::new(Mutex::new(HashSet::new())),
             local_completions: Arc::new(Mutex::new(HashMap::new())),
             viewed_session: Arc::new(Mutex::new(None)),
+            running_subagents: Arc::new(Mutex::new(HashMap::new())),
             // Ask-first, and the setting is read per run so a user who switches
             // to Full does not have to restart the app.
             approval: crate::ai::tools::ApprovalGate::new(crate::ai::tools::PermissionMode::Ask),
@@ -120,6 +146,66 @@ impl AiRuntime {
             .lock()
             .map(|viewed| viewed.as_deref() == Some(session_id))
             .unwrap_or(false)
+    }
+
+    /// The sub-agents currently at work, for a panel that has just opened.
+    ///
+    /// Read from memory rather than storage because a run is not saved until it
+    /// ends; this is the only place that knows about one still going.
+    pub fn running_subagents(&self) -> Vec<RunningSubAgent> {
+        self.running_subagents
+            .lock()
+            .map(|running| running.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Tracks sub-agent lifecycle from the event stream the runtime already emits.
+    ///
+    /// The start and finish of a run are learned from the same `subagent` events
+    /// the panel listens for, rather than from a callback threaded through the
+    /// tool: every event passes through this one place, so watching here keeps the
+    /// registry and the UI reading the same facts instead of two accounts of them.
+    fn observe_event(&self, event: &ChatEvent) {
+        if event.kind != "subagent" {
+            return;
+        }
+        let Some(metrics) = event.metrics.as_ref() else {
+            return;
+        };
+        let Some(agent_id) = metrics.get("agent_id").and_then(serde_json::Value::as_str) else {
+            return;
+        };
+        let text = |field: &str| {
+            metrics
+                .get(field)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let Ok(mut running) = self.running_subagents.lock() else {
+            return;
+        };
+        if metrics.get("state").and_then(serde_json::Value::as_str) == Some("running") {
+            running.insert(
+                agent_id.to_string(),
+                RunningSubAgent {
+                    id: agent_id.to_string(),
+                    label: text("label"),
+                    session_id: metrics
+                        .get("session_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    prompt: text("prompt"),
+                    model: text("model"),
+                    provider: text("provider"),
+                    started_at: text("started_at"),
+                },
+            );
+        } else {
+            // An absent state counts as done, matching the done event's own shape,
+            // so an entry can never linger for want of an explicit "done".
+            running.remove(agent_id);
+        }
     }
 
     pub fn cancel_chat(&self, run_id: &str) -> bool {
@@ -186,7 +272,7 @@ impl AiRuntime {
         }
         let mut last_error = "No title model selected".to_string();
         for selection in selections {
-            let (endpoint, model) = match self.resolve_title_model(selection) {
+            let (endpoint, model) = match self.resolve_selection(selection) {
                 Ok(resolved) => resolved,
                 Err(error) => {
                     info!(?selection, %error, "title model unavailable, trying next");
@@ -237,9 +323,34 @@ impl AiRuntime {
         Err(last_error)
     }
 
+    /// The model a sub-agent should default to, from Settings.
+    ///
+    /// Read per run and resolved here rather than in the tool, because turning a
+    /// stored selection into a live endpoint needs the model registry -- which the
+    /// runtime has and a tool does not.
+    ///
+    /// A selection that no longer resolves is dropped rather than failing the run.
+    /// A stale preference -- a provider deleted, an engine not running -- must not
+    /// stop the agent doing everything else; the sub-agent simply falls back to
+    /// its parent's model.
+    fn subagent_default(&self) -> Option<(crate::ai::remote::types::Endpoint, String)> {
+        let preferences: serde_json::Value = self.database.setting("app.preferences")?;
+        let selection = preferences.get("subagentModel")?;
+        if selection.is_null() {
+            return None;
+        }
+        self.resolve_selection(selection).ok()
+    }
+
     /// Turn one persisted selection into a requestable endpoint and model.
     /// A local selection fails unless its engine is actually running.
-    fn resolve_title_model(
+    ///
+    /// Shared by the two features that store a model choice the same way -- the
+    /// title chain and the sub-agent default -- so a local selection is turned
+    /// into a live endpoint in exactly one place. Two copies would be two answers
+    /// to "which engine is this model on", which is the kind of second opinion
+    /// that ends up disagreeing with the loader.
+    fn resolve_selection(
         &self,
         selection: &serde_json::Value,
     ) -> Result<(crate::ai::remote::types::Endpoint, String), String> {
@@ -468,6 +579,39 @@ impl AiRuntime {
         let run_id_clone = run_id.clone();
         let session_id_clone = session_id.clone();
         self.record_skill_uses(&request.skill_ids);
+        // Resolved once here rather than inside a tool, because turning the stored
+        // selection into a live endpoint needs the model registry, which the tool
+        // does not have.
+        let subagent_default = self.subagent_default();
+        // Shareable rather than `FnMut` so several sub-agents launched from this
+        // run can each report through the one event path the frontend listens on.
+        let emitter = self.clone();
+        let app_handle = app.clone();
+        let event_run_id = run_id_clone.clone();
+        let event_session_id = session_id_clone.clone();
+        let on_event: Arc<dyn Fn(ChatEvent) + Send + Sync> = Arc::new(move |ev| {
+            if is_local && ev.kind == "completion_id" {
+                if let Some(completion_id) = ev.text.clone() {
+                    emitter.set_local_completion_id(&event_run_id, completion_id);
+                }
+            }
+            // Tracked before the event is handed out, so the registry and the
+            // panel see the same start and the same finish.
+            emitter.observe_event(&ev);
+            let event = ChatEvent {
+                session_id: event_session_id.clone(),
+                ..ev
+            };
+            let _ = app_handle.emit("ai-event", &event);
+        });
+        let search_app = app.clone();
+        let search_run_id = run_id_clone.clone();
+        let search_session_id = session_id_clone.clone();
+        let on_search: Arc<dyn Fn(crate::websearch::WebSearchOutput) + Send + Sync> = Arc::new(
+            move |search| {
+                let _ = search_app.emit("ai-event", serde_json::json!({ "run_id": search_run_id, "session_id": search_session_id, "kind": "web_search", "search": search }));
+            },
+        );
         let result = stream_chat(
             &endpoint,
             &model,
@@ -482,18 +626,11 @@ impl AiRuntime {
             Some(&self.database),
             self.approval_gate(self.permission_mode()),
             cancelled,
-            |ev| {
-                if is_local && ev.kind == "completion_id" {
-                    if let Some(completion_id) = ev.text.clone() {
-                        self.set_local_completion_id(&run_id_clone, completion_id);
-                    }
-                }
-                let event = ChatEvent { session_id: session_id_clone.clone(), ..ev };
-                let _ = app.emit("ai-event", &event);
-            },
-            |search| {
-                let _ = app.emit("ai-event", serde_json::json!({ "run_id": run_id_clone, "session_id": session_id_clone, "kind": "web_search", "search": search }));
-            },
+            subagent_default,
+            // The top-level run may delegate; a sub-agent's own run passes false.
+            true,
+            on_event,
+            on_search,
         )
         .await;
         self.active_runs.lock().unwrap().remove(&run_id);
@@ -698,5 +835,54 @@ mod tests {
         // Switching away stops suppressing, so a later background reply notifies again.
         runtime.set_viewed_session(None);
         assert!(!runtime.is_viewed(Some("session-1")));
+    }
+
+    /// The running registry follows a sub-agent from start to finish, which is
+    /// what lets a panel opened mid-run list an agent already at work.
+    #[test]
+    fn the_running_registry_follows_a_sub_agent_from_start_to_finish() {
+        let runtime = runtime_without_local_engine("running-subagents");
+        let lifecycle = |state: &str| crate::ai::types::ChatEvent {
+            run_id: "agent-1".into(),
+            session_id: None,
+            sequence: 0,
+            kind: "subagent".into(),
+            text: Some("car research".into()),
+            error: None,
+            metrics: Some(serde_json::json!({
+                "agent_id": "agent-1",
+                "label": "car research",
+                "session_id": "chat-1",
+                "state": state,
+                "prompt": "Find every car",
+                "model": "gpt",
+                "provider": "provider-1",
+                "started_at": "2026-01-01T00:00:00Z",
+            })),
+        };
+
+        runtime.observe_event(&lifecycle("running"));
+        let running = runtime.running_subagents();
+        assert_eq!(running.len(), 1);
+        assert_eq!(running[0].id, "agent-1");
+        assert_eq!(running[0].label, "car research");
+        assert_eq!(running[0].session_id.as_deref(), Some("chat-1"));
+        assert_eq!(running[0].prompt, "Find every car");
+
+        // Any other event on the wire is ignored rather than misread as a
+        // lifecycle one the registry should act on.
+        runtime.observe_event(&crate::ai::types::ChatEvent {
+            run_id: "agent-1".into(),
+            session_id: None,
+            sequence: 1,
+            kind: "delta".into(),
+            text: Some("hello".into()),
+            error: None,
+            metrics: None,
+        });
+        assert_eq!(runtime.running_subagents().len(), 1);
+
+        runtime.observe_event(&lifecycle("done"));
+        assert!(runtime.running_subagents().is_empty());
     }
 }

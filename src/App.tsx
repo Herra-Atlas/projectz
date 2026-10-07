@@ -379,6 +379,7 @@ function AppShell() {
         open={rightPanel.open}
         width={rightPanel.width}
         workspace={workspaces.selected}
+        sessionId={chat.activeId}
         loadedModelId={localRuntime.loaded_model_id}
         loadingModelId={localRuntime.loading_model_id}
         requestedPath={requestedFile}

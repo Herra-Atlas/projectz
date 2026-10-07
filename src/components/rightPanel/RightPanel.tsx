@@ -6,6 +6,7 @@ import RightPanelEmpty from "./RightPanelEmpty";
 import BrowserTab from "./browser/BrowserTab";
 import FilesTab from "./tabs/FilesTab";
 import TerminalTab from "./tabs/TerminalTab";
+import SubAgentsTab from "./tabs/SubAgentsTab";
 import { type PanelViewId, usePanelViews } from "../../features/rightPanel/usePanelViews";
 import { MAX_PANEL_WIDTH, MIN_PANEL_WIDTH } from "../../features/rightPanel/useRightPanel";
 
@@ -126,6 +127,14 @@ type RightPanelProps = {
   width: number;
   /** The open workspace path, handed to the views that need it. */
   workspace: string | null;
+  /**
+   * The conversation on screen, so the Sub agents view can follow it.
+   *
+   * `null` for a new, unsaved chat: the view then lists every run rather than
+   * pretending none exist, because the runs a chat spawned outlive any one view
+   * of it and are worth reaching even before the chat is named.
+   */
+  sessionId?: string | null;
   loadedModelId?: string | null;
   loadingModelId?: string | null;
   /**
@@ -155,7 +164,7 @@ type RightPanelProps = {
  * to bring it back. The body is hidden from the tree as well as from layout, so
  * a tab the panel remembers is not silently live behind a closed panel.
  */
-export default function RightPanel({ open, width, workspace, loadedModelId = null, loadingModelId = null, requestedPath, requestedUrl, onUrlRequestHandled, onRequestHandled, onClose, onOpen, onResize, onNotify }: RightPanelProps) {
+export default function RightPanel({ open, width, workspace, sessionId = null, loadedModelId = null, loadingModelId = null, requestedPath, requestedUrl, onUrlRequestHandled, onRequestHandled, onClose, onOpen, onResize, onNotify }: RightPanelProps) {
   const panelRef = useRef<HTMLElement>(null);
   const {
     openViews, activeView, open: openView, close: closeView, setActiveView,
@@ -356,6 +365,11 @@ export default function RightPanel({ open, width, workspace, loadedModelId = nul
               // unmounted when the panel closes -- that is what destroys the
               // webview, rather than hiding it and leaving its page alive.
               <BrowserTab mounted={open} initialUrl={browserRequest?.url} requestKey={browserRequest?.nonce} onRequestHandled={() => setBrowserRequest(null)} onLastTabClosed={handleLastBrowserTabClosed} onNotify={onNotify} />
+            ) : activeView === "subagents" ? (
+              // A link out of a run's answer opens in the panel's browser, the same
+              // place a link from the chat opens -- both are the same act, so they
+              // share one handler rather than growing a second way to open a page.
+              <SubAgentsTab parentSessionId={sessionId} onOpenUrl={handlePreviewInBrowser} />
             ) : (
               <RightPanelEmpty onOpen={openView} hasWorkspace={Boolean(workspace)} />
             )}

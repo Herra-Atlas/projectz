@@ -38,6 +38,45 @@ mod tests {
         assert_eq!(ReasoningEffort(String::new()).wire_value(), None);
         assert_eq!(ReasoningEffort("   ".to_string()).wire_value(), None);
     }
+
+    /// A started sub-agent is announced under its **own** run id, which is what
+    /// lets the panel stream it while the parent's listener -- keyed on the
+    /// parent's run -- ignores every forwarded event.
+    #[test]
+    fn a_started_sub_agent_is_announced_under_its_own_run_id() {
+        let event = super::subagent_started_event(
+            "agent-1",
+            "car research",
+            Some("chat-1"),
+            "Find every car",
+            "gpt",
+            "provider-1",
+            "2026-01-01T00:00:00Z",
+        );
+        assert_eq!(event.run_id, "agent-1");
+        assert_eq!(event.kind, "subagent");
+        assert_eq!(event.text.as_deref(), Some("car research"));
+        let metrics = event.metrics.expect("metrics are always present");
+        assert_eq!(metrics["agent_id"], "agent-1");
+        assert_eq!(metrics["state"], "running");
+        assert_eq!(metrics["session_id"], "chat-1");
+        assert_eq!(metrics["prompt"], "Find every car");
+    }
+
+    /// The finished notice carries an explicit `done`, so the panel's two
+    /// lifecycle events are never told apart by the absence of a field.
+    #[test]
+    fn a_finished_sub_agent_is_announced_as_done() {
+        let notice = crate::ai::tools::SubAgentNotice {
+            id: "agent-1".into(),
+            label: "car research".into(),
+            session_id: Some("chat-1".into()),
+        };
+        let event = super::subagent_event("run-1", &notice);
+        let metrics = event.metrics.expect("metrics are always present");
+        assert_eq!(metrics["state"], "done");
+        assert_eq!(metrics["agent_id"], "agent-1");
+    }
 }
 
 /// Stream a completion, running any tools the model asks for.
@@ -61,15 +100,26 @@ pub async fn stream_chat(
     // second event path the frontend would have to know about.
     approval: crate::ai::tools::ApprovalGate,
     cancelled: Arc<AtomicBool>,
-    mut on_event: impl FnMut(ChatEvent),
-    mut on_search: impl FnMut(crate::websearch::WebSearchOutput),
+    // The model a sub-agent should use when nothing else names one. Resolved by
+    // the runtime from the stored preference, so a local selection has already
+    // become a live endpoint by the time it arrives here and a tool never has to
+    // reach for the model registry itself.
+    subagent_default: Option<(Endpoint, String)>,
+    // Whether a spawned sub-agent may itself spawn. `false` for a sub-agent's own
+    // run, which is what keeps delegation one level deep.
+    allow_subagents: bool,
+    // Shareable rather than `FnMut`: several sub-agents can run at once, and an
+    // approval prompt any of them raises has to reach the screen from whichever
+    // one asked. An `Arc` of a plain `Fn` is the smallest thing that allows that.
+    on_event: Arc<dyn Fn(ChatEvent) + Send + Sync>,
+    on_search: Arc<dyn Fn(crate::websearch::WebSearchOutput) + Send + Sync>,
 ) -> Result<(String, Value), String> {
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|error| error.to_string())?;
     let payload = prepare_messages(messages, attachments)?;
-    let registry = crate::ai::tools::registry_for(mode, web_search_enabled);
+    let registry = crate::ai::tools::registry_for_with(mode, web_search_enabled, allow_subagents);
 
     let session = session_id.unwrap_or_default();
     let cache = session_id
@@ -91,11 +141,32 @@ pub async fn stream_chat(
     let tool_specs = registry.specs();
     // Shared across every call in the run: one collector, drained by the loop.
     let sink = crate::ai::tools::Sink::default();
+    // What a tool is told about this run, so one of them -- `spawn_agent` -- can
+    // start work of its own. Built here, where every part already exists, and
+    // shared so several delegated runs can be launched from the same call site.
+    let run = Arc::new(crate::ai::tools::RunHandle {
+        endpoint: endpoint.clone(),
+        model: model.to_string(),
+        reasoning: reasoning.clone(),
+        web_search_enabled,
+        mode,
+        enable_reasoning_control,
+        // The same flag the reasoning control rides on is exactly whether the
+        // model is local: a request carries `reasoning_control` only for the
+        // bundled server. It is what decides that concurrent sub-agents fall back
+        // to sequential, because that server serves one request at a time.
+        local: enable_reasoning_control,
+        run_id: run_id.to_string(),
+        session_id: session_id.map(str::to_string),
+        approval: approval.clone(),
+        emit: Arc::clone(&on_event),
+        subagent_default,
+    });
     for _ in 0..MAX_TOOL_ROUNDS {
         if cancelled.load(Ordering::Relaxed) {
             return Ok((String::new(), Value::Null));
         }
-        emit_status(run_id, "thinking", &mut on_event);
+        emit_status(run_id, "thinking", &on_event);
         let (tool_calls, content, round_usage, reasoning_text) = stream_completion(
             &client,
             endpoint,
@@ -108,7 +179,7 @@ pub async fn stream_chat(
             run_id,
             Arc::clone(&cancelled),
             enable_reasoning_control,
-            &mut on_event,
+            &on_event,
         )
         .await?;
         if usage.is_null() {
@@ -162,194 +233,64 @@ pub async fn stream_chat(
         // A model that asks to read three files expects three results; stopping
         // at one makes it re-issue the same batch on the next round.
         //
-        // Sequential rather than concurrent. Tool results are appended in the
-        // order the provider asked for them, which is what it expects to find;
-        // and a model that requests three reads gains little from running them
-        // at once, since it waits for all three either way.
-        for (index, call) in tool_calls.iter().enumerate() {
-            let arguments = match registry.parse_arguments(&call.name, &call.arguments) {
-                Ok(arguments) => arguments,
-                // A malformed call is reported back as that call's result rather
-                // than ending the run, so the model can correct it itself.
-                Err(error) => {
-                    conversation.push(tool_message(&call.id, &error));
-                    // Reported even though it never ran. A call the panel omits
-                    // is a call the user cannot see the model attempt, and a
-                    // silently-dropped malformed call looks exactly like a model
-                    // that changed its mind.
-                    on_event(tool_result_event(
-                        run_id,
-                        index,
-                        call,
-                        &crate::ai::tools::ui::summarize(&call.name, &Value::Null, &error, false),
-                        // No execution means no measured time, so the row is
-                        // reported as cached: the frontend treats a missing
-                        // duration as zero and this must not read as "instant".
-                        None,
-                        true,
-                        &error,
-                    ));
-                    continue;
+        // Sequential by default, because tool results are appended in the order
+        // the provider asked for them and a read taken before a write must stay
+        // ordered before it. The one exception is delegation: consecutive
+        // `spawn_agent` calls are independent by construction -- each has its own
+        // conversation -- so they are the only thing worth overlapping, and they
+        // are exactly what "several agents at once" means. A local model cannot be
+        // asked for more than one request at a time, so it always runs them in
+        // turn.
+        let runner = CallRunner {
+            registry: &registry,
+            cache: cache.as_ref(),
+            session,
+            database,
+            run: &run,
+            approval: &approval,
+            cancelled: &cancelled,
+            sink: &sink,
+            run_id,
+            emit: &on_event,
+        };
+
+        let mut index = 0;
+        while index < tool_calls.len() {
+            let spawn = crate::ai::tools::agent::SPAWN_AGENT.name;
+            if !run.local && tool_calls[index].name == spawn {
+                // The run of consecutive delegations, launched together.
+                let start = index;
+                let mut end = index;
+                while end < tool_calls.len() && tool_calls[end].name == spawn {
+                    end += 1;
                 }
-            };
-
-            let effect = registry
-                .get(&call.name)
-                .map(|tool| tool.effect)
-                .unwrap_or(Effect::Read);
-
-            // A repeat of a call already made in this conversation is answered
-            // from the cache when nothing has been written since. Saves both the
-            // round trip and the tokens for a result the model already has.
-            //
-            // Emitted rather than skipped: the model did ask for it, and a panel
-            // that silently omits a repeat would leave the user waiting for a
-            // read that is never announced and then wonder why the model moved
-            // on. Marked cached so it can be drawn differently from a call that
-            // actually touched the disk.
-            if let Some(cached) = cache
-                .as_ref()
-                .and_then(|cache| cache.get(session, &call.name, effect, &arguments))
-            {
-                conversation.push(tool_message(&call.id, &cached));
-                on_event(tool_result_event(
-                    run_id,
-                    index,
-                    call,
-                    &crate::ai::tools::ui::summarize(&call.name, &arguments, &cached, true),
-                    None,
-                    true,
-                    &cached,
-                ));
-                continue;
-            }
-
-            // Announced before the gate rather than after it, so a row exists
-            // for a call the user is being asked to approve. The duration starts
-            // here, which means waiting on a permission prompt is counted as the
-            // call's time: that is time the user spent waiting, and hiding it
-            // would report a tool as near-instant while a dialog sat open.
-            emit_status(run_id, tool_status(&call.name), &mut on_event);
-            on_event(tool_call_event(run_id, index, call, &arguments));
-            let call_started = std::time::Instant::now();
-            // The gate runs here, on the loop's behalf rather than the tool's. A
-            // tool that forgot to check would still be checked, which is the only
-            // arrangement that makes the gate worth having.
-            let decision = approval
-                .settle(
-                    run_id,
-                    ApprovalRequest {
-                        run_id: String::new(),
-                        tool_name: call.name.clone(),
-                        // The tool's own declared command field. Empty for every
-                        // tool that does not run a shell, which is how the policy
-                        // knows it is not looking at a command line.
-                        command: registry.dangerous_string(&call.name, &arguments),
-                        arguments: arguments.clone(),
-                    },
-                    &cancelled,
-                    |request, approval_id| {
-                        on_event(ChatEvent {
-                            run_id: request.run_id.clone(),
-                            session_id: None,
-                            sequence: 0,
-                            kind: "tool_approval".into(),
-                            text: Some(request.summary()),
-                            error: None,
-                            metrics: Some(serde_json::json!({
-                                "approval_id": approval_id,
-                                "tool": request.tool_name,
-                                "command": request.command,
-                                "arguments": request.arguments,
-                            })),
-                        });
-                    },
+                // Pushed back in the order asked for, whatever order they finish
+                // in, because a `tool` message has to answer the `tool_calls`
+                // entry that came before it.
+                let outcomes = futures_util::future::join_all(
+                    tool_calls[start..end]
+                        .iter()
+                        .enumerate()
+                        .map(|(offset, call)| runner.settle(start + offset, call)),
                 )
                 .await;
-            let decision = match decision {
-                Ok(decision) => decision,
-                // The user stopped the reply while the prompt was open. Ending
-                // quietly is what stop means -- but returning `Ok` with empty
-                // content would report a *completed* zero-length answer, which
-                // the frontend stores as an assistant message. A stop has to be
-                // distinguishable from a reply that produced nothing.
-                Err(error) => {
-                    tracing::debug!(error = %error, "approval ended before it was answered");
-                    return Err(crate::ai::STOPPED.to_string());
+                for outcome in outcomes {
+                    conversation.push(outcome?);
                 }
-            };
-            if let Decision::Deny(reason) = decision {
-                // Refused and declined both become the tool's result text, so
-                // the model can carry on rather than losing the conversation.
-                conversation.push(tool_message(&call.id, &reason));
-                // A refusal is reported as a refused row rather than nothing.
-                // The user declined it, so showing it as attempted-and-cancelled
-                // would misreport their own decision as the model's.
-                on_event(tool_result_event(
-                    run_id,
-                    index,
-                    call,
-                    &crate::ai::tools::ui::summarize(&call.name, &arguments, &reason, false),
-                    Some(call_started.elapsed().as_secs_f64()),
-                    true,
-                    &reason,
-                ));
-                continue;
+                index = end;
+            } else {
+                conversation.push(runner.settle(index, &tool_calls[index]).await?);
+                index += 1;
             }
 
-            // One context per call, sharing the collector. A tool's own failure
-            // becomes its result text: the model is told what went wrong and
-            // gets another turn to fix it.
-            let context = crate::ai::tools::ToolContext {
-                cancelled: Arc::clone(&cancelled),
-                sink: sink.clone(),
-                // The same handle the run's tool cache is scoped to, so a tool
-                // reading stored state and the cache keyed on it cannot disagree
-                // about which database this conversation is using.
-                database: database.cloned(),
-            };
-            // `succeeded` is carried out because the text alone cannot tell a
-            // failure from a tool that legitimately returned those words.
-            let (result, succeeded) =
-                match registry.run(&call.name, arguments.clone(), context).await {
-                    Ok(text) => (text, true),
-                    Err(error) => (error, false),
-                };
-            // The diff is drained here, per call, because this is the only place
-            // that knows which write produced it. Draining per round would hand
-            // two writes' changes to one row and show the wrong file's diff
-            // against the wrong path.
-            let mut summary =
-                crate::ai::tools::ui::summarize(&call.name, &arguments, &result, succeeded);
-            if let Some(diff) = sink.drain_diffs().into_iter().next() {
-                summary.attach_diff(diff);
-            }
-            // Announced whether or not it worked. A tool that failed still ran,
-            // and the row is what shows the user why before the model decides
-            // what to do about it.
-            on_event(tool_result_event(
-                run_id,
-                index,
-                call,
-                &summary,
-                Some(call_started.elapsed().as_secs_f64()),
-                false,
-                &result,
-            ));
-            // A failure is never cached. The model is expected to retry with
-            // corrected arguments, and a cached error would answer that retry
-            // with the same failure every time.
-            if succeeded {
-                if let Some(cache) = &cache {
-                    cache.put(session, &call.name, effect, &arguments, &result);
-                }
-            }
-            conversation.push(tool_message(&call.id, &result));
-
-            // Anything the tool reported is drained here, where the run's own
-            // callback is still borrowed and in scope.
+            // Everything the tools reported while they ran. Drained after the call
+            // (or batch) rather than inside it, so one tool's search is never
+            // attributed to another's row.
             for search in sink.drain_searches() {
                 on_search(search);
+            }
+            for notice in sink.drain_subagents() {
+                on_event(subagent_event(run_id, &notice));
             }
         }
     }
@@ -378,6 +319,270 @@ fn tool_message(call_id: &str, content: &str) -> Value {
         "tool_call_id": call_id,
         "content": content
     })
+}
+
+/// The run's shared state, borrowed for the length of one round.
+///
+/// A struct rather than a dozen parameters because every field is the same for
+/// each call in a round: only the call itself changes. It is what lets the round
+/// run one call at a time or several at once without the per-call body being
+/// written twice — [`CallRunner::settle`] is the single place a tool call is
+/// gated, run, cached and reported, whether it is awaited on its own or joined
+/// with others.
+struct CallRunner<'a> {
+    registry: &'a crate::ai::tools::ToolRegistry,
+    cache: Option<&'a ToolCache>,
+    session: &'a str,
+    database: Option<&'a Arc<crate::database::Database>>,
+    run: &'a Arc<crate::ai::tools::RunHandle>,
+    approval: &'a crate::ai::tools::ApprovalGate,
+    cancelled: &'a Arc<AtomicBool>,
+    sink: &'a crate::ai::tools::Sink,
+    run_id: &'a str,
+    emit: &'a Arc<dyn Fn(ChatEvent) + Send + Sync>,
+}
+
+impl<'a> CallRunner<'a> {
+    /// Gates, runs and reports one call, returning the message that answers it.
+    ///
+    /// `Err` means the *run* should end — today only a stop arriving while a
+    /// permission prompt was open. Every other failure, including the call's own,
+    /// comes back as `Ok` carrying text for the model, because a model that is
+    /// told why a call failed can correct it and one whose run ended cannot.
+    async fn settle(&self, index: usize, call: &ToolCall) -> Result<Value, String> {
+        let arguments = match self.registry.parse_arguments(&call.name, &call.arguments) {
+            Ok(arguments) => arguments,
+            // A malformed call is reported back as that call's result rather than
+            // ending the run, so the model can correct it itself.
+            Err(error) => {
+                // Reported even though it never ran. A call the panel omits is a
+                // call the user cannot see the model attempt, and a silently
+                // dropped malformed call looks exactly like a model that changed
+                // its mind. Marked cached because no execution means no measured
+                // time, and a missing duration must not read as "instant".
+                (self.emit)(tool_result_event(
+                    self.run_id,
+                    index,
+                    call,
+                    &crate::ai::tools::ui::summarize(&call.name, &Value::Null, &error, false),
+                    None,
+                    true,
+                    &error,
+                ));
+                return Ok(tool_message(&call.id, &error));
+            }
+        };
+
+        let effect = self
+            .registry
+            .get(&call.name)
+            .map(|tool| tool.effect)
+            .unwrap_or(Effect::Read);
+
+        // A repeat of a call already made in this conversation is answered from
+        // the cache when nothing has been written since. Emitted rather than
+        // skipped: the model did ask for it, and a panel that silently omitted a
+        // repeat would leave the user waiting for a read that is never announced.
+        if let Some(cached) = self
+            .cache
+            .and_then(|cache| cache.get(self.session, &call.name, effect, &arguments))
+        {
+            (self.emit)(tool_result_event(
+                self.run_id,
+                index,
+                call,
+                &crate::ai::tools::ui::summarize(&call.name, &arguments, &cached, true),
+                None,
+                true,
+                &cached,
+            ));
+            return Ok(tool_message(&call.id, &cached));
+        }
+
+        // Announced before the gate rather than after it, so a row exists for a
+        // call the user is being asked to approve. The duration starts here, which
+        // counts time spent on a prompt as the call's time: that is time the user
+        // waited, and hiding it would report a tool as instant while a dialog sat
+        // open.
+        emit_status(self.run_id, tool_status(&call.name), self.emit);
+        (self.emit)(tool_call_event(self.run_id, index, call, &arguments));
+        let call_started = std::time::Instant::now();
+        // The gate runs here, on the loop's behalf rather than the tool's. A tool
+        // that forgot to check would still be checked, which is the only
+        // arrangement that makes the gate worth having.
+        let decision = self
+            .approval
+            .settle(
+                self.run_id,
+                ApprovalRequest {
+                    run_id: String::new(),
+                    tool_name: call.name.clone(),
+                    // The tool's own declared command field. Empty for every tool
+                    // that does not run a shell, which is how the policy knows it
+                    // is not looking at a command line.
+                    command: self.registry.dangerous_string(&call.name, &arguments),
+                    arguments: arguments.clone(),
+                },
+                self.cancelled,
+                |request, approval_id| {
+                    (self.emit)(ChatEvent {
+                        run_id: request.run_id.clone(),
+                        session_id: None,
+                        sequence: 0,
+                        kind: "tool_approval".into(),
+                        text: Some(request.summary()),
+                        error: None,
+                        metrics: Some(serde_json::json!({
+                            "approval_id": approval_id,
+                            "tool": request.tool_name,
+                            "command": request.command,
+                            "arguments": request.arguments,
+                        })),
+                    });
+                },
+            )
+            .await;
+        let decision = match decision {
+            Ok(decision) => decision,
+            // The user stopped the reply while the prompt was open. A stop has to
+            // be distinguishable from a reply that produced nothing, so the run
+            // ends rather than returning an empty answer.
+            Err(error) => {
+                tracing::debug!(error = %error, "approval ended before it was answered");
+                return Err(crate::ai::STOPPED.to_string());
+            }
+        };
+        if let Decision::Deny(reason) = decision {
+            // Refused and declined both become the tool's result text, so the model
+            // can carry on rather than losing the conversation. Shown as a refused
+            // row rather than nothing: the user declined it, and reporting it as
+            // attempted-and-cancelled would misreport their own decision.
+            (self.emit)(tool_result_event(
+                self.run_id,
+                index,
+                call,
+                &crate::ai::tools::ui::summarize(&call.name, &arguments, &reason, false),
+                Some(call_started.elapsed().as_secs_f64()),
+                true,
+                &reason,
+            ));
+            return Ok(tool_message(&call.id, &reason));
+        }
+
+        // One context per call, sharing the collector. A tool's own failure
+        // becomes its result text: the model is told what went wrong and gets
+        // another turn to fix it.
+        let context = crate::ai::tools::ToolContext {
+            cancelled: Arc::clone(self.cancelled),
+            sink: self.sink.clone(),
+            // The same handle the run's tool cache is scoped to, so a tool reading
+            // stored state and the cache keyed on it cannot disagree about which
+            // database this conversation is using.
+            database: self.database.cloned(),
+            // What lets `spawn_agent` start a run of its own.
+            run: Some(Arc::clone(self.run)),
+        };
+        // `succeeded` is carried out because the text alone cannot tell a failure
+        // from a tool that legitimately returned those words.
+        let (result, succeeded) = match self
+            .registry
+            .run(&call.name, arguments.clone(), context)
+            .await
+        {
+            Ok(text) => (text, true),
+            Err(error) => (error, false),
+        };
+        // The diff is drained here, per call, because this is the only place that
+        // knows which write produced it. Draining per round would hand two writes'
+        // changes to one row and show the wrong file's diff against the wrong path.
+        let mut summary =
+            crate::ai::tools::ui::summarize(&call.name, &arguments, &result, succeeded);
+        if let Some(diff) = self.sink.drain_diffs().into_iter().next() {
+            summary.attach_diff(diff);
+        }
+        // Announced whether or not it worked. A tool that failed still ran, and
+        // the row is what shows the user why before the model decides what to do.
+        (self.emit)(tool_result_event(
+            self.run_id,
+            index,
+            call,
+            &summary,
+            Some(call_started.elapsed().as_secs_f64()),
+            false,
+            &result,
+        ));
+        // A failure is never cached. The model is expected to retry with corrected
+        // arguments, and a cached error would answer that retry with the same
+        // failure every time.
+        if succeeded {
+            if let Some(cache) = self.cache {
+                cache.put(self.session, &call.name, effect, &arguments, &result);
+            }
+        }
+        Ok(tool_message(&call.id, &result))
+    }
+}
+
+/// The event announcing a finished sub-agent, so the panel knows to re-read.
+///
+/// Carries only enough to identify the run, because the transcript itself is in
+/// the database — sending it through the event would put a copy on the wire for a
+/// tab that may not be open.
+fn subagent_event(run_id: &str, notice: &crate::ai::tools::SubAgentNotice) -> ChatEvent {
+    ChatEvent {
+        run_id: run_id.to_string(),
+        session_id: None,
+        sequence: 0,
+        kind: "subagent".into(),
+        text: Some(notice.label.clone()),
+        error: None,
+        metrics: Some(json!({
+            "agent_id": notice.id,
+            "label": notice.label,
+            "session_id": notice.session_id,
+            "state": "done",
+        })),
+    }
+}
+
+/// The event announcing a sub-agent that has just begun, so the panel can show it
+/// while it works.
+///
+/// Carries the task and the model, because the run is not written to the database
+/// until it finishes — a panel opened mid-run has nothing else to draw the brief
+/// from. Emitted directly rather than through the drain (see `Sink`): the drain is
+/// read after the spawning call settles, which is when the run is already over,
+/// so a start reported that way would arrive no earlier than the finish.
+pub(crate) fn subagent_started_event(
+    agent_id: &str,
+    label: &str,
+    parent_session: Option<&str>,
+    prompt: &str,
+    model: &str,
+    provider: &str,
+    started_at: &str,
+) -> ChatEvent {
+    ChatEvent {
+        // The agent's own id, so the stream it forwards nets out under the same
+        // run id and the parent's listener — which knows only the parent's run —
+        // ignores every one of them.
+        run_id: agent_id.to_string(),
+        session_id: None,
+        sequence: 0,
+        kind: "subagent".into(),
+        text: Some(label.to_string()),
+        error: None,
+        metrics: Some(json!({
+            "agent_id": agent_id,
+            "label": label,
+            "session_id": parent_session,
+            "state": "running",
+            "prompt": prompt,
+            "model": model,
+            "provider": provider,
+            "started_at": started_at,
+        })),
+    }
 }
 
 /// Shortest stretch of thinking worth a row of its own.
@@ -512,7 +717,7 @@ async fn stream_completion(
     run_id: &str,
     cancelled: Arc<AtomicBool>,
     enable_reasoning_control: bool,
-    on_event: &mut impl FnMut(ChatEvent),
+    on_event: &Arc<dyn Fn(ChatEvent) + Send + Sync>,
 ) -> Result<(Vec<ToolCall>, String, Value, String), String> {
     let mut body = json!({"model": model, "messages": messages, "stream": true, "stream_options": {"include_usage": true}});
     // Passed through exactly as the provider spelled it. The field is only added
@@ -865,8 +1070,8 @@ fn prepare_messages(
     }).collect()
 }
 
-fn emit_status(run_id: &str, status: &str, on_event: &mut impl FnMut(ChatEvent)) {
-    on_event(ChatEvent {
+fn emit_status(run_id: &str, status: &str, emit: &Arc<dyn Fn(ChatEvent) + Send + Sync>) {
+    emit(ChatEvent {
         run_id: run_id.to_string(),
         session_id: None,
         sequence: 0,

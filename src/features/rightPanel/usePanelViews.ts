@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 
-export type PanelViewId = "files" | "browser" | "terminal";
+export type PanelViewId = "files" | "browser" | "terminal" | "subagents";
 export type TerminalSession = { id: string; kind: "server" | "user"; title: string };
 
 export function usePanelViews() {

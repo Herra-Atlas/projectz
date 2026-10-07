@@ -5,7 +5,7 @@ import FilePreview from "./FilePreview";
 import { CreateNameRow } from "./NameInput";
 import ContextMenu from "../menu/ContextMenu";
 import { buildFileMenuItems } from "../menu/fileMenu";
-import { useFileTree, type TreeEntry } from "../../../features/rightPanel/useFileTree";
+import { absolutePath, useFileTree, type TreeEntry } from "../../../features/rightPanel/useFileTree";
 import type { FileEdit } from "../../../features/rightPanel/fileEdit";
 import { useTreeDrag } from "../../../features/rightPanel/fileTreeDrag";
 import { workspaceLabel } from "../../../features/workspace/useWorkspaces";
@@ -154,6 +154,23 @@ export default function FilesTab({ workspace, requestedPath, onRequestHandled, o
   }, [deleteFile, onNotify]);
 
   /**
+   * Puts the entry's absolute path on the clipboard.
+   *
+   * Absolute rather than the tree-relative path, because that is what "the path"
+   * means to everything outside this app -- a terminal, an editor, another
+   * window -- and the tree-relative form is only meaningful back inside it.
+   */
+  const copyPath = useCallback(async (entry: TreeEntry) => {
+    if (!workspace) return;
+    try {
+      await navigator.clipboard.writeText(absolutePath(workspace, entry.path));
+      onNotify?.("success", "Path copied");
+    } catch {
+      onNotify?.("error", "Could not copy the path");
+    }
+  }, [workspace, onNotify]);
+
+  /**
    * Applies the open field.
    *
    * On failure the field is left open: the name is the thing that was wrong, and
@@ -207,11 +224,12 @@ export default function FilesTab({ workspace, requestedPath, onRequestHandled, o
 
   const items = useMemo(() => buildFileMenuItems(menu?.target ?? null, {
     onView: setPreview,
+    onCopyPath: (entry) => void copyPath(entry),
     onRename: startRename,
     onDelete: (entry) => void remove(entry),
     onCreateFile: (parent) => void startCreate(parent, false),
     onCreateFolder: (parent) => void startCreate(parent, true),
-  }), [menu, startRename, remove, startCreate]);
+  }), [menu, copyPath, startRename, remove, startCreate]);
 
   // A file opened under a folder that has since changed may no longer exist, so
   // returning to the tree is the only way to see what is there now.

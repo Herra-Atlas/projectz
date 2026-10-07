@@ -36,8 +36,21 @@ pub enum Decision {
 const AUTO_READ_TOOLS: &[&str] = &["list_dir", "read_file", "search_files", "skill_read"];
 const AUTO_WRITE_TOOLS: &[&str] = &["write_file", "edit_file", "edit_lines", "skill_manage"];
 
+/// Tools that only arrange work rather than doing it, and so never prompt.
+///
+/// `spawn_agent` is the whole list. Starting a sub-agent changes nothing on its
+/// own -- the sub-agent's own calls are what touch the workspace, and those go
+/// through this same gate, one level down. Prompting here as well would ask the
+/// user to approve a delegation and then ask again for each thing it does, which
+/// is two prompts for one decision. Letting the leaves decide is also what makes
+/// the access levels mean the same thing inside a sub-agent as outside it.
+const ORCHESTRATION_TOOLS: &[&str] = &["spawn_agent"];
+
 /// Decides whether this tool name runs automatically in the selected mode.
 pub fn decide(mode: PermissionMode, tool_name: &str) -> Decision {
+    if ORCHESTRATION_TOOLS.contains(&tool_name) {
+        return Decision::Allow;
+    }
     let allowed = match mode {
         PermissionMode::Ask => false,
         PermissionMode::AutoSafe => AUTO_READ_TOOLS.contains(&tool_name),
@@ -127,6 +140,21 @@ mod tests {
             "unknown_tool",
         ] {
             assert_eq!(decide(PermissionMode::Full, tool), Decision::Allow);
+        }
+    }
+
+    /// Delegation is allowed in every mode, because it does no work itself: the
+    /// sub-agent's own calls are gated the same way its parent's are. Prompting
+    /// here too would ask twice for one decision.
+    #[test]
+    fn spawning_is_orchestration_and_never_prompts() {
+        for mode in [
+            PermissionMode::Ask,
+            PermissionMode::AutoSafe,
+            PermissionMode::AutoWrites,
+            PermissionMode::Full,
+        ] {
+            assert_eq!(decide(mode, "spawn_agent"), Decision::Allow, "{mode:?}");
         }
     }
 }

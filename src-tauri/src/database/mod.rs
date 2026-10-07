@@ -541,8 +541,17 @@ impl Database {
         //
         // Both default when absent, so a conversation saved before either existed
         // reads as Chat with the default permission rather than failing.
+        //
+        // `kind` and `parentSessionId` are what make a sub-agent's run a row in
+        // the same table without it appearing in the sidebar: the list queries
+        // exclude anything whose kind is `subagent`, and the Sub agents panel is
+        // the only reader that asks for them. They live in this blob beside the
+        // pin and the mode rather than in new columns, because they are read and
+        // written with those and a column each would mean a migration for two
+        // short strings. A missing `kind` is a chat, which is what every
+        // conversation written before this reads as.
         let metadata = json(
-            &serde_json::json!({"pinned": session["pinned"].as_bool().unwrap_or(false), "renamed": session["renamed"].as_bool().unwrap_or(false), "renamedByUser": session["renamedByUser"].as_bool().unwrap_or(false), "dotColor": dot_color, "mode": session["mode"].as_str().unwrap_or("chat"), "permission": session["permission"].as_str()}),
+            &serde_json::json!({"pinned": session["pinned"].as_bool().unwrap_or(false), "renamed": session["renamed"].as_bool().unwrap_or(false), "renamedByUser": session["renamedByUser"].as_bool().unwrap_or(false), "dotColor": dot_color, "mode": session["mode"].as_str().unwrap_or("chat"), "permission": session["permission"].as_str(), "kind": session["kind"].as_str().unwrap_or("chat"), "parentSessionId": session["parentSessionId"].as_str()}),
         )?;
 
         // Token counts and timing are rolled up from the messages in the same
@@ -729,6 +738,7 @@ impl Database {
         let mut sessions = connection
             .prepare(&format!(
                 "SELECT {SESSION_COLUMNS} FROM sessions \
+                 WHERE COALESCE(json_extract(metadata_json, '$.kind'), 'chat') <> 'subagent' \
                  ORDER BY json_extract(metadata_json, '$.pinned') DESC, updated_at DESC"
             ))
             .map_err(|error| error.to_string())?;
@@ -756,10 +766,19 @@ impl Database {
     }
 
     pub fn delete_chat_session(&self, id: &str) -> Result<(), String> {
-        self.connection
-            .lock()
-            .map_err(|error| error.to_string())?
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        connection
             .execute("DELETE FROM sessions WHERE id=?1", [id])
+            .map_err(|error| error.to_string())?;
+        // The sub-agent runs that belong to this conversation go with it. They are
+        // separate rows rather than children with a foreign key, so nothing else
+        // would collect them -- and a run left behind would appear in the Sub
+        // agents list grouped under a conversation that no longer exists.
+        connection
+            .execute(
+                "DELETE FROM sessions WHERE json_extract(metadata_json, '$.parentSessionId') = ?1",
+                [id],
+            )
             .map_err(|error| error.to_string())?;
         Ok(())
     }
@@ -1688,6 +1707,86 @@ mod tests {
 
     fn migrated() -> Database {
         Database::in_memory().expect("migrated in-memory database")
+    }
+
+    /// A sub-agent run lives in the same table as a conversation but appears in
+    /// exactly one list. The sidebar read must not show it, and the sub-agent read
+    /// must not show a conversation -- the whole reason the two queries exist apart.
+    #[test]
+    fn a_subagent_run_is_listed_apart_from_the_conversations() {
+        let database = migrated();
+        database
+            .save_chat_session(&serde_json::json!({
+                "id": "chat", "title": "A chat",
+                "createdAt": "2026-01-01T00:00:00.000Z", "updatedAt": "2026-01-01T00:00:01.000Z",
+                "messages": [{ "role": "user", "content": "hi" }]
+            }))
+            .unwrap();
+        database
+            .save_chat_session(&serde_json::json!({
+                "id": "run", "title": "scan the repo",
+                "createdAt": "2026-01-01T00:00:02.000Z", "updatedAt": "2026-01-01T00:00:03.000Z",
+                "kind": "subagent", "parentSessionId": "chat",
+                "messages": [{ "role": "user", "content": "find the entry point" }]
+            }))
+            .unwrap();
+
+        let conversations = database.list_session_headers().unwrap();
+        assert_eq!(conversations.len(), 1, "the sidebar must not show a run");
+        assert_eq!(conversations[0]["id"], "chat");
+
+        let runs = database.list_subagent_headers(Some("chat")).unwrap();
+        assert_eq!(runs.len(), 1, "the run must be listed for its parent");
+        assert_eq!(runs[0]["id"], "run");
+        assert_eq!(runs[0]["kind"], "subagent");
+        assert_eq!(runs[0]["parentSessionId"], "chat");
+
+        // Naming a conversation with no runs returns none, and asking for every
+        // run returns all of them.
+        assert!(database
+            .list_subagent_headers(Some("somewhere-else"))
+            .unwrap()
+            .is_empty());
+        assert_eq!(database.list_subagent_headers(None).unwrap().len(), 1);
+    }
+
+    /// A conversation written before sub-agents existed has no `kind`, and must
+    /// read as an ordinary chat rather than being mistaken for a run.
+    #[test]
+    fn a_session_without_a_kind_reads_as_a_chat() {
+        let database = migrated();
+        database
+            .save_chat_session(&serde_json::json!({
+                "id": "old", "title": "Old",
+                "createdAt": "2026-01-01T00:00:00.000Z", "updatedAt": "2026-01-01T00:00:01.000Z",
+                "messages": [{ "role": "user", "content": "hi" }]
+            }))
+            .unwrap();
+        assert_eq!(database.list_session_headers().unwrap()[0]["kind"], "chat");
+        assert!(database.list_subagent_headers(None).unwrap().is_empty());
+    }
+
+    /// Deleting a conversation takes its runs with it, so the panel is not left
+    /// showing agents grouped under a chat that no longer exists.
+    #[test]
+    fn deleting_a_conversation_deletes_its_subagent_runs() {
+        let database = migrated();
+        for (id, kind) in [("chat", "chat"), ("run", "subagent")] {
+            database
+                .save_chat_session(&serde_json::json!({
+                    "id": id, "title": id,
+                    "createdAt": "2026-01-01T00:00:00.000Z", "updatedAt": "2026-01-01T00:00:01.000Z",
+                    "kind": kind, "parentSessionId": if kind == "subagent" { Some("chat") } else { None },
+                    "messages": [{ "role": "user", "content": "hi" }]
+                }))
+                .unwrap();
+        }
+        assert_eq!(database.list_subagent_headers(None).unwrap().len(), 1);
+
+        database.delete_chat_session("chat").unwrap();
+
+        assert!(database.list_subagent_headers(None).unwrap().is_empty());
+        assert!(database.list_session_headers().unwrap().is_empty());
     }
 
     /// A session row, since `tool_cache` has a foreign key to it.

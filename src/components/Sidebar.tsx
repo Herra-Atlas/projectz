@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { ChartNoAxesColumn, ChartSpline, Check, ChevronLeft, ChevronRight, CircleDot, Database, MessageSquareText, MoreHorizontal, Pin, Pencil, Settings2, Trash2, X } from "lucide-react";
 import type { ChatSessionHeader, SessionActivity, SessionRunStatus } from "../features/chat/types";
 import { SESSION_DOT_COLORS, SESSION_DOT_DEFAULT, SESSION_DOT_DONE, SESSION_DOT_ERROR } from "../features/chat/types";
+import LiveSpinner from "./LiveSpinner";
 
 const MENU_WIDTH = 200;
 const DOT_SUBMENU_WIDTH = 152;
@@ -66,21 +67,6 @@ function NavButton({
       {icon}
       {!collapsed && <span>{label}</span>}
     </button>
-  );
-}
-
-function LiveSpinner({ gradientId }: { gradientId: string }) {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" className="animate-spin" aria-hidden="true">
-      <defs>
-        <linearGradient id={gradientId} x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stopColor="currentColor" stopOpacity="1" />
-          <stop offset="60%" stopColor="currentColor" stopOpacity="0.35" />
-          <stop offset="100%" stopColor="currentColor" stopOpacity="0.05" />
-        </linearGradient>
-      </defs>
-      <circle cx="12" cy="12" r="9" fill="none" stroke={`url(#${gradientId})`} strokeWidth="3" strokeLinecap="round" strokeDasharray="42 15" />
-    </svg>
   );
 }
 

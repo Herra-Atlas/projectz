@@ -152,6 +152,36 @@ pub fn database_list_session_headers(
     runtime.database().list_session_headers()
 }
 
+/// The sub-agent runs, newest first, optionally for one parent conversation.
+///
+/// Separate from `database_list_session_headers` rather than a flag on it,
+/// because the two never want the same thing: the sidebar lists conversations and
+/// must not show a run, and the Sub agents panel lists runs and must not show a
+/// conversation. One query with a switch would be a query that can be called the
+/// wrong way.
+#[tauri::command]
+pub fn database_list_subagents(
+    runtime: State<'_, AiRuntime>,
+    parent_session_id: Option<String>,
+) -> Result<Vec<serde_json::Value>, String> {
+    runtime
+        .database()
+        .list_subagent_headers(parent_session_id.as_deref())
+}
+
+/// The sub-agents running right now.
+///
+/// A run is only written to the database when it finishes, so this is the one way
+/// a panel opened mid-run can show an agent already at work. The list is
+/// in-memory and per-process, which is exactly the lifetime it describes: it is
+/// empty at launch and clears itself as each run ends.
+#[tauri::command]
+pub fn ai_running_subagents(
+    runtime: State<'_, AiRuntime>,
+) -> Vec<crate::ai::runtime::RunningSubAgent> {
+    runtime.running_subagents()
+}
+
 /// One conversation's messages, oldest first.
 ///
 /// Called when a conversation is opened, so a session whose transcript has not

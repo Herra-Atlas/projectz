@@ -49,6 +49,20 @@ export type AiEvent = {
     output?: string;
     diff?: ToolDiff;
     created?: boolean;
+    /**
+     * The sub-agent lifecycle fields, carried on a `subagent` event.
+     *
+     * `agent_id` names the run, `state` is `running` or `done`, and the rest are
+     * the facts a panel needs to show a run that has no stored row yet -- the task
+     * it was given, and the model it runs on.
+     */
+    agent_id?: string;
+    state?: string;
+    session_id?: string | null;
+    prompt?: string;
+    model?: string;
+    provider?: string;
+    started_at?: string;
   };
 };
 

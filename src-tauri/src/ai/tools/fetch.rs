@@ -120,6 +120,7 @@ mod tests {
             cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sink: super::super::Sink::default(),
             database: None,
+            run: None,
         }
     }
 
@@ -156,6 +157,7 @@ mod tests {
             cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             sink: super::super::Sink::default(),
             database: None,
+            run: None,
         };
         // Never reached over the network: the scheme check fails first, so this
         // only proves the cancelled context is threaded through without panicking.

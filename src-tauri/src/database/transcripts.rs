@@ -22,7 +22,7 @@
 //! and the database tests still use it, and a second full-read implementation
 //! would be a second thing to keep correct.
 
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 
 use super::Database;
@@ -49,11 +49,41 @@ impl Database {
         let mut statement = connection
             .prepare(&format!(
                 "SELECT {SESSION_COLUMNS} FROM sessions \
+                 WHERE COALESCE(json_extract(metadata_json, '$.kind'), 'chat') <> 'subagent' \
                  ORDER BY json_extract(metadata_json, '$.pinned') DESC, updated_at DESC"
             ))
             .map_err(|error| error.to_string())?;
         let rows = statement
             .query_map([], read_session_row)
+            .map_err(|error| error.to_string())?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(session_header(row.map_err(|error| error.to_string())?));
+        }
+        Ok(result)
+    }
+
+    /// The sub-agent runs, newest first, optionally for one parent conversation.
+    ///
+    /// The mirror of [`Self::list_session_headers`]: that read excludes what this
+    /// one selects, so a run appears in exactly one list. `parent` narrows to the
+    /// conversation that spawned them, which is what the panel wants when a
+    /// conversation is open -- the agents it started, not every agent ever run.
+    ///
+    /// No messages. The panel lists titles first and fetches a transcript when one
+    /// is opened, exactly as the chat sidebar does.
+    pub fn list_subagent_headers(&self, parent: Option<&str>) -> Result<Vec<Value>, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT {SESSION_COLUMNS} FROM sessions \
+                 WHERE json_extract(metadata_json, '$.kind') = 'subagent' \
+                   AND (?1 IS NULL OR json_extract(metadata_json, '$.parentSessionId') = ?1) \
+                 ORDER BY updated_at DESC"
+            ))
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![parent], read_session_row)
             .map_err(|error| error.to_string())?;
         let mut result = Vec::new();
         for row in rows {
@@ -212,5 +242,11 @@ pub fn session_header(row: SessionRow) -> Value {
         // third state here.
         "mode": metadata.get("mode").and_then(Value::as_str).unwrap_or("chat"),
         "permission": metadata.get("permission").and_then(Value::as_str),
+        // `chat` unless the row says otherwise, so every conversation written
+        // before sub-agents existed reads as an ordinary chat. `parentSessionId`
+        // is absent for a chat, which is what the panel uses to group runs under
+        // the conversation that started them.
+        "kind": metadata.get("kind").and_then(Value::as_str).unwrap_or("chat"),
+        "parentSessionId": metadata.get("parentSessionId").and_then(Value::as_str),
     })
 }
