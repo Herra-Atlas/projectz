@@ -82,6 +82,11 @@ pub enum ToolMode {
 ///
 /// The result is sorted by name inside `ToolRegistry`, so the order tools are
 /// added here cannot affect the cached request prefix.
+///
+/// Test-only since the chat loop calls [`registry_for_with`] directly: it always
+/// has an `allow_subagents` value to pass, so the wrapper's default of `true`
+/// would only ever hide which one a caller meant.
+#[cfg(test)]
 pub fn registry_for(mode: ToolMode, web_search_enabled: bool) -> ToolRegistry {
     registry_for_with(mode, web_search_enabled, true)
 }
@@ -102,7 +107,7 @@ pub fn registry_for_with(
     // Agent-only: delegation is a tool the model reaches for, so it has no place
     // in a Chat conversation that has no tools at all.
     if allow_subagents && mode == ToolMode::Agent {
-        registry.add(agent::SPAWN_AGENT);
+        registry.add(agent::SUB_AGENT);
     }
     if web_search_enabled {
         registry.add(websearch::spec());
@@ -190,7 +195,7 @@ mod tests {
                 "search_web",
                 "skill_manage",
                 "skill_read",
-                "spawn_agent",
+                "sub_agent",
                 "web_fetch",
                 "write_file"
             ]
@@ -203,7 +208,7 @@ mod tests {
     #[test]
     fn a_sub_agent_cannot_spawn_another_sub_agent() {
         let names = registry_for_with(ToolMode::Agent, true, false).names();
-        assert!(!names.contains(&"spawn_agent"), "{names:?}");
+        assert!(!names.contains(&"sub_agent"), "{names:?}");
         // Everything else it needs to do work is still there.
         for tool in ["read_file", "write_file", "run_terminal", "search_web"] {
             assert!(names.contains(&tool), "{tool} missing: {names:?}");
@@ -220,7 +225,7 @@ mod tests {
             .into_iter()
             .filter(|name| !child.contains(name))
             .collect::<Vec<_>>();
-        assert_eq!(difference, vec!["spawn_agent"]);
+        assert_eq!(difference, vec!["sub_agent"]);
     }
 
     #[test]
@@ -240,7 +245,7 @@ mod tests {
                 "search_web",
                 "skill_manage",
                 "skill_read",
-                "spawn_agent",
+                "sub_agent",
                 "web_fetch",
                 "write_file"
             ]
@@ -256,7 +261,7 @@ mod tests {
                 "search_files",
                 "skill_manage",
                 "skill_read",
-                "spawn_agent",
+                "sub_agent",
                 "write_file"
             ]
         );

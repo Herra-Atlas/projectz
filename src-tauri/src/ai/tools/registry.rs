@@ -16,7 +16,7 @@
 use serde_json::Value;
 
 use super::output;
-use super::run::{RunHandle, SubAgentNotice};
+use super::run::RunHandle;
 
 /// One tool as advertised to the model.
 #[derive(Clone, Debug)]
@@ -77,7 +77,7 @@ pub struct ToolContext {
     pub database: Option<std::sync::Arc<crate::database::Database>>,
     /// The run this call belongs to, for a tool that has to start work of its own.
     ///
-    /// Only `spawn_agent` reads it today. `None` means the call has no run behind
+    /// Only `sub_agent` reads it today. `None` means the call has no run behind
     /// it — a tool's own unit test — and such a tool reports a clean error rather
     /// than reaching for a model it does not have. See [`super::run::RunHandle`].
     pub run: Option<std::sync::Arc<RunHandle>>,
@@ -99,7 +99,6 @@ pub struct ToolContext {
 pub struct Sink {
     searches: std::sync::Arc<std::sync::Mutex<Vec<crate::websearch::WebSearchOutput>>>,
     diffs: std::sync::Arc<std::sync::Mutex<Vec<super::diff::Diff>>>,
-    subagents: std::sync::Arc<std::sync::Mutex<Vec<SubAgentNotice>>>,
 }
 
 impl ToolContext {
@@ -127,17 +126,6 @@ impl ToolContext {
             diffs.push(diff);
         }
     }
-
-    /// Queues a finished sub-agent for the run to announce.
-    ///
-    /// The panel reads the transcript from the database; this only tells it that
-    /// there is something new to read, so a sub-agent that finished while its tab
-    /// was closed is not invisible until the next launch.
-    pub fn report_subagent(&self, notice: SubAgentNotice) {
-        if let Ok(mut subagents) = self.sink.subagents.lock() {
-            subagents.push(notice);
-        }
-    }
 }
 
 impl Sink {
@@ -157,14 +145,6 @@ impl Sink {
         self.diffs
             .lock()
             .map(|mut diffs| std::mem::take(&mut *diffs))
-            .unwrap_or_default()
-    }
-
-    /// Takes the sub-agents that finished since the last drain.
-    pub fn drain_subagents(&self) -> Vec<SubAgentNotice> {
-        self.subagents
-            .lock()
-            .map(|mut subagents| std::mem::take(&mut *subagents))
             .unwrap_or_default()
     }
 }
@@ -292,7 +272,11 @@ impl ToolRegistry {
         ))
     }
 
-    /// Names of the registered tools, for display and tests.
+    /// Names of the registered tools, for tests.
+    ///
+    /// Test-only: nothing in the app needs the bare names, since it reads
+    /// [`ToolRegistry::specs`] or looks a tool up by name.
+    #[cfg(test)]
     pub fn names(&self) -> Vec<&'static str> {
         let mut tools = self.tools.iter().collect::<Vec<_>>();
         tools.sort_by_key(|tool| tool.name);

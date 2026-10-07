@@ -107,17 +107,6 @@ impl AiRuntime {
         self.approval.with_mode(mode)
     }
 
-    /// The permission mode the next reply will use.
-    ///
-    /// Read per run so changing the setting takes effect without a restart.
-    /// `Ask` when the stored value is missing or unreadable, which is the safe
-    /// direction to fail.
-    fn permission_mode(&self) -> crate::ai::tools::PermissionMode {
-        self.database
-            .setting("app.agent_permission")
-            .unwrap_or_default()
-    }
-
     /// Records the user's answer to a pending tool prompt.
     pub fn answer_approval(&self, approval_id: &str, allow: bool) -> bool {
         self.approval.answer(
@@ -624,7 +613,7 @@ impl AiRuntime {
             &run_id_clone,
             session_id.as_deref(),
             Some(&self.database),
-            self.approval_gate(self.permission_mode()),
+            self.approval_gate(request.permission),
             cancelled,
             subagent_default,
             // The top-level run may delegate; a sub-agent's own run passes false.

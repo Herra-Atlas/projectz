@@ -20,9 +20,10 @@ use crate::database::Database;
 
 /// Who wrote a skill.
 ///
-/// Recorded because the two are trusted differently: a user wrote theirs on
-/// purpose, while an agent-drafted one was inferred from a past conversation and
-/// may encode an assumption that was never checked.
+/// Recorded because the three are trusted differently: a bundled one and a
+/// user-written one were both written deliberately, while an agent-drafted one
+/// was inferred from a past conversation and may encode an assumption that was
+/// never checked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SkillOrigin {
@@ -30,6 +31,8 @@ pub enum SkillOrigin {
     User,
     /// Drafted by the agent from a past conversation.
     Generated,
+    /// Shipped with the app, and editable like any other skill.
+    Bundled,
 }
 
 impl Default for SkillOrigin {
@@ -47,6 +50,7 @@ impl SkillOrigin {
         match self {
             Self::User => "user",
             Self::Generated => "generated",
+            Self::Bundled => "bundled",
         }
     }
 
@@ -58,6 +62,7 @@ impl SkillOrigin {
     pub fn from_str(value: &str) -> Self {
         match value {
             "generated" => Self::Generated,
+            "bundled" => Self::Bundled,
             _ => Self::User,
         }
     }

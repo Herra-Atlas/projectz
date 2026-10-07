@@ -595,12 +595,19 @@ function useTick(active: boolean, ...deps: unknown[]): number {
 }
 
 /**
- * Seconds the way the header states them: whole seconds, then minutes and
- * seconds. Deliberately not a decimal — "Worked for 15s" is a fact about how
- * long the user waited, and "14.7s" implies a precision nothing here measured.
+ * A duration the way the panel states it: milliseconds while a step is quick
+ * enough that whole seconds would round it away, then whole seconds, then
+ * minutes and seconds.
+ *
+ * Under two seconds the rounding is the problem: an instant tool and a slow one
+ * both read "1s" (or "0s"), so the difference the reader is looking for is lost.
+ * Milliseconds say which was which. At and above two seconds a decimal would
+ * imply a precision nothing here measured, so it stays whole.
  */
 export function formatSeconds(seconds: number): string {
-  const total = Math.max(0, Math.round(seconds));
+  const clamped = Math.max(0, seconds);
+  if (clamped < 2) return `${Math.round(clamped * 1000)}ms`;
+  const total = Math.round(clamped);
   if (total < 60) return `${total}s`;
   return `${Math.floor(total / 60)}m ${total % 60}s`;
 }

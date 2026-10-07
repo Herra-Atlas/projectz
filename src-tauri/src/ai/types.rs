@@ -57,6 +57,17 @@ pub struct ChatRequest {
     /// naming a model still gets no tools from the registry.
     #[serde(default)]
     pub mode: crate::ai::tools::ToolMode,
+    /// How much the agent may do without asking, for this run.
+    ///
+    /// Sent on the request rather than read from `app.agent_permission`, because
+    /// the level belongs to the conversation. Reading the global setting meant a
+    /// session that showed `Ask` could run under whatever level the last-changed
+    /// conversation had stored, so reads ran unprompted despite the UI.
+    ///
+    /// Defaults to `Ask`, the safe direction, for a frontend that has not been
+    /// rebuilt.
+    #[serde(default)]
+    pub permission: crate::ai::tools::PermissionMode,
     /// Absent from older frontends, which sent a boolean instead. `true` matches
     /// the old enabled state and `false` matches the old disabled one, so a
     /// frontend that has not been rebuilt still runs.

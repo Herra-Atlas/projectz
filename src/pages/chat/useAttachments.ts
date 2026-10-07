@@ -54,11 +54,9 @@ type UseAttachmentsOptions = {
   /** What the selected model reports it accepts. Null until it has been read. */
   capabilities: ModelCapabilities | null;
   onNotify: (tone: "success" | "error", message: string) => void;
-  /** Closes the tools menu after a pick, so the menu does not outlive its trigger. */
-  onMenuClosed: () => void;
 };
 
-export function useAttachments({ capabilities, onNotify, onMenuClosed }: UseAttachmentsOptions) {
+export function useAttachments({ capabilities, onNotify }: UseAttachmentsOptions) {
   const [attachments, setAttachments] = useState<AttachedFile[]>([]);
 
   /**
@@ -143,8 +141,7 @@ export function useAttachments({ capabilities, onNotify, onMenuClosed }: UseAtta
     const selected = await openFiles({ multiple: true, directory: false });
     if (!selected) return;
     await addPaths(Array.isArray(selected) ? selected : [selected]);
-    onMenuClosed();
-  }, [addPaths, onMenuClosed]);
+  }, [addPaths]);
 
   /** Drops the sent files from the composer; they are now part of the transcript. */
   const removeSent = useCallback((sent: AttachedFile[]) => {

@@ -132,6 +132,15 @@ export type ThoughtStep = {
 export type ChatMessage = {
   role: "user" | "assistant" | "system" | "tool";
   content: string;
+  /**
+   * Kept in the conversation but not drawn.
+   *
+   * Used for the turn a finished sub-agent delivers: the model needs the report as
+   * input, but the user should not see it as a message of their own -- its result
+   * is shown on the `sub_agent` tool row inside the reply that spawned it. It is
+   * still persisted and still sent, so a reopened conversation keeps it in context.
+   */
+  hidden?: boolean;
   reasoning?: string;
   /** The thoughts and tool calls behind this reply, in the order they happened. */
   activity?: ActivityStep[];

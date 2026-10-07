@@ -24,7 +24,7 @@ use super::{ApprovalGate, ToolMode};
 /// Held as one `Option<Arc<..>>` on the context rather than as a handful of
 /// separate fields, for two reasons. A tool that does not need the run still
 /// reads a context that says nothing about a model, and a tool that *does* --
-/// today only `spawn_agent` -- takes one clone and has everything. `None` means
+/// today only `sub_agent` -- takes one clone and has everything. `None` means
 /// the call has no run behind it, which is the case in a tool's own unit tests
 /// and is reported as a clean tool error rather than a panic.
 pub struct RunHandle {

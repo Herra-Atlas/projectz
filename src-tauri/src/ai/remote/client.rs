@@ -132,7 +132,7 @@ pub async fn stream_chat(
     // edit could be answered from the cache with the pre-edit file.
     // See `ToolCache::next_stamp`.
 
-    let mut conversation = prepend_environment(payload, mode, web_search_enabled, database);
+    let mut conversation = prepend_environment(payload, mode, database);
     let mut usage = Value::Null;
     // Tools are advertised on every round rather than only the first. A model
     // that finishes a turn after using a tool has still seen the schema, so
@@ -141,7 +141,7 @@ pub async fn stream_chat(
     let tool_specs = registry.specs();
     // Shared across every call in the run: one collector, drained by the loop.
     let sink = crate::ai::tools::Sink::default();
-    // What a tool is told about this run, so one of them -- `spawn_agent` -- can
+    // What a tool is told about this run, so one of them -- `sub_agent` -- can
     // start work of its own. Built here, where every part already exists, and
     // shared so several delegated runs can be launched from the same call site.
     let run = Arc::new(crate::ai::tools::RunHandle {
@@ -236,7 +236,7 @@ pub async fn stream_chat(
         // Sequential by default, because tool results are appended in the order
         // the provider asked for them and a read taken before a write must stay
         // ordered before it. The one exception is delegation: consecutive
-        // `spawn_agent` calls are independent by construction -- each has its own
+        // `sub_agent` calls are independent by construction -- each has its own
         // conversation -- so they are the only thing worth overlapping, and they
         // are exactly what "several agents at once" means. A local model cannot be
         // asked for more than one request at a time, so it always runs them in
@@ -256,7 +256,7 @@ pub async fn stream_chat(
 
         let mut index = 0;
         while index < tool_calls.len() {
-            let spawn = crate::ai::tools::agent::SPAWN_AGENT.name;
+            let spawn = crate::ai::tools::agent::SUB_AGENT.name;
             if !run.local && tool_calls[index].name == spawn {
                 // The run of consecutive delegations, launched together.
                 let start = index;
@@ -288,9 +288,6 @@ pub async fn stream_chat(
             // attributed to another's row.
             for search in sink.drain_searches() {
                 on_search(search);
-            }
-            for notice in sink.drain_subagents() {
-                on_event(subagent_event(run_id, &notice));
             }
         }
     }
@@ -479,7 +476,7 @@ impl<'a> CallRunner<'a> {
             // stored state and the cache keyed on it cannot disagree about which
             // database this conversation is using.
             database: self.database.cloned(),
-            // What lets `spawn_agent` start a run of its own.
+            // What lets `sub_agent` start a run of its own.
             run: Some(Arc::clone(self.run)),
         };
         // `succeeded` is carried out because the text alone cannot tell a failure
@@ -528,7 +525,7 @@ impl<'a> CallRunner<'a> {
 /// Carries only enough to identify the run, because the transcript itself is in
 /// the database — sending it through the event would put a copy on the wire for a
 /// tab that may not be open.
-fn subagent_event(run_id: &str, notice: &crate::ai::tools::SubAgentNotice) -> ChatEvent {
+pub(crate) fn subagent_event(run_id: &str, notice: &crate::ai::tools::SubAgentNotice) -> ChatEvent {
     ChatEvent {
         run_id: run_id.to_string(),
         session_id: None,
@@ -919,10 +916,9 @@ async fn stream_completion(
 ///
 /// Ordering matters in two ways. The note goes **before** any system message the
 /// user wrote, so a project instruction cannot contradict the machine it is being
-/// sent to. And nothing is prepended at all when the run has no tools, so a
-/// Chat-mode request keeps byte-identical prefix across every turn -- which is
-/// exactly the invariant the prompt-caching notes protect, and paying for it with
-/// a note about a filesystem the run cannot touch would be a poor trade.
+/// sent to. And a Chat-mode run gets nothing at all: it carries only the web
+/// tools, which touch no filesystem, so there is no machine to describe and no
+/// skill to read -- keeping its prefix as short and as stable as it can be.
 ///
 /// **One leading message, not two.** Everything the model needs before the
 /// conversation has to arrive as a single `system` turn: llama.cpp's templates
@@ -930,10 +926,10 @@ async fn stream_completion(
 /// beginning"), so a second one partway down is not portable. The environment note
 /// and the skill catalogue are therefore one block joined by a blank line.
 ///
-/// **The skill catalogue does not change when a skill is applied.** A skill the
-/// user checks in the composer travels inline with that message instead, so
-/// picking one moves no part of this prefix. Only editing or disabling a skill
-/// changes it, which is the honest cost of the catalogue being here at all.
+/// **The skill catalogue is Agent-only and does not move when a skill is read.**
+/// Reading a skill is a tool call, which grows the conversation rather than this
+/// prefix; only editing or disabling a skill rewrites the catalogue, which is the
+/// honest cost of it being here at all.
 ///
 /// **The root in the note is a deliberate exception to cache stability.** Naming
 /// the folder means the prefix changes when the user switches workspace, so the
@@ -945,26 +941,25 @@ async fn stream_completion(
 fn prepend_environment(
     mut messages: Vec<Value>,
     mode: crate::ai::tools::ToolMode,
-    web_search_enabled: bool,
     database: Option<&Arc<crate::database::Database>>,
 ) -> Vec<Value> {
-    let has_tools = !crate::ai::tools::registry_for(mode, web_search_enabled)
-        .names()
-        .is_empty();
+    // Only an Agent run touches the machine: its filesystem and terminal tools are
+    // the ones that need to be told the shell and the workspace root. A Chat run
+    // has only the web tools, which take URLs and never a path, so it gets no note.
+    let machine_tools = mode == crate::ai::tools::ToolMode::Agent;
     let root = crate::ai::tools::workspace::root_string();
     let mut sections = Vec::new();
     if let Some(note) = crate::ai::prompts::chat::environment_note(
-        has_tools,
+        machine_tools,
         (!root.is_empty()).then_some(root.as_str()),
     ) {
         sections.push(note);
     }
-    // The skill catalogue rides in the same leading block rather than getting a
-    // message of its own: llama.cpp rejects a `system` turn that is not first, so
-    // everything the model needs before the conversation has to be one message.
-    // Only sent when tools exist, because `skill_read` is what makes it actionable
-    // -- in Chat mode there is nothing to read it with.
-    if has_tools {
+    // The catalogue is Agent-only: `skill_read` is what makes it actionable, and a
+    // Chat run has no tool to read one with. It rides in the same leading block
+    // rather than a message of its own, because llama.cpp rejects a `system` turn
+    // that is not first.
+    if machine_tools {
         if let Some(catalogue) =
             crate::ai::tools::skills::index(database.map(|database| database.as_ref()))
         {

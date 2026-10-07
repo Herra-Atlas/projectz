@@ -9,8 +9,9 @@ export type Skill = {
   /** Free-text label. `null` is unlabelled and is distinct from `""`. */
   skill_type: string | null;
   /** `user` for one written deliberately, `generated` for one the agent drafted
-   * from a past conversation. They are trusted differently. */
-  origin: "user" | "generated";
+   * from a past conversation, `bundled` for one the app ships. They are trusted
+   * differently. */
+  origin: "user" | "generated" | "bundled";
   enabled: boolean;
   use_count: number;
   created_at: string;

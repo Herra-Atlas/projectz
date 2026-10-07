@@ -311,13 +311,18 @@ fn move_in(root: &Path, source: &str, target: &str) -> Result<(), String> {
 /// rename, so there is one containment rule and one way a file lands.
 #[tauri::command]
 pub fn panel_rename_file(relative: String, new_name: String) -> Result<(), String> {
-    eprintln!("[panel_rename_file] called with relative='{}', new_name='{}'", relative, new_name);
     let root = require_workspace()?;
-    let source = if relative.is_empty() { "." } else { &relative };
-    let source_resolved = resolve_within(&root, source)?;
-    eprintln!("[panel_rename_file] source_resolved='{}'", source_resolved.display());
+    rename_in(&root, &relative, &new_name)
+}
 
-    // Construct the destination relative path: parent relative path + new_name
+/// The rename, against an explicit root so a test can point it at a temporary
+/// folder without touching the process-global -- the same split as [`move_in`].
+fn rename_in(root: &Path, relative: &str, new_name: &str) -> Result<(), String> {
+    let source = if relative.is_empty() { "." } else { relative };
+    let source_resolved = resolve_within(root, source)?;
+
+    // The destination is the source's own parent plus the new name, so a rename
+    // never moves the entry out of the folder it was in.
     let parent_relative = if relative.contains('/') {
         let parts: Vec<&str> = relative.split('/').collect();
         parts[..parts.len() - 1].join("/")
@@ -325,48 +330,42 @@ pub fn panel_rename_file(relative: String, new_name: String) -> Result<(), Strin
         String::new()
     };
     let dest_relative = if parent_relative.is_empty() {
-        new_name.clone()
+        new_name.to_string()
     } else {
-        format!("{}/{}", parent_relative, new_name)
+        format!("{parent_relative}/{new_name}")
     };
-    eprintln!("[panel_rename_file] dest_relative='{}'", dest_relative);
-
-    // Ensure the destination is within the workspace
-    let _ = resolve_within(&root, &dest_relative)?;
-
-    let source_resolved = resolve_within(&root, source)?;
-    let dest_resolved = resolve_within(&root, &dest_relative)?;
-    eprintln!("[panel_rename_file] source_resolved='{}'", source_resolved.display());
-    eprintln!("[panel_rename_file] dest_resolved='{}'", dest_resolved.display());
+    // Resolving outside the root is the refusal: `resolve_within` rejects an
+    // absolute name or one carrying `..`, so a rename cannot escape the workspace.
+    let dest_resolved = resolve_within(root, &dest_relative)?;
 
     if dest_resolved.exists() {
-        return Err(format!("{} already exists", dest_resolved.display()));
+        return Err(format!("{dest_relative} already exists"));
     }
 
-    // Perform the rename
     std::fs::rename(&source_resolved, &dest_resolved)
-        .map_err(|error| format!("Could not rename {}: {error}", source_resolved.display()))?;
-
-    Ok(())
+        .map_err(|error| format!("Could not rename {}: {error}", source_resolved.display()))
 }
 
 #[tauri::command]
 pub fn panel_delete_file(relative: String) -> Result<(), String> {
-    eprintln!("[panel_delete_file] called with relative='{}'", relative);
     let root = require_workspace()?;
-    let target = if relative.is_empty() { "." } else { &relative };
-    let target_resolved = resolve_within(&root, target)?;
-    eprintln!("[panel_delete_file] target_resolved='{}'", target_resolved.display());
+    delete_in(&root, &relative)
+}
+
+/// The delete, against an explicit root so a test can point it at a temporary
+/// folder without touching the process-global -- the same split as [`move_in`].
+fn delete_in(root: &Path, relative: &str) -> Result<(), String> {
+    let target = if relative.is_empty() { "." } else { relative };
+    let target_resolved = resolve_within(root, target)?;
 
     if target_resolved.is_dir() {
-        std::fs::remove_dir_all(&target_resolved)
-            .map_err(|error| format!("Could not delete directory {}: {error}", target_resolved.display()))?;
+        std::fs::remove_dir_all(&target_resolved).map_err(|error| {
+            format!("Could not delete directory {}: {error}", target_resolved.display())
+        })
     } else {
         std::fs::remove_file(&target_resolved)
-            .map_err(|error| format!("Could not delete file {}: {error}", target_resolved.display()))?;
+            .map_err(|error| format!("Could not delete file {}: {error}", target_resolved.display()))
     }
-
-    Ok(())
 }
 
 /// Folders that are never worth listing.
@@ -605,7 +604,7 @@ mod tests {
         write(&root, "old.txt");
 
         // Rename the file
-        panel_rename_file("old.txt".to_string(), "new.txt".to_string()).expect("rename failed");
+        rename_in(&root, "old.txt", "new.txt").expect("rename failed");
 
         // Check the old file is gone and the new file exists
         assert!(!root.join("old.txt").exists(), "old file still exists");
@@ -621,7 +620,7 @@ mod tests {
         write(&root.join("old_dir"), "file.txt");
 
         // Rename the directory
-        panel_rename_file("old_dir".to_string(), "new_dir".to_string()).expect("rename failed");
+        rename_in(&root, "old_dir", "new_dir").expect("rename failed");
 
         // Check the old directory is gone and the new directory exists with contents
         assert!(!root.join("old_dir").exists(), "old directory still exists");
@@ -636,7 +635,7 @@ mod tests {
         let root = temp_dir("panel-rename-escape");
         write(&root, "ok.txt");
 
-        let error = panel_rename_file("ok.txt".to_string(), "../escaped.txt".to_string()).expect_err("rename should fail");
+        let error = rename_in(&root, "ok.txt", "../escaped.txt").expect_err("rename should fail");
         assert!(
             error.contains("outside") || error.contains(".."),
             "the escape was not named in the error: {error}"
@@ -651,7 +650,7 @@ mod tests {
         write(&root, "to_delete.txt");
 
         // Delete the file
-        panel_delete_file("to_delete.txt".to_string()).expect("delete failed");
+        delete_in(&root, "to_delete.txt").expect("delete failed");
 
         // Check the file is gone
         assert!(!root.join("to_delete.txt").exists(), "file still exists after delete");
@@ -666,7 +665,7 @@ mod tests {
         write(&root.join("to_delete_dir/nested"), "file.txt");
 
         // Delete the directory
-        panel_delete_file("to_delete_dir".to_string()).expect("delete failed");
+        delete_in(&root, "to_delete_dir").expect("delete failed");
 
         // Check the directory and its contents are gone
         assert!(!root.join("to_delete_dir").exists(), "directory still exists after delete");
@@ -679,7 +678,7 @@ mod tests {
         let root = temp_dir("panel-delete-escape");
         write(&root, "ok.txt");
 
-        let error = panel_delete_file("../escaped.txt".to_string()).expect_err("delete should fail");
+        let error = delete_in(&root, "../escaped.txt").expect_err("delete should fail");
         assert!(
             error.contains("outside") || error.contains(".."),
             "the escape was not named in the error: {error}"

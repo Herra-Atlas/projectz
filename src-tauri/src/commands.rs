@@ -82,6 +82,12 @@ pub async fn database_initialize(
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("projectz");
     runtime.database().import_legacy(&legacy_data_dir)?;
+    // The skills the app ships, written once (the seed is idempotent and is
+    // short-circuited by a setting). A failure is logged rather than fatal: a
+    // database that cannot take these rows is not a reason to refuse to start.
+    if let Err(error) = runtime.database().seed_bundled_skills() {
+        tracing::warn!(%error, "bundled skills could not be seeded");
+    }
     let _ = app.emit(
         "startup-progress",
         serde_json::json!({"phase":"migrations","message":"Database ready","progress":38}),

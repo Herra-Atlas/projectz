@@ -121,7 +121,7 @@ impl Database {
     ) -> Result<Vec<Value>, String> {
         let mut statement = connection
             .prepare(
-                "SELECT role,content,model_id,provider_id,metrics_json,reasoning,tool_json,activity_json \
+                "SELECT role,content,model_id,provider_id,metrics_json,reasoning,tool_json,activity_json,hidden \
                  FROM messages WHERE session_id=?1 ORDER BY ordinal",
             )
             .map_err(|error| error.to_string())?;
@@ -139,12 +139,16 @@ impl Database {
                 let activity: Option<Value> = activity
                     .and_then(|raw| serde_json::from_str(&raw).ok())
                     .filter(|value: &Value| value.as_array().is_some_and(|list| !list.is_empty()));
+                // Kept in the model's context but not drawn; see the `hidden` note
+                // in the schema. Stored as 0/1 and read back as a plain boolean.
+                let hidden = row.get::<_, Option<i64>>(8)?.unwrap_or(0) != 0;
                 Ok(json!({
                     "role": row.get::<_, String>(0)?,
                     "content": row.get::<_, String>(1)?,
                     "reasoning": row.get::<_, Option<String>>(5)?,
                     "tool": tool,
                     "activity": activity,
+                    "hidden": hidden,
                     "modelId": row.get::<_, Option<String>>(2)?,
                     "providerId": row.get::<_, Option<String>>(3)?,
                     "metrics": metrics,

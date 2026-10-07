@@ -33,24 +33,39 @@ pub enum Decision {
     Deny(String),
 }
 
-const AUTO_READ_TOOLS: &[&str] = &["list_dir", "read_file", "search_files", "skill_read"];
-const AUTO_WRITE_TOOLS: &[&str] = &["write_file", "edit_file", "edit_lines", "skill_manage"];
-
-/// Tools that only arrange work rather than doing it, and so never prompt.
+/// Read tools, approved without asking from `auto_safe` upward.
 ///
-/// `spawn_agent` is the whole list. Starting a sub-agent changes nothing on its
-/// own -- the sub-agent's own calls are what touch the workspace, and those go
-/// through this same gate, one level down. Prompting here as well would ask the
-/// user to approve a delegation and then ask again for each thing it does, which
-/// is two prompts for one decision. Letting the leaves decide is also what makes
-/// the access levels mean the same thing inside a sub-agent as outside it.
-const ORCHESTRATION_TOOLS: &[&str] = &["spawn_agent"];
+/// `search_web` and `web_fetch` ride here because they only observe: a search
+/// reads a search engine and a fetch reads one page, and both already have an
+/// implicit ceiling (`search_web`'s fanout and `web_fetch`'s single URL). Asking
+/// for every page a model reads would be a prompt per step of a research run,
+/// which is the mode this level exists to make tolerable. `web_fetch` can reach
+/// an internal address, so a user who does not want that should stay on `ask`.
+const AUTO_READ_TOOLS: &[&str] = &[
+    "list_dir",
+    "read_file",
+    "search_files",
+    "skill_read",
+    "search_web",
+    "web_fetch",
+];
+/// Write tools, approved without asking only from `auto_writes` upward.
+///
+/// `sub_agent` is here rather than in a class of its own. Delegation is gated
+/// like the work it starts: a run in `Ask` or `AutoSafe` is asked before an agent
+/// is launched, and one that already trusts writes may delegate without a prompt.
+/// The sub-agent's own calls go through this same gate one level down, so its
+/// leaves still decide for themselves.
+const AUTO_WRITE_TOOLS: &[&str] = &[
+    "write_file",
+    "edit_file",
+    "edit_lines",
+    "skill_manage",
+    "sub_agent",
+];
 
 /// Decides whether this tool name runs automatically in the selected mode.
 pub fn decide(mode: PermissionMode, tool_name: &str) -> Decision {
-    if ORCHESTRATION_TOOLS.contains(&tool_name) {
-        return Decision::Allow;
-    }
     let allowed = match mode {
         PermissionMode::Ask => false,
         PermissionMode::AutoSafe => AUTO_READ_TOOLS.contains(&tool_name),
@@ -94,7 +109,16 @@ mod tests {
 
     #[test]
     fn auto_safe_only_approves_the_read_allowlist() {
-        for tool in ["list_dir", "read_file", "search_files", "skill_read"] {
+        for tool in [
+            "list_dir",
+            "read_file",
+            "search_files",
+            "skill_read",
+            // Network reads live here too: a research run should not prompt once
+            // per page it opens.
+            "search_web",
+            "web_fetch",
+        ] {
             assert_eq!(decide(PermissionMode::AutoSafe, tool), Decision::Allow);
         }
         for tool in [
@@ -103,8 +127,7 @@ mod tests {
             "edit_lines",
             "skill_manage",
             "run_terminal",
-            "search_web",
-            "web_fetch",
+            "sub_agent",
         ] {
             assert_eq!(decide(PermissionMode::AutoSafe, tool), Decision::Ask);
         }
@@ -117,14 +140,17 @@ mod tests {
             "read_file",
             "search_files",
             "skill_read",
+            "search_web",
+            "web_fetch",
             "write_file",
             "edit_file",
             "edit_lines",
             "skill_manage",
+            "sub_agent",
         ] {
             assert_eq!(decide(PermissionMode::AutoWrites, tool), Decision::Allow);
         }
-        for tool in ["run_terminal", "search_web", "web_fetch", "unknown_tool"] {
+        for tool in ["run_terminal", "unknown_tool"] {
             assert_eq!(decide(PermissionMode::AutoWrites, tool), Decision::Ask);
         }
     }
@@ -143,18 +169,17 @@ mod tests {
         }
     }
 
-    /// Delegation is allowed in every mode, because it does no work itself: the
-    /// sub-agent's own calls are gated the same way its parent's are. Prompting
-    /// here too would ask twice for one decision.
+    /// Delegation is gated like a write. A run that must ask before touching the
+    /// workspace must also ask before starting an agent that will; one that
+    /// already trusts writes may delegate without a prompt.
     #[test]
-    fn spawning_is_orchestration_and_never_prompts() {
-        for mode in [
-            PermissionMode::Ask,
-            PermissionMode::AutoSafe,
-            PermissionMode::AutoWrites,
-            PermissionMode::Full,
-        ] {
-            assert_eq!(decide(mode, "spawn_agent"), Decision::Allow, "{mode:?}");
-        }
+    fn delegating_is_gated_like_a_write() {
+        assert_eq!(decide(PermissionMode::Ask, "sub_agent"), Decision::Ask);
+        assert_eq!(decide(PermissionMode::AutoSafe, "sub_agent"), Decision::Ask);
+        assert_eq!(
+            decide(PermissionMode::AutoWrites, "sub_agent"),
+            Decision::Allow
+        );
+        assert_eq!(decide(PermissionMode::Full, "sub_agent"), Decision::Allow);
     }
 }

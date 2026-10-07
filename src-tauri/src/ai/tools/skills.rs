@@ -70,10 +70,10 @@ pub const SKILL_READ: ToolSpec = ToolSpec {
 /// summary of what is inside.
 ///
 /// **Built per request from the enabled set, and constant across a conversation.**
-/// Ticking a skill in the composer does not change it: a checked skill arrives
-/// inline with the message instead, so the cached prefix does not move when one
-/// is applied. Only editing or disabling a skill changes this, which is the
-/// honest cost of the index being here at all.
+/// Reading a skill is a tool call, which grows the conversation rather than this
+/// prefix, so the catalogue does not move when one is applied. Only editing or
+/// disabling a skill changes it, which is the honest cost of the index being here
+/// at all.
 ///
 /// `None` when there are no skills, or when the run has no session to read them
 /// for. Returning an empty string instead would put a paragraph about having no
@@ -88,23 +88,38 @@ pub fn index(database: Option<&crate::database::Database>) -> Option<String> {
     let listed = skills
         .iter()
         .map(|skill| {
-            match skill
-                .description
-                .as_deref()
-                .map(str::trim)
-                .filter(|text| !text.is_empty())
-            {
-                Some(description) => format!("- {} — {}", skill.name, description),
-                None => format!("- {}", skill.name),
+            // `type` is the one grouping a skill has, and the only way the model
+            // can reason about a whole family -- "the code skills" -- without
+            // reading a body. Bracketed so it reads as a label rather than part
+            // of the name, and omitted when the skill carries none.
+            let mut line = format!("- {}", skill.name);
+            if let Some(label) = labelled(&skill.skill_type) {
+                line.push_str(&format!(" [{label}]"));
             }
+            if let Some(description) = labelled(&skill.description) {
+                line.push_str(&format!(" — {description}"));
+            }
+            line
         })
         .collect::<Vec<_>>()
         .join("\n");
     Some(format!(
-        "The user has saved these skills. Each is a set of instructions they wrote about \
-how they want something done. When one applies to the task, read it with `skill_read` \
-before you start, and follow it. If none of them apply, ignore this section.\n\n{listed}"
+        "The skills available to you are listed below, one per line as \
+`name [type] — when to use it`. Each is a set of instructions about how the user wants something \
+done. When one applies to the task, read it with `skill_read` before you start, and follow it. \
+If none of them apply, ignore this section.\n\n{listed}"
     ))
+}
+
+/// A trimmed, non-empty optional field as a slice, or nothing.
+///
+/// The catalogue skips a blank label rather than printing `[]` or a dangling
+/// separator, so an unlabelled or description-less skill still reads as one line.
+fn labelled(value: &Option<String>) -> Option<&str> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
 }
 
 /// Creates, edits, enables or disables a skill.
@@ -361,6 +376,28 @@ mod tests {
         let database = database();
         let text = index(Some(database.as_ref())).expect("an index");
         assert!(!text.contains("Prefer Result over panic."), "{text}");
+    }
+
+    /// `type` is named because it is the one grouping a skill has, and the only
+    /// way the model can reason about a whole family -- "the code skills" --
+    /// without reading a body.
+    #[test]
+    fn the_index_names_a_skills_type_when_it_has_one() {
+        let database = std::sync::Arc::new(
+            crate::database::Database::in_memory().expect("an in-memory database"),
+        );
+        database
+            .create_skill(&NewSkill {
+                name: "Rust house style".into(),
+                description: Some("how Rust is written here".into()),
+                instructions: "Prefer Result over panic.".into(),
+                skill_type: Some("code".into()),
+                origin: SkillOrigin::User,
+            })
+            .expect("seed");
+        let text = index(Some(database.as_ref())).expect("an index");
+        assert!(text.contains("Rust house style [code]"), "{text}");
+        assert!(text.contains("— how Rust is written here"), "{text}");
     }
 
     /// A skill with no description still has to be listed: the model can still

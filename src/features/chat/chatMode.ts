@@ -44,7 +44,7 @@ export const PERMISSION_LABELS: Record<PermissionMode, string> = {
 export const PERMISSION_HINTS: Record<PermissionMode, string> = {
   ask: "Ask you before every tool call.",
   auto_safe: "Auto-approve list_dir, read_file, search_files, and skill_read. Ask before every other tool.",
-  auto_writes: "Also auto-approve write_file, edit_file, edit_lines, and skill_manage. Ask before every other tool.",
+  auto_writes: "Also auto-approve write_file, edit_file, edit_lines, skill_manage, and sub_agent. Ask before every other tool.",
   full: "Auto-approve every tool call.",
 };
 

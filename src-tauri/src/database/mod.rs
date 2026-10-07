@@ -11,6 +11,7 @@ use crate::ai::{
     remote::types::Endpoint,
 };
 
+pub mod bundled_skills;
 pub mod skills;
 pub mod statistics;
 pub mod transcripts;
@@ -26,7 +27,7 @@ pub struct Database {
 /// both refer to this, so adding a migration is one edit here plus one in
 /// `migrate`. Before this existed, each new migration silently broke a test that
 /// had hardcoded the old number.
-pub const LATEST_SCHEMA_VERSION: i64 = 12;
+pub const LATEST_SCHEMA_VERSION: i64 = 13;
 
 /// The current time as UTC ISO-8601, the format every timestamp uses.
 ///
@@ -654,7 +655,7 @@ impl Database {
                         json(&stored)
                     })
                     .transpose()?;
-                tx.execute("INSERT INTO messages (id,session_id,ordinal,role,content,created_at,model_id,provider_id,metrics_json,prompt_tokens,completion_tokens,cached_tokens,ttft_ms,total_latency_ms,reasoning,tool_json,generation_seconds,prompt_seconds,generation_rate_estimated,activity_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20) ON CONFLICT(id) DO UPDATE SET content=excluded.content,model_id=excluded.model_id,provider_id=excluded.provider_id,metrics_json=excluded.metrics_json,prompt_tokens=excluded.prompt_tokens,completion_tokens=excluded.completion_tokens,cached_tokens=excluded.cached_tokens,ttft_ms=excluded.ttft_ms,total_latency_ms=excluded.total_latency_ms,reasoning=excluded.reasoning,tool_json=excluded.tool_json,generation_seconds=excluded.generation_seconds,prompt_seconds=excluded.prompt_seconds,generation_rate_estimated=excluded.generation_rate_estimated,activity_json=excluded.activity_json", params![
+                tx.execute("INSERT INTO messages (id,session_id,ordinal,role,content,created_at,model_id,provider_id,metrics_json,prompt_tokens,completion_tokens,cached_tokens,ttft_ms,total_latency_ms,reasoning,tool_json,generation_seconds,prompt_seconds,generation_rate_estimated,activity_json,hidden) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21) ON CONFLICT(id) DO UPDATE SET content=excluded.content,model_id=excluded.model_id,provider_id=excluded.provider_id,metrics_json=excluded.metrics_json,prompt_tokens=excluded.prompt_tokens,completion_tokens=excluded.completion_tokens,cached_tokens=excluded.cached_tokens,ttft_ms=excluded.ttft_ms,total_latency_ms=excluded.total_latency_ms,reasoning=excluded.reasoning,tool_json=excluded.tool_json,generation_seconds=excluded.generation_seconds,prompt_seconds=excluded.prompt_seconds,generation_rate_estimated=excluded.generation_rate_estimated,activity_json=excluded.activity_json,hidden=excluded.hidden", params![
                     format!("{id}:{index}"),
                     id,
                     index as i64,
@@ -678,6 +679,8 @@ impl Database {
                     prompt_seconds,
                     rate_estimated,
                     activity,
+                    // Stored as 0/1; absent on any message that predates this.
+                    message["hidden"].as_bool().unwrap_or(false),
                 ]).map_err(|error| error.to_string())?;
             }
             // A conversation can shrink (a cleared or edited transcript). Rows
@@ -1438,6 +1441,32 @@ fn migrate(connection: &mut Connection) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
         tx.commit().map_err(|error| error.to_string())?;
     }
+    // Whether a message is input the model needs but the user must not read as
+    // their own words -- the turn a finished sub-agent delivers, whose result is
+    // shown on its `sub_agent` tool row instead of as a bubble. Persisted because a
+    // reopened conversation must keep both the model's copy and the tidier view.
+    if version < 13 {
+        let tx = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        // Guarded rather than a bare `ALTER`, so re-running the migration against a
+        // database that already has the column is a no-op. Migrations are meant to
+        // be idempotent, and a plain `ADD COLUMN` here would fail the second time.
+        let has_column: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name='hidden'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if has_column == 0 {
+            tx.execute_batch("ALTER TABLE messages ADD COLUMN hidden INTEGER;")
+                .map_err(|error| error.to_string())?;
+        }
+        tx.execute_batch(&format!("PRAGMA user_version={LATEST_SCHEMA_VERSION};"))
+            .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 
@@ -2098,6 +2127,7 @@ mod tests {
             "prompt_seconds",
             "generation_rate_estimated",
             "activity_json",
+            "hidden",
         ] {
             assert!(
                 columns.iter().any(|name| name == expected),

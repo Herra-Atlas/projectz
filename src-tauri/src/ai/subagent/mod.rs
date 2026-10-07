@@ -9,13 +9,14 @@
 //! ceiling all behave inside a sub-agent exactly as they do outside one, because
 //! they are the same code.
 //!
-//! # Why only the final message comes back
+//! # Why the tool returns at once
 //!
-//! A sub-agent exists to keep work *out* of its parent's context. Its reading and
-//! its reasoning are the expensive part and are exactly what the parent does not
-//! need to pay to re-read; what the parent needs is the answer. So the transcript
-//! is stored for the user to look at, and the tool result is the last message and
-//! nothing else.
+//! A sub-agent exists to keep work *out* of its parent's context and to let the
+//! parent keep working. So `sub_agent` starts the run in the background and returns
+//! only an acknowledgement; the run's report is delivered later as its own message
+//! (`subagent_result`), which the chat sends to the model as a new turn. The
+//! agent's reading and reasoning never enter the parent's context, and the parent
+//! is never made to wait on the clock the agent runs for.
 //!
 //! # Why approvals still work inside one
 //!
@@ -34,7 +35,7 @@ use std::time::Instant;
 
 use serde_json::Value;
 
-use crate::ai::remote::client::{stream_chat, subagent_started_event};
+use crate::ai::remote::client::{stream_chat, subagent_event, subagent_started_event};
 use crate::ai::remote::types::Endpoint;
 use crate::ai::tools::{RunHandle, SubAgentNotice, ToolContext, ToolMode};
 use crate::ai::types::{ChatEvent, ChatMessage};
@@ -48,15 +49,21 @@ use transcript::{RunRecord, Stamped};
 /// bare refusal, so a model that sees it can stop trying.
 const NO_RUN: &str = "Sub-agents are only available during an agent run.";
 
-/// Runs one sub-agent and returns its final message.
+/// Starts one sub-agent and returns at once, before it has done any work.
+///
+/// The run is handed to a background task, so the parent is not made to wait: it
+/// can keep working, and the agent's report is delivered as its own message when
+/// the run finishes (see [`run_agent`]). What comes back here is only an
+/// acknowledgement -- that is the tool result the model reads, and it is
+/// deliberately short so the parent's next turn is cheap.
 pub async fn spawn(arguments: Value, context: ToolContext) -> Result<String, String> {
     let run = context.run.clone().ok_or_else(|| NO_RUN.to_string())?;
     let prompt = arguments
-        .get("prompt")
+        .get("instructions")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|text| !text.is_empty())
-        .ok_or_else(|| "spawn_agent requires a `prompt` describing the task".to_string())?
+        .ok_or_else(|| "sub_agent requires an `instructions` field describing the task".to_string())?
         .to_string();
     let label = arguments
         .get("label")
@@ -90,6 +97,63 @@ pub async fn spawn(arguments: Value, context: ToolContext) -> Result<String, Str
         &endpoint.id,
         &started_at,
     ));
+
+    let task = AgentTask {
+        run,
+        context,
+        endpoint,
+        model,
+        prompt,
+        label,
+        display_label: display_label.clone(),
+        agent_id: agent_id.clone(),
+        started_at,
+    };
+    tokio::spawn(run_agent(task));
+
+    Ok(format!(
+        "Agent `{display_label}` is working in the background (id `{agent_id}`). It cannot see this \
+conversation and cannot ask you questions. Its report will arrive as its own message when it \
+finishes -- do not wait for it; carry on with anything else, or finish your answer."
+    ))
+}
+
+/// Everything one background sub-agent needs, moved off the call stack.
+///
+/// A struct rather than a dozen captured locals so the task body reads as one
+/// thing: the run it belongs to, the conversation it started from, and the fields
+/// the panel and the transcript are built from.
+struct AgentTask {
+    run: Arc<RunHandle>,
+    context: ToolContext,
+    endpoint: Endpoint,
+    model: String,
+    prompt: String,
+    label: String,
+    display_label: String,
+    agent_id: String,
+    started_at: String,
+}
+
+/// Runs the sub-agent to completion and delivers its result.
+///
+/// The same loop the blocking version ran -- same streaming, same tools, same
+/// permission gate, same transcript -- except that it ends by emitting the report
+/// as its own message rather than returning it as a tool result. By the time it
+/// finishes the parent's turn has usually ended, so a return value would have
+/// nobody to receive it.
+async fn run_agent(task: AgentTask) {
+    let AgentTask {
+        run,
+        context,
+        endpoint,
+        model,
+        prompt,
+        label,
+        display_label,
+        agent_id,
+        started_at,
+    } = task;
 
     // Collected with arrival times so a thought can be timed. Shared into the
     // event closure by clone, and into each other through the sink.
@@ -198,19 +262,39 @@ pub async fn spawn(arguments: Value, context: ToolContext) -> Result<String, Str
         }
     }
 
-    // Tells the panel there is a new run to read. Sent whether the run succeeded
-    // or not, because a failed run is still a run the user can open.
-    context.report_subagent(SubAgentNotice {
-        id: agent_id,
-        label: display_label,
-        session_id: run.session_id.clone(),
-    });
+    // Tells the panel there is a new run to read, and clears it from the running
+    // registry. Emitted directly rather than through the run's sink: the parent's
+    // loop may already be over, and nothing would drain it.
+    Arc::clone(&run.emit)(subagent_event(
+        &run.run_id,
+        &SubAgentNotice {
+            id: agent_id.clone(),
+            label: display_label.clone(),
+            session_id: run.session_id.clone(),
+        },
+    ));
 
-    match result {
-        Ok((content, _)) if !content.trim().is_empty() => Ok(content),
-        Ok(_) => Ok("The agent finished without returning an answer.".to_string()),
-        Err(error) => Err(error),
-    }
+    // The report, as its own message in the parent conversation. A run that
+    // produced nothing worth sending (a failure, an empty answer) is left to the
+    // panel, which already shows it.
+    let report = match &result {
+        Ok((content, _)) if !content.trim().is_empty() => content.clone(),
+        _ => return,
+    };
+    let session_id = run.session_id.clone();
+    Arc::clone(&run.emit)(ChatEvent {
+        run_id: agent_id.clone(),
+        session_id: session_id.clone(),
+        sequence: 0,
+        kind: "subagent_result".into(),
+        text: Some(report),
+        error: None,
+        metrics: Some(serde_json::json!({
+            "agent_id": agent_id,
+            "label": display_label,
+            "session_id": session_id,
+        })),
+    });
 }
 
 /// The endpoint and model a sub-agent should run on.
@@ -276,7 +360,7 @@ mod tests {
     /// With nothing configured, a sub-agent runs on the model its parent did.
     #[test]
     fn a_sub_agent_defaults_to_the_parent_model() {
-        let (endpoint, model) = resolve_model(&run(None), &json!({ "prompt": "x" }));
+        let (endpoint, model) = resolve_model(&run(None), &json!({ "instructions": "x" }));
         assert_eq!(endpoint.id, "parent-provider");
         assert_eq!(model, "parent-model");
     }
@@ -297,13 +381,13 @@ mod tests {
             },
             "sub-model".to_string(),
         ));
-        let (endpoint, model) = resolve_model(&run(configured.clone()), &json!({ "prompt": "x" }));
+        let (endpoint, model) = resolve_model(&run(configured.clone()), &json!({ "instructions": "x" }));
         assert_eq!(endpoint.id, "sub-provider");
         assert_eq!(model, "sub-model");
 
         let (endpoint, model) = resolve_model(
             &run(configured),
-            &json!({ "prompt": "x", "model": "explicit-model" }),
+            &json!({ "instructions": "x", "model": "explicit-model" }),
         );
         // An explicit model rides the parent's endpoint, because a bare model id
         // names no provider.
@@ -315,7 +399,7 @@ mod tests {
     /// with an empty string does not silently send requests to a blank model.
     #[test]
     fn a_blank_model_argument_is_ignored() {
-        let (_, model) = resolve_model(&run(None), &json!({ "prompt": "x", "model": "   " }));
+        let (_, model) = resolve_model(&run(None), &json!({ "instructions": "x", "model": "   " }));
         assert_eq!(model, "parent-model");
     }
 
@@ -323,20 +407,20 @@ mod tests {
     /// take the app down.
     #[tokio::test]
     async fn a_call_with_no_run_reports_rather_than_panicking() {
-        let error = spawn(json!({ "prompt": "x" }), ToolContext::default())
+        let error = spawn(json!({ "instructions": "x" }), ToolContext::default())
             .await
             .expect_err("no run");
         assert!(error.contains("agent run"), "{error}");
     }
 
-    /// A missing prompt is named, so the model can correct the call.
+    /// A missing `instructions` field is named, so the model can correct the call.
     #[tokio::test]
-    async fn a_missing_prompt_is_reported() {
+    async fn a_missing_instructions_is_reported() {
         let context = ToolContext {
             run: Some(run(None)),
             ..ToolContext::default()
         };
-        let error = spawn(json!({}), context).await.expect_err("no prompt");
-        assert!(error.contains("prompt"), "{error}");
+        let error = spawn(json!({}), context).await.expect_err("no instructions");
+        assert!(error.contains("instructions"), "{error}");
     }
 }

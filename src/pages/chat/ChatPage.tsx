@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen } from "@tauri-apps/api/event";
-import { ArrowUp, Check, ChevronRight, Clipboard, Globe2, LoaderCircle, Paperclip, Plus, RotateCcw, SkipForward, Sparkles, Square, X } from "lucide-react";
+import { ArrowUp, Check, Clipboard, LoaderCircle, Paperclip, RotateCcw, SkipForward, Square, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import ActivityPanel from "./ActivityPanel";
@@ -11,12 +11,9 @@ import ModelSwitcher from "../../components/ModelSwitcher";
 import ModeSelector from "../../components/ModeSelector";
 import SelectionActions, { type SelectionAction } from "./SelectionActions";
 import ToolApproval, { type PendingApproval } from "./ToolApproval";
-import SkillsSubmenu from "../../components/composer/SkillsSubmenu";
-import { useSkills } from "../../features/skills/useSkills";
-import { activeSkillIds, userTextOnly, withSkills } from "../../features/skills/skillMessage";
+import { userTextOnly } from "../../features/skills/skillMessage";
 import { useSessionTitle } from "../../features/models/useSessionTitle";
 import {
-  acceptsInput,
   contextLengthFor,
   DEFAULT_CONTEXT_LENGTH,
   effortValuesFor,
@@ -44,6 +41,8 @@ import { useAttachments } from "./useAttachments";
 import ContextRing from "./composer/ContextRing";
 import EffortControl from "./composer/EffortControl";
 import StartModelDialog from "./composer/StartModelDialog";
+import SlashMenu from "./composer/SlashMenu";
+import { exactCommand, matchCommands, slashQuery, type SlashCommand } from "./composer/slashCommands";
 
 /**
  * Records a web search's results on the `search_web` step that asked for them.
@@ -149,6 +148,11 @@ type ChatPageProps = {
 
 export default function ChatPage({ endpointId, model, localModelId, session, sessionLoading = false, activeId = null, onOpenSettings, onEnsureSession, onFirstSend, onActivity, onModelSelect, onLocalModelSelect, modelRefreshKey, settingsRefreshKey = 0, onMessagesChange, onWorkingModeChange, onNotify, onOpenUrl, onOpenFile, titleModels, onAutoTitle }: ChatPageProps) {
   const [messages, setMessages] = useState<ChatMessage[]>(session?.messages ?? []);
+  // The latest transcript, for the run listener (a mount-time effect) to build on
+  // when something arrives outside the current render -- a background sub-agent's
+  // report is dispatched from there.
+  const messagesRef = useRef<ChatMessage[]>(messages);
+  messagesRef.current = messages;
   const [input, setInput] = useState("");
   const [draggingFiles, setDraggingFiles] = useState(false);
   const [running, setRunning] = useState(false);
@@ -203,41 +207,33 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     // on the same render that changes the picker.
     capabilities,
     onNotify,
-    onMenuClosed: () => setToolsMenuOpen(false),
   });
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
-  const [toolsMenuOpen, setToolsMenuOpen] = useState(false);
-  const [skillsOpen, setSkillsOpen] = useState(false);
-  // Skills already recorded in this conversation's transcript. A skill applied
-  // once stays applied for every later turn, so the picker shows what a send
-  // would actually do rather than only what was just ticked.
-  const appliedSkillIds = useMemo(() => activeSkillIds(messages), [messages]);
-  // Ticked but not yet in the transcript. Kept apart from `appliedSkillIds` so a
-  // skill already in force reads as applied rather than as something that would
-  // be added again on the next send.
-  const [pendingSkillIds, setPendingSkillIds] = useState<string[]>([]);
-  const { skills: enabledSkills, loading: skillsLoading } = useSkills(skillsOpen);
-  const inForceSkillIds = useMemo(
-    () => [...new Set([...appliedSkillIds, ...pendingSkillIds])],
-    [appliedSkillIds, pendingSkillIds],
-  );
-  /** The records behind those ids, for the chips above the draft. An id whose
-   * skill was deleted since the conversation began has no record, so it is
-   * skipped -- the instructions stay in the transcript either way. */
-  const inForceSkills = useMemo(
-    () => enabledSkills.filter((skill) => inForceSkillIds.includes(skill.id)),
-    [enabledSkills, inForceSkillIds],
-  );
-  const toggleSkill = useCallback((id: string) => {
-    // Untickable once applied: it is in the transcript and therefore already
-    // governing every later turn. Removing it would mean editing history, which
-    // the stored conversation is not for.
-    if (appliedSkillIds.includes(id)) return;
-    setPendingSkillIds((current) =>
-      current.includes(id) ? current.filter((entry) => entry !== id) : [...current, id],
-    );
-  }, [appliedSkillIds]);
-  const [webSearchEnabled, setWebSearchEnabled] = useState(false);
+  // Web search is on by default for every conversation. The composer's `+` menu
+  // is gone; the `/web-on` and `/web-off` slash commands are how it is changed.
+  const [webSearchEnabled, setWebSearchEnabled] = useState(true);
+  // Which row of the slash menu is highlighted. Clamped against the matches at
+  // the point of use, so a shrinking list can never point past its end.
+  const [slashIndex, setSlashIndex] = useState(0);
+  // Messages typed while a reply was already running, sent the moment it ends.
+  // Held in a ref because the run listener (a mount-time effect) drains it, and
+  // mirrored in a count so the composer can show how many are waiting.
+  const queuedMessagesRef = useRef<
+    { sessionId: string; text: string; attachments: AttachedFile[]; hidden?: boolean }[]
+  >([]);
+  const [queuedCount, setQueuedCount] = useState(0);
+  // `dispatch` is rebuilt every render; the run listener holds this ref so it
+  // calls the latest one rather than a stale closure from mount.
+  const dispatchRef = useRef<
+    (
+      messageText: string,
+      attachments: AttachedFile[],
+      baseMessages: ChatMessage[],
+      sessionId: string | null,
+      clearDraft?: boolean,
+      hidden?: boolean,
+    ) => Promise<void>
+  >(async () => {});
   const [startModelPrompt, setStartModelPrompt] = useState(false);
   const [startingModel, setStartingModel] = useState(false);
   const pendingChatRef = useRef<PendingChat | null>(null);
@@ -251,7 +247,6 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   const workingModesRef = useRef<Map<string, { mode: ChatMode; permission: PermissionMode }>>(new Map());
   const threadRef = useRef<HTMLDivElement>(null);
   const autoFollowRef = useRef(true);
-  const composerToolsRef = useRef<HTMLDivElement>(null);
   const runIdRef = useRef("");
   const requestStartedAtRef = useRef(0);
   const generationStartedAtRef = useRef(0);
@@ -515,6 +510,82 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   useEffect(() => {
     const unlistenPromise = listen<AiEvent>("ai-event", (event) => {
       const payload = event.payload;
+      // Puts a finished sub-agent's report on the `sub_agent` row that started it,
+      // so it reads as the tool's own output inside "Worked for ...". The row lives
+      // in the live run's activity while the reply is still going and in a stored
+      // assistant message once it has ended, so both are patched -- and the live one
+      // matters because its activity is what gets persisted when the reply ends.
+      const attachSubagentReport = (sessionId: string, report: string) => {
+        const fill = (steps: ActivityStep[]): boolean => {
+          for (let index = steps.length - 1; index >= 0; index--) {
+            const step = steps[index];
+            if (step.kind === "tool" && step.tool === "sub_agent" && step.output === undefined) {
+              step.output = report;
+              step.outcome = "finished";
+              return true;
+            }
+          }
+          return false;
+        };
+
+        const runId = sessionRunIdsRef.current.get(sessionId);
+        const live = runId ? backgroundRunsRef.current.get(runId) : undefined;
+        if (live && fill(live.activity)) setStreamActivity([...live.activity]);
+
+        const next = [...messagesRef.current];
+        for (let index = next.length - 1; index >= 0; index--) {
+          const message = next[index];
+          if (message.role !== "assistant" || !message.activity) continue;
+          const activity = message.activity.map((step) => ({ ...step }));
+          if (!fill(activity)) continue;
+          next[index] = { ...message, activity };
+          messagesRef.current = next;
+          setMessages(next);
+          onMessagesChangeRef.current(sessionId, next);
+          return;
+        }
+      };
+      // A background sub-agent's report. It arrives under the agent's own run id,
+      // which is not a chat run, so it is handled before the run lookup below.
+      // The report becomes a user turn so the model picks it up and can act.
+      if (payload.kind === "subagent_result") {
+        const reportSession = payload.metrics?.session_id;
+        const report = payload.text;
+        if (reportSession && report && reportSession === sessionIdRef.current) {
+          const label = payload.metrics?.label ?? "agent";
+          // The report goes on the `sub_agent` row inside "Worked for ...", not into
+          // the transcript as the user's own message; the model still receives it, as
+          // a hidden turn (below).
+          attachSubagentReport(reportSession, report);
+          const content = `Sub-agent \`${label}\` finished and reported:\n\n${report}`;
+          if (sessionRunIdsRef.current.has(reportSession)) {
+            // Still answering: deliver it the moment this reply ends.
+            queuedMessagesRef.current.push({ sessionId: reportSession, text: content, attachments: [], hidden: true });
+            setQueuedCount(queuedMessagesRef.current.length);
+          } else {
+            // The turn is over, so the report starts its own. `clearDraft` is false
+            // because this is not the user's message -- it must not wipe a draft.
+            void dispatchRef.current(content, [], messagesRef.current, reportSession, false, true);
+          }
+        }
+        return;
+      }
+      // An approval a background sub-agent raised. Handled before the run lookup
+      // because the run that owns the screen may already have ended -- the prompt
+      // still has to reach the user, or the agent could never get a call approved.
+      if (payload.kind === "tool_approval" && payload.metrics?.approval_id) {
+        const approval: PendingApproval = {
+          runId: payload.run_id,
+          approvalId: payload.metrics.approval_id,
+          tool: payload.metrics.tool ?? "tool",
+          command: payload.metrics.command ?? "",
+          arguments: payload.metrics.arguments ?? {},
+        };
+        // Guarded against a repeat of the same id, which a re-emitted event would
+        // otherwise queue twice and then answer with one click.
+        setPendingApprovals((current) => current.some((entry) => entry.approvalId === approval.approvalId) ? current : [...current, approval]);
+        return;
+      }
       const run = backgroundRunsRef.current.get(payload.run_id);
       if (!run) return;
       const isActive = run.sessionId === sessionIdRef.current;
@@ -524,6 +595,17 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         if (sessionRunIdsRef.current.get(run.sessionId) === payload.run_id) {
           sessionRunIdsRef.current.delete(run.sessionId);
         }
+      };
+      // A message typed while this conversation was answering. Sent now that the
+      // reply has ended, so the queue drains in order and one reply never starts
+      // on top of another. Matched by session, so a message queued for one
+      // conversation is not sent into another.
+      const drainQueued = (sessionId: string, base: ChatMessage[]) => {
+        const index = queuedMessagesRef.current.findIndex((item) => item.sessionId === sessionId);
+        if (index === -1) return;
+        const [item] = queuedMessagesRef.current.splice(index, 1);
+        setQueuedCount(queuedMessagesRef.current.length);
+        void dispatchRef.current(item.text, item.attachments, base, sessionId, false, item.hidden ?? false);
       };
       if (payload.kind === "completion_id" && payload.text) {
         run.completionId = payload.text;
@@ -553,20 +635,6 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         // to, outside the panel that holds every other tool; as step data it opens
         // in place, behind a disclosure, alongside the call that produced it.
         attachSearch(run, payload.search);
-      } else if (payload.kind === "tool_approval" && payload.metrics?.approval_id) {
-        // The run is parked in Rust until this is answered, so the dialog is the
-        // only thing standing between the agent and a tool call. Queued rather
-        // than replacing, because concurrent sub-agents can each be waiting.
-        const approval: PendingApproval = {
-          runId: payload.run_id,
-          approvalId: payload.metrics.approval_id,
-          tool: payload.metrics.tool ?? "tool",
-          command: payload.metrics.command ?? "",
-          arguments: payload.metrics.arguments ?? {},
-        };
-        // Guarded against a repeat of the same id, which a re-emitted event would
-        // otherwise queue twice and then answer with one click.
-        setPendingApprovals((current) => current.some((entry) => entry.approvalId === approval.approvalId) ? current : [...current, approval]);
       } else if (payload.kind === "web_search_failed") {
         attachSearch(run, { query: payload.text ?? "", results: [] });
       } else if (payload.kind === "reasoning_delta" && payload.text) {
@@ -702,6 +770,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           setRunning(false);
           setMessages(next);
         }
+        drainQueued(run.sessionId, next);
       } else if (payload.kind === "stopped") {
         // `finishRun` runs here as it does on every other terminating event, even
         // though `stop()` has usually already removed the run and this listener
@@ -716,13 +785,14 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         // gets the closed steps, since `finishRun` is what closes them.
         finishRun();
         onActivityRef.current(run.sessionId, null);
+        let base: ChatMessage[] = run.baseMessages;
         if (run.text) {
           // Whatever arrived is kept, for the reason `stop()` keeps it: the
           // transcript is the record, and a cancelled reply that dropped its
           // answer misreports what happened.
-          const partial = [...run.baseMessages, { role: "assistant" as const, content: run.text, reasoning: run.reasoning || undefined, ...(run.activity.length > 0 ? { activity: run.activity } : {}), modelId: run.modelLabel, providerId: run.providerLabel }];
-          onMessagesChangeRef.current(run.sessionId, partial);
-          if (isActive) setMessages(partial);
+          base = [...run.baseMessages, { role: "assistant" as const, content: run.text, reasoning: run.reasoning || undefined, ...(run.activity.length > 0 ? { activity: run.activity } : {}), modelId: run.modelLabel, providerId: run.providerLabel }];
+          onMessagesChangeRef.current(run.sessionId, base);
+          if (isActive) setMessages(base);
         }
         if (isActive) {
           setPendingApprovals([]);
@@ -734,6 +804,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           setStreamReasoning("");
           setStreamActivity([]);
         }
+        drainQueued(run.sessionId, base);
       } else if (payload.kind === "failed") {
         const message = payload.error || payload.text || "The provider could not complete this response.";
         if (isActive) onNotify("error", message);
@@ -752,6 +823,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           setRunning(false);
           setMessages(next);
         }
+        drainQueued(run.sessionId, next);
       }
     });
     listenerReadyRef.current = unlistenPromise.then(() => undefined);
@@ -782,22 +854,6 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   }, [onNotify]);
 
   useEffect(() => {
-    if (!toolsMenuOpen) return;
-    const dismissOutside = (event: PointerEvent) => {
-      if (composerToolsRef.current && !composerToolsRef.current.contains(event.target as Node)) setToolsMenuOpen(false);
-    };
-    const dismissEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setToolsMenuOpen(false);
-    };
-    document.addEventListener("pointerdown", dismissOutside);
-    document.addEventListener("keydown", dismissEscape);
-    return () => {
-      document.removeEventListener("pointerdown", dismissOutside);
-      document.removeEventListener("keydown", dismissEscape);
-    };
-  }, [toolsMenuOpen]);
-
-  useEffect(() => {
     const thread = threadRef.current;
     if (!thread) return;
     if (autoFollowRef.current) thread.scrollTop = thread.scrollHeight;
@@ -809,7 +865,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     autoFollowRef.current = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 48;
   };
 
-  const sendMessages = async (requestMessages: ChatMessage[], sessionId: string, requestAttachments: AttachedFile[], skillIds: string[]) => {
+  const sendMessages = async (requestMessages: ChatMessage[], sessionId: string, requestAttachments: AttachedFile[], skillIds: string[], clearDraft = true) => {
     if (sessionRunIdsRef.current.has(sessionId) || (!endpointId && !localModelId)) return false;
     sessionIdRef.current = sessionId;
     autoFollowRef.current = true;
@@ -846,8 +902,12 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     setStreamActivity([]);
     setSearching(false);
     setRunning(true);
-    setInput("");
-    removeSentAttachments(requestAttachments);
+    // A queued message is sent from a draft the user already cleared, so the field
+    // is left alone -- clearing it again would wipe whatever they have typed since.
+    if (clearDraft) {
+      setInput("");
+      removeSentAttachments(requestAttachments);
+    }
     runIdRef.current = runId;
     setMessages(requestMessages);
     onMessagesChange(sessionId, requestMessages);
@@ -867,7 +927,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       await invoke("ai_chat", {
         request: { run_id: runId, session_id: sessionId, session_title: sessionTitle || undefined, messages: messagesWithInstructions, endpoint_id: endpointId || null, local_model: Boolean(localModelId), model: localModelId ? "projectz-local" : model || null, // Sent verbatim: the value came from the provider's own list of accepted
         // levels, so translating or guessing it here is what causes HTTP 400.
-        reasoning: canSetEffort ? effort : undefined, web_search_enabled: webSearchEnabled, mode, attachments: requestAttachments.map(({ name, mime_type, data_base64 }) => ({ name, mime_type, data_base64 })), skill_ids: skillIds },
+        reasoning: canSetEffort ? effort : undefined, web_search_enabled: webSearchEnabled, mode, permission, attachments: requestAttachments.map(({ name, mime_type, data_base64 }) => ({ name, mime_type, data_base64 })), skill_ids: skillIds },
       });
       return true;
     } catch (reason: unknown) {
@@ -887,20 +947,16 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         setSearching(false);
         setRunning(false);
       }
-      restoreAttachments(requestAttachments);
-      // The send was rolled back, so the skills it carried were never applied.
-      // Restored beside the attachments because both describe a message that did
-      // not go, and re-ticking is the only way the user gets them back.
-      if (skillIds.length > 0) setPendingSkillIds(skillIds);
+      if (clearDraft) restoreAttachments(requestAttachments);
       return false;
     }
   };
 
-  const startOrQueueChat = async (requestMessages: ChatMessage[], sessionId: string, requestAttachments: AttachedFile[], skillIds: string[]) => {
-    if (!localModelId) return sendMessages(requestMessages, sessionId, requestAttachments, skillIds);
+  const startOrQueueChat = async (requestMessages: ChatMessage[], sessionId: string, requestAttachments: AttachedFile[], skillIds: string[], clearDraft = true) => {
+    if (!localModelId) return sendMessages(requestMessages, sessionId, requestAttachments, skillIds, clearDraft);
     try {
       const status = await invoke<{ loaded_model_id: string | null }>("local_model_status");
-      if (status.loaded_model_id === localModelId) return sendMessages(requestMessages, sessionId, requestAttachments, skillIds);
+      if (status.loaded_model_id === localModelId) return sendMessages(requestMessages, sessionId, requestAttachments, skillIds, clearDraft);
       // Carried through the model-start pause rather than read at send time. The
       // skill was chosen for this message, and it is still that message when the
       // engine finally comes up -- reading a later state here would drop it.
@@ -971,9 +1027,53 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     pendingChatRef.current = null;
   };
 
+  /**
+   * Starts a reply for `messageText` on top of `baseMessages`.
+   *
+   * Split out of `send` so a queued message can be dispatched from the run
+   * listener, which holds the conversation it just finished rather than the
+   * current component state. `targetSessionId` is the conversation to send to, or
+   * `null` to create one -- the listener passes the finished run's session, which
+   * may no longer be the one on screen.
+   */
+  const dispatch = async (
+    messageText: string,
+    requestAttachments: AttachedFile[],
+    baseMessages: ChatMessage[],
+    targetSessionId: string | null,
+    clearDraft = true,
+    hidden = false,
+  ) => {
+    const nextMessages = [...baseMessages];
+    nextMessages.push({
+      role: "user" as const,
+      content: messageText,
+      // A hidden turn is input the model needs but the user must not read as their
+      // own words -- a finished sub-agent's report, whose result is shown on its
+      // tool row instead.
+      ...(hidden ? { hidden: true } : {}),
+    });
+    // The mode and access level travel with the creation, so a conversation is
+    // never born in Chat and then corrected. With a conversation already open this
+    // is a no-op -- `ensureSession` returns the existing id -- and the choice has
+    // already been recorded against it by `changeMode`.
+    const existing = targetSessionId;
+    const sessionId = existing ?? onEnsureSession(nextMessages, { mode, permission });
+    sessionIdRef.current = sessionId;
+    // A conversation this send created is new to the remembered map, so the pair it
+    // was created with is recorded against it here. Without this the restore effect
+    // would find nothing for it and fall back to the stored header instead.
+    if (!existing) rememberWorkingMode(mode, permission);
+    onFirstSend();
+    // Names the chat from the opening message, in parallel with the reply
+    // rather than after it, so the sidebar updates sooner.
+    titleSessionRef.current(sessionId, messageText);
+    await startOrQueueChat(nextMessages, sessionId, requestAttachments, [], clearDraft);
+  };
+  dispatchRef.current = dispatch;
+
   const send = async () => {
     const text = input.trim();
-    const existingSessionId = sessionIdRef.current;
     // Refused while the open conversation's transcript is still loading. Every
     // other check here is about *when* a reply may run; this one is about whether
     // the history is even known yet. Sending from an empty transcript would look
@@ -983,41 +1083,21 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       onNotify("error", "Still loading this conversation. Try again in a moment.");
       return;
     }
-    if ((!text && attachments.length === 0) || (existingSessionId && sessionRunIdsRef.current.has(existingSessionId)) || (!endpointId && !localModelId)) return;
+    if ((!text && attachments.length === 0) || (!endpointId && !localModelId)) return;
     const requestAttachments = attachments;
     const messageText = text || `Please review the attached ${requestAttachments.length === 1 ? "file" : "files"}.`;
-    const nextMessages = [...messages];
-    // A skill is folded into the user's own message rather than sent as a
-    // `system` turn: llama.cpp's templates reject a system message that is not
-    // first, and this keeps only the newest message changed, so the cached
-    // prefix is untouched. Only newly ticked skills are added -- one already in
-    // the transcript is already in force for every later turn.
-    const newlyChosen = enabledSkills.filter(
-      (skill) => pendingSkillIds.includes(skill.id) && !appliedSkillIds.includes(skill.id),
-    );
-    const asked = withSkills(messageText, newlyChosen);
-    nextMessages.push({ role: "user" as const, content: asked.content });
-    // The mode and access level travel with the creation, so a conversation is
-    // never born in Chat and then corrected. With a conversation already open this
-    // is a no-op -- `ensureSession` returns the existing id -- and the choice has
-    // already been recorded against it by `changeMode`.
-    const existing = sessionIdRef.current;
-    const sessionId = existing ?? onEnsureSession(nextMessages, { mode, permission });
-    sessionIdRef.current = sessionId;
-    // A conversation this send created is new to the remembered map, so the pair it
-    // was created with is recorded against it here. Without this the restore effect
-    // would find nothing for it and fall back to the stored header instead.
-    //
-    // Only on creation: an existing conversation was recorded when the mode was
-    // chosen, and repeating that write on every send would be a header write per
-    // message to restate something already stored.
-    if (!existing) rememberWorkingMode(mode, permission);
-    onFirstSend();
-    // Names the chat from the opening message, in parallel with the reply
-    // rather than after it, so the sidebar updates sooner.
-    titleSessionRef.current(sessionId, messageText);
-    setPendingSkillIds([]);
-    await startOrQueueChat(nextMessages, sessionId, requestAttachments, asked.appliedSkillIds);
+    const activeSession = sessionIdRef.current;
+    // A reply is already running in this conversation. The message is queued
+    // rather than refused, and `drainQueued` sends it the moment that reply ends
+    // -- so a user can keep typing without waiting for the model to stop.
+    if (activeSession && sessionRunIdsRef.current.has(activeSession)) {
+      queuedMessagesRef.current.push({ sessionId: activeSession, text: messageText, attachments: requestAttachments });
+      setQueuedCount(queuedMessagesRef.current.length);
+      setInput("");
+      removeSentAttachments(requestAttachments);
+      return;
+    }
+    await dispatch(messageText, requestAttachments, messages, activeSession);
   };
 
   const skipReasoning = async () => {
@@ -1170,8 +1250,32 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     });
   };
 
+  // The slash menu's state, derived from the draft so there is no second source
+  // of truth: a bare `/word` that names no command yet opens the menu, and a
+  // draft that *is* a command closes it and is drawn as a link instead.
+  const slashTyped = slashQuery(input);
+  const slashExact = exactCommand(input);
+  const slashMatches =
+    slashTyped !== null && slashExact === null ? matchCommands(slashTyped) : [];
+  const slashActive = slashMatches.length > 0 ? Math.min(slashIndex, slashMatches.length - 1) : 0;
+
+  /** Runs a command and clears the draft, because a command is not a message. */
+  const runSlashCommand = (command: SlashCommand) => {
+    const on = command.action === "web-search-on";
+    setWebSearchEnabled(on);
+    onNotify("success", on ? "Web search on" : "Web search off");
+    setInput("");
+    setSlashIndex(0);
+    inputRef.current?.focus();
+  };
+
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
+    // A draft that is exactly a command runs it rather than sending the text.
+    if (slashExact) {
+      runSlashCommand(slashExact);
+      return;
+    }
     void send();
   };
 
@@ -1221,6 +1325,17 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
                       than no card, and the search is still recorded in the reply's
                       own activity steps. */}
             {messages.filter((message) => message.role === "user" || message.role === "assistant").map((message, index) => (
+              message.hidden ? (
+                // A background sub-agent's report. Drawn as a centred notice, not a
+                // message from either side: the report itself lives on the `sub_agent`
+                // tool row inside the reply that spawned it, and this only marks that
+                // the run has reported back and the model has been told.
+                <div key={`${index}-notice`} className="my-2 flex items-center gap-3 px-1 text-[11px] text-[var(--quiet)]">
+                  <span className="h-px flex-1 bg-[var(--line)]" />
+                  <span className="shrink-0">{message.content.split("\n")[0]}</span>
+                  <span className="h-px flex-1 bg-[var(--line)]" />
+                </div>
+              ) : (
               <article key={`${index}-${message.role}`} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
                 <div className={`group max-w-[85%] break-words text-[14px] leading-7 sm:max-w-[78%] ${message.role === "user" ? "whitespace-pre-wrap rounded-2xl rounded-br-md bg-[var(--raised)] px-4 py-3 text-[var(--text)]" : "py-1 text-[var(--text)]"}`}>
                   {message.role === "assistant" ? <>
@@ -1257,6 +1372,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
                   </> : userTextOnly(message.content)}
                 </div>
               </article>
+              )
             ))}
             {(streamText || streamActivity.length > 0) && <article className="flex justify-start"><div className="max-w-[78%] break-words py-1 text-[14px] leading-7">
               <ActivityPanel steps={streamActivity} live={running} renderMarkdown={renderMarkdown} />
@@ -1307,64 +1423,23 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           {/* The composer is a two-row card: the draft on top, controls on the
               bottom line. Radius is deliberately tighter than the message bubbles
               so the input reads as a control surface rather than a chat bubble. */}
-          <div className="rounded-xl border border-[var(--line)] bg-[var(--panel)] px-2 py-1 shadow-[0_12px_36px_rgba(0,0,0,0.2)] transition-colors focus-within:border-[color-mix(in_srgb,var(--accent)_35%,var(--line))]">
+          <div className="relative rounded-xl border border-[var(--line)] bg-[var(--panel)] px-2 py-1 shadow-[0_12px_36px_rgba(0,0,0,0.2)] transition-colors focus-within:border-[color-mix(in_srgb,var(--accent)_35%,var(--line))]">
+            {slashMatches.length > 0 && (
+              <SlashMenu commands={slashMatches} activeIndex={slashActive} onChoose={runSlashCommand} />
+            )}
+            {queuedCount > 0 && (
+              <div className="px-2.5 pt-2 text-[11px] text-[var(--quiet)]">
+                {queuedCount} {queuedCount === 1 ? "message" : "messages"} queued — sent when this reply ends
+              </div>
+            )}
             {attachments.length > 0 && <div className="flex flex-wrap gap-2 px-2 pt-2">
               {attachments.map((file) => <span key={file.path} title={file.path} className="inline-flex max-w-56 items-center gap-1.5 rounded-md border border-[var(--line)] bg-[var(--rail)] py-1 pl-2 pr-1.5 text-xs text-[var(--muted)]"><Paperclip size={12} className="shrink-0" /><span className="truncate">{file.name}</span><button type="button" onClick={() => removeAttachment(file.path)} aria-label={`Remove ${file.name}`} className="grid size-6 shrink-0 place-items-center rounded text-[var(--quiet)] hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-[var(--accent)]"><X size={13} /></button></span>)}
             </div>}
-            {/* Skills ride above the draft the way attachments do, so a checked
-                skill is visible after the menu closes. Without this the only
-                evidence a skill would be applied is a count in a menu the user has
-                already dismissed. */}
-            {inForceSkillIds.length > 0 && <div className="flex flex-wrap gap-2 px-2 pt-2">
-              {inForceSkills.map((skill) => (
-                <span
-                  key={skill.id}
-                  title={skill.instructions}
-                  className="inline-flex max-w-56 items-center gap-1.5 rounded-md border border-[var(--line)] bg-[var(--rail)] py-1 pl-2 pr-1.5 text-xs text-[var(--muted)]"
-                >
-                  <Sparkles size={12} className="shrink-0" />
-                  <span className="truncate">{skill.name}</span>
-                  {!appliedSkillIds.includes(skill.id) && (
-                    <button
-                      type="button"
-                      onClick={() => toggleSkill(skill.id)}
-                      aria-label={`Remove ${skill.name}`}
-                      className="grid size-6 shrink-0 place-items-center rounded text-[var(--quiet)] hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-[var(--accent)]"
-                    >
-                      <X size={13} />
-                    </button>
-                  )}
-                </span>
-              ))}
-            </div>}
             <div className="flex items-start gap-1">
-            <div ref={composerToolsRef} className="relative shrink-0 pt-1.5">
-              <button type="button" onClick={() => setToolsMenuOpen((value) => !value)} aria-label="Add files and message tools" aria-haspopup="menu" aria-expanded={toolsMenuOpen} className="grid size-8 place-items-center rounded-md text-[var(--muted)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><Plus size={19} /></button>
-              {/* Documents are inlined as text, so they work on every model. Images need a
-                    vision model, and only those are hidden. */toolsMenuOpen && <div role="menu" aria-label="Message tools" className="absolute bottom-full left-0 z-50 mb-2 w-[min(270px,calc(100vw-48px))] rounded-xl border border-[var(--line)] bg-[var(--rail)] p-1.5 shadow-2xl">
-                <button type="button" role="menuitem" onClick={() => void chooseFiles()} className="flex min-h-10 w-full items-center gap-3 rounded-lg px-2.5 text-left text-[13px] text-[var(--text)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]"><Paperclip size={16} className="text-[var(--muted)]" />{acceptsInput(capabilities, "image") ? "Add files or photos" : "Add files"}</button>
-                {/* Opens on hover as well as click, because a submenu that needs a
-                    second click to appear is two clicks to reach a list of names. The
-                    handlers are on wrappers rather than the button so the pointer can
-                    travel from the row into the panel without crossing a gap. */}
-                <div className="relative" onMouseEnter={() => setSkillsOpen(true)} onMouseLeave={() => setSkillsOpen(false)}>
-                <button type="button" role="menuitem" aria-haspopup="true" aria-expanded={skillsOpen} onClick={() => setSkillsOpen((open) => !open)} className={`flex min-h-10 w-full items-center gap-3 rounded-lg px-2.5 text-left text-[13px] text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${skillsOpen ? "bg-[var(--raised)]" : "hover:bg-[var(--raised)]"}`}><Sparkles size={16} className="text-[var(--muted)]" />Skills{/* The count is what makes an in-force selection visible after the menu
-                    closes. A skill governing every turn with nothing on screen would
-                    be invisible. */}
-                {inForceSkillIds.length > 0 && <span className="ml-auto grid size-4 shrink-0 place-items-center rounded-full bg-[var(--accent)] text-[10px] font-medium text-[var(--panel)]">{inForceSkillIds.length}</span>}
-                <ChevronRight size={14} className={`shrink-0 text-[var(--quiet)] ${inForceSkillIds.length > 0 ? "ml-1" : "ml-auto"}`} /></button>
-                {skillsOpen && <SkillsSubmenu skills={enabledSkills} selected={inForceSkillIds} applied={appliedSkillIds} loading={skillsLoading} onToggle={toggleSkill} />}
-                </div>
-                <div className="my-1 border-t border-[var(--line)]" />
-                <div role="none">
-                  {/* The whole row is the button, not just the check. A target the size of one 16px glyph is a target people miss, and the label is where the eye already is. */}
-                  <button type="button" role="menuitemcheckbox" aria-label="Web search" aria-checked={webSearchEnabled} onClick={() => setWebSearchEnabled((enabled) => !enabled)} className="flex min-h-11 w-full items-center justify-between gap-3 rounded-lg px-2.5 text-left text-[13px] text-[var(--text)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]">
-                    <span className="flex items-center gap-3"><Globe2 size={16} className="text-[var(--muted)]" />Web search</span>
-                    <Check size={16} strokeWidth={2.5} className={`shrink-0 transition-colors ${webSearchEnabled ? "text-[var(--accent)]" : "text-transparent"}`} />
-                  </button>
-                </div>
-              </div>}
-            </div>
+            {/* Attachments are the only composer control now: the `+` menu and its
+                skills / web-search rows are gone, so this opens the file dialog
+                directly. Web search is on for the run itself. */}
+            <button type="button" onClick={() => void chooseFiles()} aria-label="Attach files" title="Attach files" className="mt-1.5 grid size-8 shrink-0 place-items-center rounded-md text-[var(--muted)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><Paperclip size={18} /></button>
             <textarea
               ref={inputRef}
               aria-label="Message"
@@ -1373,7 +1448,37 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
               onChange={(event) => setInput(event.target.value)}
               onInput={resizeComposer}
               onKeyDown={(event) => {
+                // While the menu is open it owns Enter and the arrow keys; a
+                // finished command owns Enter too, running instead of sending.
+                if (slashMatches.length > 0) {
+                  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                    event.preventDefault();
+                    const step = event.key === "ArrowDown" ? 1 : -1;
+                    setSlashIndex((current) => {
+                      const next = current + step;
+                      if (next < 0) return slashMatches.length - 1;
+                      if (next >= slashMatches.length) return 0;
+                      return next;
+                    });
+                    return;
+                  }
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    setInput("");
+                    return;
+                  }
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    runSlashCommand(slashMatches[slashActive]);
+                    return;
+                  }
+                }
                 if (event.key !== "Enter") return;
+                if (slashExact) {
+                  event.preventDefault();
+                  runSlashCommand(slashExact);
+                  return;
+                }
                 // Whichever key is not bound to sending keeps its normal meaning, so
                 // Ctrl + Enter still inserts a newline when plain Enter sends.
                 const sends = sendKey === "Enter" ? !event.shiftKey : event.ctrlKey || event.metaKey;
@@ -1382,12 +1487,20 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
                 void send();
               }}
               placeholder={sessionLoading ? "Loading conversation…" : endpointId || localModelId ? "Write a message…" : "Choose a model to begin"}
-              disabled={running || sessionLoading || (!endpointId && !localModelId)}
-              // Grows with the draft up to five rows, then scrolls.
-              className="max-h-[9.5rem] min-h-11 min-w-0 flex-1 resize-none overflow-y-auto bg-transparent px-1.5 py-2.5 text-[15px] leading-6 text-[var(--text)] outline-none placeholder:text-[var(--quiet)] disabled:cursor-not-allowed"
+              disabled={sessionLoading || (!endpointId && !localModelId)}
+              // Grows with the draft up to five rows, then scrolls. A draft that
+              // is exactly a command is drawn as a link -- the accent and the
+              // underline are what say "this is a control, not a message".
+              className={`max-h-[9.5rem] min-h-11 min-w-0 flex-1 resize-none overflow-y-auto bg-transparent px-1.5 py-2.5 text-[15px] leading-6 outline-none placeholder:text-[var(--quiet)] disabled:cursor-not-allowed ${
+                slashExact ? "text-[var(--accent)] underline underline-offset-4" : "text-[var(--text)]"
+              }`}
             />
             {running && localModelId && backgroundRunsRef.current.get(runIdRef.current)?.isReasoning && <button type="button" onClick={() => void skipReasoning()} className="mt-0.5 inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg bg-[var(--raised)] px-2.5 text-xs text-[var(--text)] transition-colors hover:bg-[color-mix(in_srgb,var(--accent)_20%,var(--raised))] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label="Skip reasoning" title="End reasoning and continue the answer"><SkipForward size={14} />Skip reasoning</button>}
-            {running ? <button type="button" onClick={stop} className="mt-0.5 grid size-9 shrink-0 place-items-center rounded-lg bg-[var(--raised)] text-[var(--text)] transition-colors hover:bg-[color-mix(in_srgb,var(--accent)_20%,var(--raised))] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label="Stop generating" title="Stop generating"><Square size={14} fill="currentColor" /></button> : (input.trim() || attachments.length > 0) && <button type="submit" disabled={sessionLoading || (!endpointId && !localModelId)} className="mt-0.5 grid size-9 shrink-0 place-items-center rounded-lg bg-[var(--text)] text-[var(--page)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--accent-ink)] disabled:cursor-not-allowed disabled:opacity-35 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label="Send message" title="Send message"><ArrowUp size={18} strokeWidth={2.5} /></button>}
+            {running && <button type="button" onClick={stop} className="mt-0.5 grid size-9 shrink-0 place-items-center rounded-lg bg-[var(--raised)] text-[var(--text)] transition-colors hover:bg-[color-mix(in_srgb,var(--accent)_20%,var(--raised))] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label="Stop generating" title="Stop generating"><Square size={14} fill="currentColor" /></button>}
+            {/* While a reply runs the send button queues rather than disappearing, so
+                a message typed mid-reply is neither lost nor blocked on the model
+                stopping. A plain click or Enter adds it to the queue. */}
+            {!slashExact && (running ? input.trim().length > 0 : input.trim().length > 0 || attachments.length > 0) && <button type="submit" disabled={sessionLoading || (!endpointId && !localModelId)} className="mt-0.5 grid size-9 shrink-0 place-items-center rounded-lg bg-[var(--text)] text-[var(--page)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--accent-ink)] disabled:cursor-not-allowed disabled:opacity-35 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label={running ? "Queue message" : "Send message"} title={running ? "Queue message" : "Send message"}><ArrowUp size={18} strokeWidth={2.5} /></button>}
             </div>
           </div>
           <div className="flex min-h-8 items-center justify-between gap-2 px-1">

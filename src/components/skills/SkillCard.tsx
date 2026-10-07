@@ -1,4 +1,4 @@
-import { Check, Sparkles, Trash2 } from "lucide-react";
+import { Check, Package, Sparkles, Trash2 } from "lucide-react";
 import type { Skill } from "../../features/skills/types";
 
 /**
@@ -58,6 +58,13 @@ export default function SkillCard({
             // checked, and this is the list someone re-reads to find them.
             <span className="inline-flex items-center gap-1 rounded bg-[var(--raised)] px-1.5 py-0.5">
               <Sparkles size={11} aria-hidden /> Drafted by agent
+            </span>
+          )}
+          {skill.origin === "bundled" && (
+            // Named so a shipped skill is told apart from one the user or the
+            // agent wrote at a glance, rather than by remembering which is which.
+            <span className="inline-flex items-center gap-1 rounded bg-[var(--raised)] px-1.5 py-0.5">
+              <Package size={11} aria-hidden /> Included
             </span>
           )}
           {skill.use_count > 0 && <span>used {skill.use_count}×</span>}
