@@ -84,10 +84,6 @@ export function useChatSessions(enabled: boolean, reloadKey = 0, modelId = "", p
   // every fetch.
   const sessionsLoadedRef = useRef(sessionsLoaded);
   sessionsLoadedRef.current = sessionsLoaded;
-  // Read straight after an await, where the closure still holds the value from
-  // before the fetch rather than the one that fetch just produced.
-  const transcriptsRef = useRef(transcripts);
-  transcriptsRef.current = transcripts;
 
   /**
    * Fetch one conversation's transcript, once.
@@ -102,15 +98,22 @@ export function useChatSessions(enabled: boolean, reloadKey = 0, modelId = "", p
    * empty transcript is something the user can send into, and treating a failed
    * read as one would lose the conversation's history from the conversation.
    */
-  const fetchTranscript = useCallback(async (id: string) => {
+  const fetchTranscript = useCallback(async (id: string): Promise<ChatMessage[] | null> => {
     try {
       const messages = await chatRepository.listMessages(id);
       setTranscripts((current) => ({ ...current, [id]: messages }));
       setSessionsLoaded((current) => ({ ...current, [id]: true }));
       setMessagesError("");
+      // Returned as well as stored. The stored copies only reach the refs on the
+      // next render, so a caller that read them straight after awaiting this
+      // would be reading the value from *before* the fetch -- which is what made
+      // the overview report a read failure the first time and work the second,
+      // once the transcript was already in the cache.
+      return messages;
     } catch (reason: unknown) {
       setMessagesError(String(reason));
       setSessionsLoaded((current) => ({ ...current, [id]: false }));
+      return null;
     }
   }, []);
 
@@ -203,20 +206,21 @@ export function useChatSessions(enabled: boolean, reloadKey = 0, modelId = "", p
    * shows nothing rather than an empty overview full of zeroes.
    */
   const loadSessionForOverview = useCallback(async (id: string): Promise<ChatSession | null> => {
+    // The header is read first: a conversation that is gone has nothing to show
+    // even if a stale transcript is still in memory, and returning `null` here
+    // lets the caller say so rather than drawing a record for a deleted session.
+    const header = sessionsRef.current.find((session) => session.id === id);
+    if (!header) return null;
     // A transcript already in memory is not re-read: the figures are derived
     // from the same rows either way, and this is the common case once a
     // conversation has been opened.
     const cached = transcripts[id];
-    if (cached && sessionsLoaded[id]) {
-      const header = sessionsRef.current.find((session) => session.id === id);
-      return header ? { ...header, messages: cached } : null;
-    }
-    await fetchTranscript(id);
-    // Read back rather than trusting the value returned above: `fetchTranscript`
-    // never throws, so the messages have to come from where they were stored.
-    const messages = transcriptsRef.current[id];
-    const header = sessionsRef.current.find((session) => session.id === id);
-    return messages && header ? { ...header, messages } : null;
+    if (cached && sessionsLoaded[id]) return { ...header, messages: cached };
+    // The messages come back from the fetch itself rather than from the ref: the
+    // stored copy is not readable until the next render, so reading it here was
+    // a race the first time a conversation was opened.
+    const messages = await fetchTranscript(id);
+    return messages ? { ...header, messages } : null;
   }, [transcripts, sessionsLoaded, fetchTranscript]);
 
   /**

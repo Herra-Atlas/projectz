@@ -109,7 +109,14 @@ pub async fn database_initialize(
         .await
         .unwrap_or_else(|_| Err("Provider model refresh timed out".to_string()));
         if let Ok(models) = refreshed {
-            endpoint.models = models.into_iter().map(|(model, _)| model).collect();
+            let model_ids: Vec<String> = models.iter().map(|(model, _)| model.clone()).collect();
+            // The same reconciliation a manual test performs: a launch refresh is
+            // the other moment the provider's catalogue is known to be current, so
+            // a model it has stopped listing is dropped and a new one arrives off.
+            let _ = runtime
+                .database()
+                .reconcile_provider_models(&endpoint.id, &model_ids);
+            endpoint.models = model_ids;
             runtime.endpoints().update(endpoint)?;
         }
     }
@@ -801,6 +808,16 @@ pub async fn ai_test_endpoint(
             .unwrap_or_default();
     }
     let models = fetch_models_with_capabilities(&endpoint).await?;
+    // The list just read is the provider's own current catalogue, so this is
+    // where the stored rows are brought in line with it: models it has dropped
+    // are removed, ones it has gained are added switched off. Done before the
+    // capabilities write so every row that write touches already exists, and
+    // best-effort like that write -- a bookkeeping failure must not fail a
+    // connection test that has already succeeded.
+    let model_ids: Vec<String> = models.iter().map(|(model, _)| model.clone()).collect();
+    let _ = runtime
+        .database()
+        .reconcile_provider_models(&endpoint.id, &model_ids);
     // Testing a provider is the one moment we know its answers are current, so
     // this is where capabilities are learned. A provider that reports none is
     // stored as unknown, and the app keeps behaving as it did before. The stamp

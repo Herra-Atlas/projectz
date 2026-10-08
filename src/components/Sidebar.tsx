@@ -29,10 +29,10 @@ type SidebarProps = {
    * Open the read-only overview for a conversation.
    *
    * Raised rather than handled here, because the overview needs the transcript
-   * and transcripts are now fetched on demand. `App` owns that fetch and renders
-   * the one modal, so the sidebar and the statistics page reach the same view
-   * through the same path instead of each finding a session that may not have
-   * its messages loaded.
+   * and transcripts are fetched on demand. `App` raises the request and the right
+   * panel renders the one view, so the sidebar and the statistics page reach the
+   * same view through the same path instead of each finding a session that may
+   * not have its messages loaded.
    */
   onOpenOverview: (id: string) => void;
   onSettings: () => void;
@@ -327,7 +327,7 @@ export default function Sidebar({
   return (
     <>
       {sidebar}
-      {/* The overview modal is rendered by `App`, which owns the transcript fetch.
+      {/* The overview is rendered by the right panel, which the request opens.
           Kept out of here so the sidebar and the statistics page open the same
           view through one path rather than each resolving a session itself. */}
     </>

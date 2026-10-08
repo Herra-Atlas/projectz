@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { formatDuration } from "../../features/chat/sessionStats";
+import { formatDuration } from "../../features/chat/duration";
 import { Stat } from "./StatGroup";
 
 /** A figure counting down from a timestamp, updated once a second.
@@ -22,7 +22,7 @@ export function ElapsedStat({
   absolute?: boolean;
 }) {
   // Re-read once a second so the figure does not silently go stale while the
-  // modal sits open. `setInterval` is cleared on unmount.
+  // overview panel sits open. `setInterval` is cleared on unmount.
   const [, setTick] = useState(0);
   useEffect(() => {
     const timer = window.setInterval(() => setTick((value) => value + 1), 1000);

@@ -38,10 +38,13 @@ export function Group({ icon, title, children }: GroupProps) {
   );
 }
 
-/** The grid every group of small figures uses. */
-export function StatGrid({ children, columns = 3 }: { children: ReactNode; columns?: 2 | 3 }) {
+/** The grid every group of small figures uses.
+    Two columns by default: these figures live in the right panel, which is
+    narrower than the window, so a figure must not be sized by the window's own
+    breakpoints. */
+export function StatGrid({ children, columns = 2 }: { children: ReactNode; columns?: 2 | 3 }) {
   return (
-    <div className={`grid gap-x-6 gap-y-4 ${columns === 2 ? "grid-cols-2" : "grid-cols-2 sm:grid-cols-3"}`}>
+    <div className={`grid gap-x-6 gap-y-4 ${columns === 3 ? "grid-cols-2 sm:grid-cols-3" : "grid-cols-2"}`}>
       {children}
     </div>
   );

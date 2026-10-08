@@ -1,9 +1,10 @@
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { formatDuration, formatTokens, type SessionStats } from "../../features/chat/sessionStats";
+import { formatTokens, type SessionStats } from "../../features/chat/sessionStats";
+import { formatDuration } from "../../features/chat/duration";
 
 /** Charts for a single conversation's replies.
  *
- * The modal is not lazy-loaded on its own, and it is opened from several
+ * The overview panel is not lazy-loaded on its own, and it is opened from several
  * places, so Recharts is imported here directly rather than duplicating the
  * statistics page's own components — the series differ per conversation and the
  * axis is positional rather than dated.

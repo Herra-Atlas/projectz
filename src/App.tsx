@@ -1,5 +1,4 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
@@ -12,7 +11,6 @@ import ChatPage from "./pages/chat/ChatPage";
 import SettingsModal from "./components/SettingsModal";
 import StartupScreen from "./components/StartupScreen";
 import DatabasePage from "./pages/DatabasePage";
-import SessionOverview from "./components/SessionOverview";
 import WorkspacePicker from "./components/WorkspacePicker";
 import RightPanel from "./components/rightPanel/RightPanel";
 import { useChatSessions } from "./features/chat/useChatSessions";
@@ -20,7 +18,7 @@ import { chatRepository } from "./features/chat/chatRepository";
 import { usePreferences } from "./features/models/usePreferences";
 import { useRightPanel } from "./features/rightPanel/useRightPanel";
 import { useWorkspaces, workspaceLabel } from "./features/workspace/useWorkspaces";
-import type { ChatMessage, ChatSession, SessionActivity, SessionRunStatus } from "./features/chat/types";
+import type { ChatMessage, SessionActivity, SessionRunStatus } from "./features/chat/types";
 import type { WorkingMode } from "./features/chat/chatMode";
 import "./App.css";
 
@@ -74,7 +72,11 @@ function AppShell() {
   const { notifications, notify, dismiss: dismissNotification, clearKey, clearWhere } = useNotifications();
   const { copiedId: copiedNotificationId, markCopied } = useCopiedNotification();
   const [sessionActivity, setSessionActivity] = useState<SessionActivity>({});
-  const [overviewSession, setOverviewSession] = useState<ChatSession | null>(null);
+  // The conversation the right panel's Overview view is showing, plus a nonce so
+  // asking for the same one again still brings the view forward. Held here rather
+  // than in the panel because it is raised from two places -- the sidebar and the
+  // statistics page -- and both should reach one view through one path.
+  const [overviewRequest, setOverviewRequest] = useState<{ id: string; key: number } | null>(null);
   const chat = useChatSessions(startupDone, sessionReloadKey, localModelId || model, endpointId);
   // Preferences live here so the chat view and the settings modal always agree
   // on the title-model choice without one re-reading a stale copy.
@@ -150,18 +152,17 @@ function AppShell() {
   }, [chat.selectSession]);
 
   /**
-   * Open the read-only overview for a conversation.
+   * Opens the right panel on a conversation's read-only overview.
    *
-   * Owned here rather than in the sidebar or the statistics page because the
-   * overview needs the transcript, and transcripts are fetched per conversation
-   * rather than all at startup. One owner means one fetch and one modal, so the
-   * two entry points cannot drift into showing different figures for the same
-   * conversation. Fetching is skipped when the transcript is already in memory.
+   * Only a request is raised. The panel owns the view and reads the transcript
+   * through the same `loadSessionForOverview` the chat view uses, so the sidebar
+   * and the statistics page cannot drift into different figures for the same
+   * conversation. The nonce is what makes a second click re-open a conversation
+   * that is already being shown.
    */
-  const handleOpenOverview = useCallback(async (id: string) => {
-    const session = await chat.loadSessionForOverview(id);
-    if (session) setOverviewSession(session);
-  }, [chat.loadSessionForOverview]);
+  const handleOpenOverview = useCallback((id: string) => {
+    setOverviewRequest({ id, key: Date.now() });
+  }, []);
 
   /**
    * Copies a notification's text and flags the row for a moment.
@@ -386,6 +387,8 @@ function AppShell() {
         requestedUrl={requestedUrl}
         onUrlRequestHandled={() => setRequestedUrl(null)}
         onRequestHandled={() => setRequestedFile(null)}
+        overviewRequest={overviewRequest}
+        loadSession={chat.loadSessionForOverview}
         onClose={() => rightPanel.setOpen(false)}
         onOpen={() => rightPanel.setOpen(true)}
         onResize={rightPanel.setWidth}
@@ -394,11 +397,6 @@ function AppShell() {
 
       <NotificationStack notifications={notifications} copiedId={copiedNotificationId} onDismiss={dismissNotification} onCopy={copyNotification} />
       <SettingsModal open={settingsOpen} onClose={() => { setSettingsOpen(false); setSettingsRefreshKey((key) => key + 1); }} onEndpointsChanged={() => setEndpointRefreshKey((key) => key + 1)} onClearSessions={chat.clearSessions} preferences={preferences} onPreferencesChange={savePreferences} notify={notify} />
-      {/* One overview for both entry points, portalled so the overlay sits above
-          the app rather than inside whichever column raised it. Loaded eagerly:
-          unlike the statistics page it pulls in no chart library, and the modal
-          is reachable from the sidebar on every screen. */}
-      {overviewSession && createPortal(<SessionOverview session={overviewSession} onClose={() => setOverviewSession(null)} />, document.body)}
     </div>
   );
 }

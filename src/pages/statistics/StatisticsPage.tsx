@@ -25,8 +25,8 @@ import TimeframeSwitcher from "./TimeframeSwitcher";
  * which is why the page never needed the transcripts.
  *
  * `onOpenOverview` raises the request rather than fetching. The overview is
- * rendered once by `App`, which owns the transcript read, so opening it from here
- * and from the sidebar are the same action.
+ * rendered once by the right panel, which reads the transcript, so opening it
+ * from here and from the sidebar are the same action.
  */
 export default function StatisticsPage({
   refreshKey = 0,
@@ -39,7 +39,8 @@ export default function StatisticsPage({
 }) {
   const { report, loading, error, range, setRange } = useUsageReport(true, refreshKey);
   const current = timeframe(range);
-  // Only for deciding which rows are clickable. The open modal lives in `App`.
+  // Only for deciding which rows are clickable. The overview view lives in the
+  // right panel, opened by the request `App` raises.
   const known = new Set(sessions.map((session) => session.id));
 
   // The token panel pages between the aggregate view and the per-model one.
@@ -119,7 +120,7 @@ export default function StatisticsPage({
             {report
               // A row is clickable only when its conversation is loaded, because
               // the report carries totals and not the transcript the overview
-              // needs. The modal itself is `App`'s.
+              // needs. The view itself is the right panel's.
               ? <SessionTable sessions={report.session_usage.filter((row) => known.has(row.id))} onOpen={onOpenOverview} />
               : <p className="px-4 py-12 text-center text-sm text-[var(--muted)]">Loading…</p>}
           </Panel>

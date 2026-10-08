@@ -7,6 +7,8 @@ import BrowserTab from "./browser/BrowserTab";
 import FilesTab from "./tabs/FilesTab";
 import TerminalTab from "./tabs/TerminalTab";
 import SubAgentsTab from "./tabs/SubAgentsTab";
+import SessionOverviewTab from "./tabs/SessionOverviewTab";
+import type { ChatSession } from "../../features/chat/types";
 import { type PanelViewId, usePanelViews } from "../../features/rightPanel/usePanelViews";
 import { MAX_PANEL_WIDTH, MIN_PANEL_WIDTH } from "../../features/rightPanel/useRightPanel";
 
@@ -150,6 +152,23 @@ type RightPanelProps = {
   onUrlRequestHandled?: () => void;
   /** Called once the requested file has been shown. */
   onRequestHandled?: () => void;
+  /**
+   * The conversation the Overview view should show, raised by the sidebar or the
+   * statistics page.
+   *
+   * A request rather than a selection, like `requestedPath`: setting it opens the
+   * panel and brings Overview forward on its own. The `key` changes on every
+   * request, so asking for the same conversation again still re-opens the view
+   * rather than leaving a closed panel untouched.
+   */
+  overviewRequest?: { id: string; key: number } | null;
+  /**
+   * Reads one conversation with its transcript, for the Overview view.
+   *
+   * Supplied by the chat hook so the panel shares its transcript cache rather
+   * than holding a second copy of every conversation the user looks at.
+   */
+  loadSession: (id: string) => Promise<ChatSession | null>;
   onClose: () => void;
   onOpen: () => void;
   onResize: (width: number) => void;
@@ -164,7 +183,7 @@ type RightPanelProps = {
  * to bring it back. The body is hidden from the tree as well as from layout, so
  * a tab the panel remembers is not silently live behind a closed panel.
  */
-export default function RightPanel({ open, width, workspace, sessionId = null, loadedModelId = null, loadingModelId = null, requestedPath, requestedUrl, onUrlRequestHandled, onRequestHandled, onClose, onOpen, onResize, onNotify }: RightPanelProps) {
+export default function RightPanel({ open, width, workspace, sessionId = null, loadedModelId = null, loadingModelId = null, requestedPath, requestedUrl, onUrlRequestHandled, onRequestHandled, overviewRequest = null, loadSession, onClose, onOpen, onResize, onNotify }: RightPanelProps) {
   const panelRef = useRef<HTMLElement>(null);
   const {
     openViews, activeView, open: openView, close: closeView, setActiveView,
@@ -249,6 +268,22 @@ export default function RightPanel({ open, width, workspace, sessionId = null, l
     setBrowserRequest(null);
     closeView("browser");
   }, [closeView]);
+
+  /**
+   * Opens the panel and brings Overview forward when a conversation is asked for.
+   *
+   * The last request acted on is held in a ref rather than compared against the
+   * request itself: `onOpen` is an inline arrow from `App`, so it gets a new
+   * identity on every render, and depending on it alone would force the panel
+   * open again on each render while a conversation sat in the overview.
+   */
+  const handledOverviewKeyRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!overviewRequest || handledOverviewKeyRef.current === overviewRequest.key) return;
+    handledOverviewKeyRef.current = overviewRequest.key;
+    openView("overview");
+    onOpen();
+  }, [overviewRequest, openView, onOpen]);
 
   /**
    * Opens the panel and brings Files forward when a file is asked for.
@@ -365,6 +400,10 @@ export default function RightPanel({ open, width, workspace, sessionId = null, l
               // unmounted when the panel closes -- that is what destroys the
               // webview, rather than hiding it and leaving its page alive.
               <BrowserTab mounted={open} initialUrl={browserRequest?.url} requestKey={browserRequest?.nonce} onRequestHandled={() => setBrowserRequest(null)} onLastTabClosed={handleLastBrowserTabClosed} onNotify={onNotify} />
+            ) : activeView === "overview" && overviewRequest ? (
+              // Keyed by the conversation so switching records remounts the view
+              // instead of briefly drawing the previous one's figures.
+              <SessionOverviewTab key={overviewRequest.id} sessionId={overviewRequest.id} loadSession={loadSession} />
             ) : activeView === "subagents" ? (
               // A link out of a run's answer opens in the panel's browser, the same
               // place a link from the chat opens -- both are the same act, so they

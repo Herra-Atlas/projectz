@@ -1,9 +1,10 @@
 import { ChartNoAxesColumn, Clock, Gauge, Layers } from "lucide-react";
 import { Suspense, lazy } from "react";
-import { formatDuration, formatTokens, type SessionStats } from "../../../features/chat/sessionStats";
+import { formatTokens, type SessionStats } from "../../../features/chat/sessionStats";
+import { formatDuration } from "../../../features/chat/duration";
 import { Group, Stat, StatGrid } from "../StatGroup";
 
-/** Recharts is the heaviest dependency in the app, and the overview modal is
+/** Recharts is the heaviest dependency in the app, and the overview panel is
     reachable from the sidebar on every screen. Loading the charts lazily keeps
     it out of the chat bundle; the fallback is the height the chart will take,
     so the tab does not jump when the chunk lands. */
@@ -42,7 +43,7 @@ export default function StatisticsTab({ stats }: { stats: SessionStats }) {
       </Group>
 
       {/* Charted rather than tabulated: the shape across replies is the point,
-          and a per-reply table would be taller than the modal. */}
+          and a per-reply table would be taller than the panel. */}
       <Group icon={<ChartNoAxesColumn size={13} />} title="Tokens per reply">
         <ChartSlot><ReplyTokensChart stats={stats} /></ChartSlot>
         <p className="mt-1.5 text-[11px] text-[var(--quiet)]">

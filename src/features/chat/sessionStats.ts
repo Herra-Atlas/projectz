@@ -176,12 +176,6 @@ export const formatTokens = (count: number) =>
     : count >= 10_000 ? `${(count / 1_000).toFixed(1)}K`
       : count.toLocaleString();
 
-export const formatDuration = (seconds: number) => {
-  if (seconds < 60) return `${seconds.toFixed(1)}s`;
-  const minutes = Math.floor(seconds / 60);
-  return `${minutes}m ${Math.round(seconds % 60)}s`;
-};
-
 export const formatTimestamp = (iso: string) => {
   const parsed = new Date(iso);
   if (Number.isNaN(parsed.getTime())) return "—";

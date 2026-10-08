@@ -229,15 +229,19 @@ impl Database {
         // favorite) have somewhere to live. The JSON stays as the record of
         // what the provider reported, which `list_endpoints` falls back to.
         //
-        // A new model is inserted enabled, and an existing one keeps whatever
-        // `enabled` it already had. Overwriting it from `endpoint.enabled` -- the
-        // *provider's* own switch -- would silently turn back on every model the
-        // user had switched off each time the provider was saved, which is
-        // exactly the drift the `enabled` column exists to remove. Renaming a
-        // provider must not change which models are available.
+        // A new model is inserted *disabled*, and an existing one keeps whatever
+        // `enabled` it already had. A provider can report several hundred models,
+        // and switching them all on would fill every picker with names the user
+        // never chose -- so a model arrives off and the user turns on the ones
+        // they want. For the same reason the insert never reads `endpoint.enabled`
+        // (the *provider's* own switch): overwriting a model's flag from it would
+        // silently turn back on every model the user had switched off each time
+        // the provider was saved, which is exactly the drift the `enabled` column
+        // exists to remove. Renaming a provider must not change which models are
+        // available.
         for model in &endpoint.models {
             tx.execute(
-                "INSERT INTO provider_models (provider_id, model_id, enabled) VALUES (?1,?2,1)
+                "INSERT INTO provider_models (provider_id, model_id, enabled) VALUES (?1,?2,0)
                  ON CONFLICT(provider_id, model_id) DO NOTHING",
                 params![endpoint.id, model],
             )
@@ -273,6 +277,71 @@ impl Database {
             )
             .map_err(|error| error.to_string())?;
         Ok(())
+    }
+
+    /// Brings a provider's stored models in line with the catalogue just read
+    /// from it.
+    ///
+    /// Called only where the provider's *own* list is in hand -- a connection
+    /// test or a launch refresh -- never for an ordinary header-only save. Those
+    /// two are the only moments the app knows the catalogue is current, so they
+    /// are the only ones allowed to delete from it.
+    ///
+    /// A model the provider no longer lists is deleted, row, capabilities and
+    /// favourite together: they all describe a model that can no longer be
+    /// called, and keeping the row would leave a switch in Settings for
+    /// something that does not exist. A model seen for the first time is
+    /// inserted *disabled*, so a gateway reporting several hundred models does
+    /// not flood the pickers -- the user turns on the ones they want. Every row
+    /// that survives is left exactly as it was, so a refresh never changes which
+    /// models are available.
+    pub fn reconcile_provider_models(
+        &self,
+        provider_id: &str,
+        model_ids: &[String],
+    ) -> Result<(), String> {
+        // An empty catalogue is never reconciled. `fetch_models_with_capabilities`
+        // refuses an empty answer, so this cannot arrive from a real read -- and
+        // treating it as authoritative would delete every row for the provider.
+        if model_ids.is_empty() {
+            return Ok(());
+        }
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        // A provider that has not been saved yet has no rows and cannot take any:
+        // `provider_models.provider_id` is a foreign key. Testing a draft provider
+        // before it is added is a normal thing to do, so this is a no-op for one
+        // rather than an error.
+        let exists: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM providers WHERE id=?1",
+                params![provider_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if exists == 0 {
+            return Ok(());
+        }
+        let tx = connection
+            .unchecked_transaction()
+            .map_err(|error| error.to_string())?;
+        tx.execute(
+            "DELETE FROM provider_models
+             WHERE provider_id=?1
+               AND model_id NOT IN (SELECT value FROM json_each(?2))",
+            params![provider_id, json(&model_ids.to_vec())?],
+        )
+        .map_err(|error| error.to_string())?;
+        // The survivors already have rows, so this inserts only what is new -- and
+        // `DO NOTHING` on the conflict is what leaves an enabled model enabled.
+        for model_id in model_ids {
+            tx.execute(
+                "INSERT INTO provider_models (provider_id, model_id, enabled) VALUES (?1,?2,0)
+                 ON CONFLICT(provider_id, model_id) DO NOTHING",
+                params![provider_id, model_id],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        tx.commit().map_err(|error| error.to_string())
     }
 
     pub fn remove_endpoint(&self, id: &str) -> Result<(), String> {
@@ -855,6 +924,11 @@ impl Database {
     /// A field the provider did not report is written as NULL rather than as a
     /// false or an empty list, because "unknown" and "cannot" are different
     /// answers and the frontend needs to keep behaving normally for the first.
+    ///
+    /// A row this creates is inserted disabled, matching `save_endpoint`: the
+    /// capability write is bookkeeping and must never be what switches a model
+    /// on. The conflict path deliberately leaves `enabled` alone, so a model the
+    /// user already turned on keeps its state across a re-test.
     pub fn save_model_capabilities(
         &self,
         provider_id: &str,
@@ -868,7 +942,7 @@ impl Database {
         for (model_id, capabilities) in models {
             tx.execute(
                 "INSERT INTO provider_models (provider_id, model_id, enabled, context_length, input_modalities, output_modalities, supports_reasoning, reasoning_values, supports_tools, capabilities_checked_at)
-                 VALUES (?1,?2,1,?3,?4,?5,?6,?7,?8,?9)
+                 VALUES (?1,?2,0,?3,?4,?5,?6,?7,?8,?9)
                  ON CONFLICT(provider_id, model_id) DO UPDATE SET
                      context_length=excluded.context_length,
                      input_modalities=excluded.input_modalities,
@@ -2148,8 +2222,8 @@ mod tests {
             .any(|name| name == "idx_provider_models_favorite"));
     }
 
-    /// A provider saved with a model list gets a row per model, and the model
-    /// list survives a round trip through the new table.
+    /// A provider saved with a model list gets a row per model, switched off, and
+    /// the list survives a round trip through the new table.
     #[test]
     fn saving_an_endpoint_records_one_row_per_model() {
         let mut connection = Connection::open_in_memory().unwrap();
@@ -2182,10 +2256,14 @@ mod tests {
             .unwrap();
         assert_eq!(rows, 2);
 
+        // Recorded, but switched off: a saved catalogue arrives disabled so it
+        // cannot fill the pickers by itself. Both are still reported, so Settings
+        // can offer them back.
         let listed = connection.list_endpoints().unwrap();
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].models.len(), 2);
-        assert!(listed[0].models.contains(&"gpt-4o".to_string()));
+        assert_eq!(listed[0].models.len(), 0);
+        assert_eq!(listed[0].disabled_models.len(), 2);
+        assert!(listed[0].disabled_models.contains(&"gpt-4o".to_string()));
     }
 
     /// The upsert path must append, update in place, and drop only the rows past
@@ -2543,6 +2621,10 @@ mod tests {
                 enabled: true,
             })
             .unwrap();
+        // A saved catalogue arrives switched off, so both are turned on first for
+        // the test to have an enabled model to switch back off.
+        database.set_model_enabled("kilo", "flash", true).unwrap();
+        database.set_model_enabled("kilo", "pro", true).unwrap();
         assert_eq!(database.list_endpoints().unwrap()[0].models.len(), 2);
 
         database.set_model_enabled("kilo", "flash", false).unwrap();
@@ -2577,6 +2659,10 @@ mod tests {
             enabled: true,
         };
         database.save_endpoint(&endpoint).unwrap();
+        // Both on, then one off: this test is about the *re-save* not switching a
+        // model back on, so it needs a switched-off model to observe.
+        database.set_model_enabled("kilo", "flash", true).unwrap();
+        database.set_model_enabled("kilo", "pro", true).unwrap();
         database.set_model_enabled("kilo", "flash", false).unwrap();
 
         // Renaming and re-saving, which is what editing the provider does.
@@ -2610,11 +2696,62 @@ mod tests {
                 enabled: true,
             })
             .unwrap();
+        // A saved catalogue arrives switched off, so both are enabled before one
+        // is switched off again -- otherwise there is no enabled model to report.
+        database.set_model_enabled("kilo", "flash", true).unwrap();
+        database.set_model_enabled("kilo", "pro", true).unwrap();
         database.set_model_enabled("kilo", "flash", false).unwrap();
 
         let endpoint = database.list_endpoints().unwrap().remove(0);
         assert_eq!(endpoint.models, vec!["pro".to_string()]);
         assert_eq!(endpoint.disabled_models, vec!["flash".to_string()]);
+    }
+
+    /// Reconciling drops the models a provider no longer lists and adds new ones
+    /// switched off, while leaving the models that survived exactly as they were.
+    ///
+    /// This is what a connection test and a launch refresh both do. Deleting a
+    /// dropped model is what stops Settings offering a switch for something the
+    /// provider no longer serves; adding a new one off is what stops a gateway's
+    /// several hundred models filling the pickers the moment it is connected.
+    #[test]
+    fn reconciling_a_provider_drops_gone_models_and_adds_new_ones_disabled() {
+        let database = migrated();
+        database
+            .save_endpoint(&crate::ai::remote::types::Endpoint {
+                id: "kilo".into(),
+                name: "Kilo".into(),
+                base_url: "https://example.test".into(),
+                api_key: String::new(),
+                models: vec!["kept-on".into(), "gone".into()],
+                disabled_models: vec![],
+                enabled: true,
+            })
+            .unwrap();
+        // One model enabled by the user, the other left off, before the refresh.
+        database.set_model_enabled("kilo", "kept-on", true).unwrap();
+
+        database
+            .reconcile_provider_models("kilo", &["kept-on".into(), "brand-new".into()])
+            .unwrap();
+
+        let endpoint = database.list_endpoints().unwrap().remove(0);
+        assert_eq!(
+            endpoint.models,
+            vec!["kept-on".to_string()],
+            "a surviving model keeps the enabled state the user gave it"
+        );
+        assert_eq!(
+            endpoint.disabled_models,
+            vec!["brand-new".to_string()],
+            "a new model arrives off, and the dropped one is gone"
+        );
+
+        // A provider that was never saved has no rows and cannot take any, so a
+        // test of a draft provider must be a no-op rather than a foreign-key error.
+        database
+            .reconcile_provider_models("never-saved", &["anything".into()])
+            .unwrap();
     }
 
     /// A conversation's mode and access level come back on the header, so

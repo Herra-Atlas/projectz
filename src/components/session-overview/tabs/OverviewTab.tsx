@@ -1,5 +1,6 @@
 import { ChartNoAxesColumn, MessageSquareText, Timer } from "lucide-react";
-import { formatDuration, formatTokens, type SessionStats } from "../../../features/chat/sessionStats";
+import { formatTokens, type SessionStats } from "../../../features/chat/sessionStats";
+import { formatDuration } from "../../../features/chat/duration";
 import { ElapsedStat } from "../ElapsedStat";
 import { Group, Stat, StatGrid } from "../StatGroup";
 

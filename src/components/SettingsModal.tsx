@@ -285,10 +285,17 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
   };
 
   const setProviderModelsEnabled = (endpoint: Endpoint, enabled: boolean) => {
+    // Every known model, not just the enabled ones, and only the ones whose state
+    // actually changes. A provider's catalogue now arrives switched off, so
+    // "Enable all" has to reach the disabled models -- they are exactly what the
+    // click is asking for -- while models already in the wanted state are left
+    // alone so a flip touches only what it must.
+    const targets = [...endpoint.models, ...endpoint.disabled_models]
+      .filter((model) => endpoint.disabled_models.includes(model) === enabled);
     // Sequential rather than `all`, because each write is its own row on the same
     // connection: a gateway reporting several hundred models would otherwise open
     // several hundred concurrent writes against one database for one click.
-    const work = endpoint.models.reduce(
+    const work = targets.reduce(
       (chain, model) => chain.then(() => invoke("ai_set_model_enabled", { endpointId: endpoint.id, model, enabled })),
       Promise.resolve(),
     );
