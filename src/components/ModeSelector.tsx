@@ -48,7 +48,7 @@ export default function ModeSelector({ mode, permission, canUseTools, onModeChan
           aria-expanded={modeOpen}
           aria-label={`Mode ${mode === "agent" ? "Agent" : "Chat"}`}
           onClick={() => { setModeOpen((open) => !open); setPermissionOpen(false); }}
-          className="inline-flex h-6 items-center gap-1 rounded px-1.5 text-[10px] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+          className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-[11px] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
         >
           {/* The label recedes and the value does not, because the current state is
               what the user came to read. */}
@@ -91,7 +91,7 @@ export default function ModeSelector({ mode, permission, canUseTools, onModeChan
             aria-expanded={permissionOpen}
             aria-label={`Permissions ${PERMISSION_LABELS[permission]}`}
             onClick={() => { setPermissionOpen((open) => !open); setModeOpen(false); }}
-            className="inline-flex h-6 items-center gap-1 rounded px-1.5 text-[10px] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+            className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-[11px] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
           >
             <span className="text-[var(--quiet)]">Access</span>
             <span className={permission === "full" ? "text-[var(--danger)]" : "text-[var(--accent)]"}>

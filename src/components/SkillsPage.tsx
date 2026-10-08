@@ -78,19 +78,14 @@ export default function SkillsPage({
 
   return (
     <div>
-      <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="text-xl font-semibold tracking-tight">Skills</h2>
-          <p className="mt-1 text-sm text-[var(--muted)]">
-            Reusable instructions you or the agent can apply to a reply.
-          </p>
-        </div>
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-5">
+        <h2 className="text-[17px] font-semibold tracking-tight">Skills</h2>
         <button
           type="button"
           onClick={() => onOpenForm(null)}
-          className="inline-flex min-h-10 shrink-0 items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3.5 text-sm font-medium text-[var(--text)] transition-colors hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+          className="inline-flex min-h-9 shrink-0 items-center gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 text-[13px] font-medium text-[var(--text)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
         >
-          <Plus size={16} />New skill
+          <Plus size={15} />New skill
         </button>
       </div>
 
@@ -101,10 +96,10 @@ export default function SkillsPage({
       ) : skills.length === 0 ? (
         <SkillsEmptyState onCreate={() => onOpenForm(null)} />
       ) : (
-        <div className="space-y-7">
+        <div className="space-y-8">
           {grouped.map(([label, group]) => (
             <section key={label}>
-              <h3 className="mb-3 text-[11px] uppercase tracking-wide text-[var(--quiet)]">
+              <h3 className="mb-4 text-[11px] uppercase tracking-wide text-[var(--quiet)]">
                 {label}
               </h3>
               <div className="grid gap-3 sm:grid-cols-2">

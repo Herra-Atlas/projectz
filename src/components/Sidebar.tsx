@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ChartNoAxesColumn, ChartSpline, Check, ChevronLeft, ChevronRight, CircleDot, Database, MessageSquareText, MoreHorizontal, Pin, Pencil, Settings2, Trash2, X } from "lucide-react";
 import type { ChatSessionHeader, SessionActivity, SessionRunStatus } from "../features/chat/types";
@@ -7,6 +7,33 @@ import LiveSpinner from "./LiveSpinner";
 
 const MENU_WIDTH = 200;
 const DOT_SUBMENU_WIDTH = 152;
+
+/**
+ * The recency heading a conversation sits under in the sidebar.
+ *
+ * Recency rather than alphabetical or by model, because the question the list
+ * answers is "the one I was just in" far more often than any other. Pinned
+ * conversations are their own heading regardless of age, which is the whole
+ * point of pinning.
+ *
+ * Days are compared on local calendar boundaries rather than a rolling 24
+ * hours: something from 11pm last night reads as "Yesterday" to a person, and
+ * a list that filed it under "Today" until 11pm the next evening would be
+ * disagreeing with the reader about what day it is.
+ */
+function sessionGroupLabel(session: ChatSessionHeader): string {
+  if (session.pinned) return "Pinned";
+  const updated = new Date(session.updatedAt);
+  if (Number.isNaN(updated.getTime())) return "Earlier";
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  const dayStart = startOfToday.getTime();
+  const time = updated.getTime();
+  if (time >= dayStart) return "Today";
+  if (time >= dayStart - 86_400_000) return "Yesterday";
+  if (time >= dayStart - 7 * 86_400_000) return "Previous 7 days";
+  return "Earlier";
+}
 
 type SidebarProps = {
   /**
@@ -62,7 +89,7 @@ function NavButton({
       onClick={onClick}
       aria-current={active ? "page" : undefined}
       title={collapsed ? label : undefined}
-      className={`flex min-h-10 w-full items-center gap-3 rounded-lg px-3 text-sm font-medium transition-colors ${collapsed ? "justify-center" : ""} ${active ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}
+      className={`flex min-h-9 w-full items-center gap-3 rounded-md px-3 text-[13px] font-medium transition-colors ${collapsed ? "justify-center" : ""} ${active ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}
     >
       {icon}
       {!collapsed && <span>{label}</span>}
@@ -220,39 +247,36 @@ export default function Sidebar({
   // Portalled so the fixed overlay is not clipped by the sidebar's layout.
   const sidebar = (
     <aside className={`flex h-full shrink-0 flex-col border-r border-[var(--line)] bg-[var(--rail)] transition-[width] duration-200 ${collapsed ? "w-[68px]" : "w-[260px] max-sm:fixed max-sm:inset-y-0 max-sm:left-0 max-sm:z-50 max-sm:shadow-2xl"}`}>
-      <div className={`relative flex h-[68px] items-center gap-3 border-b border-[var(--line)] ${collapsed ? "justify-center px-2" : "px-4"}`}>
-        {!collapsed && <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-semibold tracking-tight">ProjectZ</p>
-          <p className="text-xs text-[var(--quiet)]">AI workspace</p>
-        </div>}
+      <div className={`flex h-[60px] shrink-0 items-center gap-2 border-b border-[var(--line)] ${collapsed ? "justify-center px-2" : "px-4"}`}>
+        {!collapsed && <p className="min-w-0 flex-1 truncate text-[13px] font-semibold tracking-tight">ProjectZ</p>}
         <button
           type="button"
-          className={`grid size-9 shrink-0 place-items-center rounded-lg text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] ${collapsed ? "absolute right-1 top-1/2 -translate-y-1/2" : "grid"}`}
+          className="grid size-7 shrink-0 place-items-center rounded-md text-[var(--quiet)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)]"
           onClick={() => setCollapsed((value) => !value)}
           aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
         >
-          {collapsed ? <ChevronRight size={17} /> : <ChevronLeft size={17} />}
+          {collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
         </button>
       </div>
 
-      <nav aria-label="Primary" className="space-y-1 px-3 py-4">
+      <nav aria-label="Primary" className="space-y-0.5 px-3 pt-3">
         <NavButton
-          icon={<MessageSquareText size={17} />}
+          icon={<MessageSquareText size={16} />}
           label="Chat"
           active={view === "chat"}
           collapsed={collapsed}
           onClick={() => { onViewChange("chat"); onNewChat(); }}
         />
         <NavButton
-          icon={<Database size={17} />}
+          icon={<Database size={16} />}
           label="Database"
           active={view === "database"}
           collapsed={collapsed}
           onClick={() => onViewChange("database")}
         />
         <NavButton
-          icon={<ChartSpline size={17} />}
+          icon={<ChartSpline size={16} />}
           label="Statistics"
           active={view === "statistics"}
           collapsed={collapsed}
@@ -260,13 +284,18 @@ export default function Sidebar({
         />
       </nav>
 
-      {!collapsed && <section aria-label="Conversation history" className="flex min-h-0 flex-1 flex-col px-3 pb-3">
-        <div className="flex h-10 items-center px-2">
-          <h2 className="text-xs font-medium text-[var(--muted)]">History</h2>
-        </div>
-        <div className="min-h-0 flex-1 space-y-1 overflow-y-auto">
-          {sessions.length === 0 && <p className="px-2 py-3 text-xs text-[var(--quiet)]">Your conversations will appear here.</p>}
-          {sessions.map((session) => {
+      {!collapsed && <section aria-label="Conversation history" className="mt-3 flex min-h-0 flex-1 flex-col border-t border-[var(--line)] px-3 pb-3">
+        {/* No "History" heading above the groups. Each group names itself, and a
+            heading over a list of headings is a label doing no work. */}
+        <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto pt-1">
+          {sessions.length === 0 && <p className="px-2 py-3 text-xs leading-5 text-[var(--quiet)]">Nothing here yet. Your conversations collect here once you start one.</p>}
+          {sessions.map((session, index) => {
+            // A heading is emitted whenever the bucket changes, rather than the
+            // list being pre-bucketed: the array is already ordered pinned-first
+            // then most-recent, so a change of label is exactly where a heading
+            // belongs and nothing has to be sorted twice.
+            const groupLabel = sessionGroupLabel(session);
+            const showGroup = index === 0 || sessionGroupLabel(sessions[index - 1]) !== groupLabel;
             const status: SessionRunStatus | undefined = activity[session.id];
             const isActive = session.id === activeId;
             const isLive = status === "streaming" || status === "searching";
@@ -274,12 +303,14 @@ export default function Sidebar({
             const flipsLeft = menuPos !== null && menuPos.left + MENU_WIDTH + DOT_SUBMENU_WIDTH + 12 > window.innerWidth - 8;
             const defaultDot = session.dotColor || SESSION_DOT_DEFAULT;
             const dot = isLive ? "var(--accent)" : status === "done" ? SESSION_DOT_DONE : status === "error" ? SESSION_DOT_ERROR : defaultDot;
-            return <div key={session.id} onContextMenu={(event) => openMenuAtPointer(event, session)} className={`group flex items-center gap-1 rounded-lg pr-1 ${isActive ? "bg-[var(--raised)] text-[var(--text)]" : "text-[var(--muted)] hover:bg-[color-mix(in_srgb,var(--raised)_65%,transparent)] hover:text-[var(--text)]"}`}>
-              {renamingId === session.id ? <form onSubmit={(event) => { event.preventDefault(); finishRename(session.id); }} className="flex min-h-10 min-w-0 flex-1 items-center gap-1 px-1">
+            return <Fragment key={session.id}>
+              {showGroup && <h3 className="px-2 pb-1 pt-3 text-[11px] font-medium text-[var(--quiet)]">{groupLabel}</h3>}
+              <div onContextMenu={(event) => openMenuAtPointer(event, session)} className={`group flex items-center gap-1 rounded-md pr-1 ${isActive ? "bg-[var(--raised)] text-[var(--text)]" : "text-[var(--muted)] hover:bg-[color-mix(in_srgb,var(--raised)_65%,transparent)] hover:text-[var(--text)]"}`}>
+              {renamingId === session.id ? <form onSubmit={(event) => { event.preventDefault(); finishRename(session.id); }} className="flex min-h-9 min-w-0 flex-1 items-center gap-1 px-1">
                 <input autoFocus aria-label="Session name" value={renameValue} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") setRenamingId(null); }} className="min-w-0 flex-1 rounded bg-[var(--page)] px-2 py-1 text-[13px] text-[var(--text)] outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]" />
                 <button type="submit" className="grid size-7 place-items-center rounded hover:bg-[var(--page)]" aria-label="Save session name"><Check size={14} /></button>
                 <button type="button" onClick={() => setRenamingId(null)} className="grid size-7 place-items-center rounded hover:bg-[var(--page)]" aria-label="Cancel rename"><X size={14} /></button>
-              </form> : <button type="button" onClick={() => { onSelectSession(session.id); onViewChange("chat"); }} className="flex min-h-10 min-w-0 flex-1 items-center gap-2.5 px-2.5 text-left text-[13px]" title={session.title}>
+              </form> : <button type="button" onClick={() => { onSelectSession(session.id); onViewChange("chat"); }} className="flex min-h-9 min-w-0 flex-1 items-center gap-2.5 px-2.5 text-left text-[13px]" title={session.title}>
                 {session.pinned ? <Pin size={14} className="shrink-0 text-[var(--accent)]" /> : <span aria-hidden="true" title={status === "searching" ? "Searching the web" : isLive ? "Streaming response" : status === "done" ? "Response ready" : status === "error" ? "Response failed" : "Conversation"} className="grid size-4 shrink-0 place-items-center"><span className="inline-flex size-1.5 rounded-full" style={{ backgroundColor: dot }} /></span>}
                 <span className="truncate">{session.title}</span>
               </button>}
@@ -309,14 +340,15 @@ export default function Sidebar({
                   <button type="button" onClick={() => { onDeleteSession(session.id); closeMenu(); }} className="flex min-h-8 w-full items-center gap-2.5 rounded-md px-2 text-left text-xs text-[var(--danger)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]"><Trash2 size={14} />Delete</button>
                 </div>, document.body)}
               </div>
-            </div>;
+              </div>
+            </Fragment>;
           })}
         </div>
       </section>}
 
       <div className="mt-auto border-t border-[var(--line)] p-3">
-        <button type="button" onClick={onSettings} className={`flex min-h-10 w-full items-center gap-3 rounded-lg px-3 text-sm text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] ${collapsed ? "justify-center" : ""}`} title={collapsed ? "Settings" : undefined}>
-          <Settings2 size={17} />
+        <button type="button" onClick={onSettings} className={`flex min-h-9 w-full items-center gap-3 rounded-md px-3 text-[13px] text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] ${collapsed ? "justify-center" : ""}`} title={collapsed ? "Settings" : undefined}>
+          <Settings2 size={16} />
           {!collapsed && <span>Settings</span>}
         </button>
       </div>

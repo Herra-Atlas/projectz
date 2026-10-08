@@ -1,25 +1,61 @@
 @import "tailwindcss";
 
+/*
+  ProjectZ design tokens.
+
+  One neutral charcoal surface scale and one warm accent. The surfaces are
+  deliberately left un-tinted: a hue on a pane competes with the content sitting
+  on it, and on a workspace whose content is code and prose the surface should
+  recede. Depth is carried by the four surface steps and a single hairline
+  (--line), not by coloured borders or gradient washes.
+
+  Every component reads these names rather than a literal colour, so the app is
+  restyled here and not in the components. That is the whole point of the file:
+  a colour cannot drift between the chrome and the transcript because there is
+  only one definition of it.
+*/
 :root {
-  font-family: Inter, "Segoe UI", system-ui, sans-serif;
-  color: #e8e9e2;
-  background: #111511;
+  font-family: Inter, "Segoe UI", system-ui, -apple-system, sans-serif;
+  color: var(--text);
+  background: var(--page);
+  /* Tells the engine this is a dark surface, so native scrollbars, form
+     controls and selection in a webview style themselves for dark rather than
+     rendering a light control on a dark pane. */
+  color-scheme: dark;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   font-optical-sizing: auto;
-  --page: #111511;
-  --rail: #171c17;
-  --panel: #1c221d;
-  --raised: #232a24;
-  --line: #303932;
-  --text: #e8e9e2;
-  --muted: #a0a89e;
-  --quiet: #737e73;
-  --accent: #d6ad78;
-  --accent-ink: #21190f;
-  --danger: #e28a7c;
+
+  /* Surfaces, darkest to lightest. Each step is a small, even lift so nesting
+     reads as depth rather than as separate materials: page is the window, rail
+     the sidebar and side panels, panel a control or card, raised a hover or an
+     active row. */
+  --page: #0e0e10;
+  --rail: #141416;
+  --panel: #19191c;
+  --raised: #222226;
+
+  /* One hairline for every divider and border, plus a slightly stronger stop
+     for hovered edges and scrollbar thumbs. Two is the whole border vocabulary:
+     a third weight reads as an accident. */
+  --line: #2b2b31;
+  --line-strong: #3a3a41;
+
+  /* Text in three stops and no more: primary, secondary, tertiary. A fourth
+     step is always one the reader cannot place. */
+  --text: #ededf0;
+  --muted: #a2a2ab;
+  --quiet: #6e6e78;
+
+  /* The one accent: a warm amber held against the cool neutrals, which is what
+     stops the greys going inert. --accent-ink is the text that sits on --accent
+     and has to stay legible there. */
+  --accent: #e2b57c;
+  --accent-ink: #1b1409;
+
+  --danger: #e58a7a;
   /* Diff additions and removals. --removed is deliberately not --danger: a
      deleted line is an ordinary edit, not an error, and sharing the colour would
      make every removal read as something went wrong. It is the same hue held
@@ -28,19 +64,19 @@
      neither shouts. --added is the app's one green, so the added/removed pair
      reads as a single figure of speech wherever it appears: in the header
      totals, in the per-file rows, and in the diff view itself. */
-  --added: #8fc98a;
-  --removed: #cf8a80;
+  --added: #93c98d;
+  --removed: #d18c82;
   /* Categorical series, for charts that plot one line per model rather than a
      few totals. Hues rather than steps of the surface tokens: a series must be
      told apart from its neighbours, and three shades of grey cannot do that.
      Ordered so neighbouring entries stay far apart on the wheel, and each is
      light enough to read on --panel. Read in order by the per-model chart. */
-  --series-1: #d6ad78;
-  --series-2: #7fb2c9;
-  --series-3: #b39ddb;
-  --series-4: #8fc98a;
-  --series-5: #d98fa8;
-  --series-6: #c9c07a;
+  --series-1: #e2b57c;
+  --series-2: #7fb6cf;
+  --series-3: #b6a0e0;
+  --series-4: #93c98d;
+  --series-5: #dc93ac;
+  --series-6: #cdc37e;
 }
 
 *,
@@ -64,41 +100,52 @@ body {
   background: var(--page);
   color: var(--text);
   font-size: 14px;
-  line-height: 1.5;
+  line-height: 1.55;
+  /* A hair tighter than the default. Inter is set loose for body copy, and at
+     UI sizes the extra tracking is what makes a dense interface look untidy;
+     the difference is invisible on any one word and obvious across a screen. */
+  letter-spacing: -0.006em;
 }
 
-p {
-  margin: 0;
-  color: inherit;
-  line-height: 1.65;
-}
-
-h1,
-h2,
-h3,
-h4,
-h5,
-h6 {
-  margin: 0;
-  color: var(--text);
-  font-weight: 600;
-  line-height: 1.2;
-}
-
-button,
-input,
-textarea,
-select {
-  font: inherit;
-}
-
-/* Buttons inherit the surrounding colour, but through the base layer rather
-   than as an unlayered rule. Unlayered CSS outranks every `@layer`, so a bare
-   `button { color: inherit }` silently beat Tailwind's own `text-*` utilities
-   and left white icons on the white send button until hover. Declaring the
-   layer puts these defaults underneath the utilities, which is where a
-   component's own colour class belongs. */
+/* Element resets live in the base layer, never as unlayered rules.
+   Unlayered CSS outranks every `@layer` -- including Tailwind's utilities -- so
+   a bare `h3 { margin: 0 }` silently beat every `mb-*` a component wrote on a
+   heading, and a bare `button { color: inherit }` beat every `text-*` on a
+   button. Spacing, colour and weight written on a heading or a button in a
+   component therefore did nothing at all, and the failure was invisible: the
+   class was there in the source, and the browser simply never applied it.
+   Declaring the layer puts these defaults underneath the utilities, which is
+   where a component's own class belongs. */
 @layer base {
+  p {
+    margin: 0;
+    color: inherit;
+    line-height: 1.65;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    margin: 0;
+    color: var(--text);
+    font-weight: 600;
+    line-height: 1.2;
+    /* Headings are sized rather than letterspaced for emphasis, so they take a
+       touch more negative tracking than the body: at large sizes the default
+       spacing opens the word up and reads as a title with gaps in it. */
+    letter-spacing: -0.015em;
+  }
+
+  button,
+  input,
+  textarea,
+  select {
+    font: inherit;
+  }
+
   button {
     color: inherit;
   }
@@ -116,8 +163,11 @@ select:focus {
   box-shadow: none !important;
 }
 
+/* One scrollbar treatment for the whole app, in the token palette rather than
+   the platform default. Thin, transparent track, a rounded thumb that only
+   appears as a line of colour beside the content. */
 * {
-  scrollbar-color: #485249 transparent;
+  scrollbar-color: var(--line) transparent;
   scrollbar-width: thin;
 }
 
@@ -133,12 +183,12 @@ select:focus {
 *::-webkit-scrollbar-thumb {
   border: 3px solid transparent;
   border-radius: 999px;
-  background: #485249;
+  background: var(--line);
   background-clip: padding-box;
 }
 
 *::-webkit-scrollbar-thumb:hover {
-  background-color: #657064;
+  background-color: var(--line-strong);
 }
 
 @media (prefers-reduced-motion: reduce) {

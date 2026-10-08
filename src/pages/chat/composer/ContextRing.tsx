@@ -62,7 +62,7 @@ export default function ContextRing({ tokens, limit, estimated, isLocal }: Conte
 
   return (
     <div ref={containerRef} className="relative">
-      <button type="button" onClick={() => setOpen((current) => !current)} aria-expanded={open} aria-label={`Context ${Math.round(usage)}% used`} className="group grid size-6 shrink-0 place-items-center rounded-full focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" title="Context usage">
+      <button type="button" onClick={() => setOpen((current) => !current)} aria-expanded={open} aria-label={`Context ${Math.round(usage)}% used`} className="group grid size-7 shrink-0 place-items-center rounded-full focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" title="Context usage">
         <svg width="16" height="16" viewBox="0 0 22 22" className="-rotate-90" aria-hidden="true">
           <circle cx="11" cy="11" r="8.5" fill="none" strokeWidth="2.5" className="stroke-[var(--raised)] transition-colors group-hover:stroke-[var(--line)]" />
           {tokens > 0 && <circle cx="11" cy="11" r="8.5" fill="none" stroke="var(--accent)" strokeWidth="2.5" strokeLinecap="round" strokeDasharray={`${(usage / 100) * RING_CIRCUMFERENCE} ${RING_CIRCUMFERENCE}`} />}

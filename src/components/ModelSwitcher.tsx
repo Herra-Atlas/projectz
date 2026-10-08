@@ -129,7 +129,7 @@ export default function ModelSwitcher({ selectedEndpoint, selectedModel, localMo
 
   return (
     <div ref={popoverRef} className="relative">
-      <button type="button" onClick={() => setOpen((value) => !value)} aria-expanded={open} className="inline-flex h-6 max-w-[200px] items-center gap-1.5 rounded px-1.5 text-[10px] text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]">
+      <button type="button" onClick={() => setOpen((value) => !value)} aria-expanded={open} className="inline-flex h-7 max-w-[220px] items-center gap-1.5 rounded-md px-2 text-[11px] text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]">
         <span className="max-w-[165px] truncate" title={selectedModel || undefined}>{localModels.find((item) => item.id === localModelId)?.name || (selectedModel ? displayModelName(selectedModel) : active?.name || "Choose model")}</span>
         {/* The closed button has room for one figure, so only the context window
             appears here; the full set is in the list. */}

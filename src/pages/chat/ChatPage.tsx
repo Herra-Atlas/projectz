@@ -1309,10 +1309,21 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       {draggingFiles && <div aria-hidden="true" className="pointer-events-none absolute inset-3 z-30 grid place-items-center rounded-xl border-2 border-dashed border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_8%,var(--page))] text-sm font-medium text-[var(--text)]">Drop files to attach</div>}
       <div ref={threadRef} onScroll={handleThreadScroll} onMouseUp={handleThreadSelection} className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-5 py-8 sm:px-8">
         {messages.length === 0 && !streamText ? (
-          <section className="mx-auto flex w-full max-w-3xl flex-1 flex-col justify-center pb-10" aria-labelledby="welcome-title">
-            <h2 id="welcome-title" className="max-w-xl text-3xl font-medium tracking-[-0.04em] sm:text-4xl">A clear space for your next idea.</h2>
-            <p className="mt-3 max-w-lg text-[15px] text-[var(--muted)]">Start a conversation with a model from the picker below. Your chats stay on this device.</p>
-            {!endpointId && <button type="button" onClick={onOpenSettings} className="mt-6 inline-flex min-h-10 w-fit items-center rounded-lg border border-[var(--line)] px-3.5 text-sm text-[var(--text)] hover:bg-[var(--raised)]">Set up a provider</button>}
+          <section className="mx-auto flex w-full max-w-3xl flex-1 flex-col justify-center pb-16" aria-labelledby="welcome-title">
+            {/* Two lines and nothing else. The empty screen is a moment of
+                indecision, and it is resolved by the composer below, not by
+                either a wall of suggested prompts or a description of the
+                software. The headline asks the question; the line under it says
+                only what the user needs to know to answer it. */}
+            <h2 id="welcome-title" className="max-w-xl text-[28px] font-medium leading-[1.15] tracking-[-0.035em] sm:text-[34px]">What are we working on?</h2>
+            <p className="mt-3 max-w-md text-[14px] leading-6 text-[var(--muted)]">
+              {endpointId || localModelId
+                ? "Ask a question, or switch to Agent to let the model read and edit your workspace."
+                : "Choose a model below to begin. Your conversations stay on this device."}
+            </p>
+            {!endpointId && !localModelId && (
+              <button type="button" onClick={onOpenSettings} className="mt-6 inline-flex min-h-9 w-fit items-center rounded-lg border border-[var(--line)] px-3.5 text-[13px] font-medium text-[var(--text)] transition-colors hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]">Set up a provider</button>
+            )}
           </section>
         ) : (
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-7 py-3">
@@ -1423,7 +1434,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           {/* The composer is a two-row card: the draft on top, controls on the
               bottom line. Radius is deliberately tighter than the message bubbles
               so the input reads as a control surface rather than a chat bubble. */}
-          <div className="relative rounded-xl border border-[var(--line)] bg-[var(--panel)] px-2 py-1 shadow-[0_12px_36px_rgba(0,0,0,0.2)] transition-colors focus-within:border-[color-mix(in_srgb,var(--accent)_35%,var(--line))]">
+          <div className="relative rounded-lg border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5 shadow-[0_8px_24px_-14px_rgba(0,0,0,0.5)] transition-colors focus-within:border-[color-mix(in_srgb,var(--accent)_30%,var(--line))]">
             {slashMatches.length > 0 && (
               <SlashMenu commands={slashMatches} activeIndex={slashActive} onChoose={runSlashCommand} />
             )}
@@ -1495,12 +1506,12 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
                 slashExact ? "text-[var(--accent)] underline underline-offset-4" : "text-[var(--text)]"
               }`}
             />
-            {running && localModelId && backgroundRunsRef.current.get(runIdRef.current)?.isReasoning && <button type="button" onClick={() => void skipReasoning()} className="mt-0.5 inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg bg-[var(--raised)] px-2.5 text-xs text-[var(--text)] transition-colors hover:bg-[color-mix(in_srgb,var(--accent)_20%,var(--raised))] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label="Skip reasoning" title="End reasoning and continue the answer"><SkipForward size={14} />Skip reasoning</button>}
-            {running && <button type="button" onClick={stop} className="mt-0.5 grid size-9 shrink-0 place-items-center rounded-lg bg-[var(--raised)] text-[var(--text)] transition-colors hover:bg-[color-mix(in_srgb,var(--accent)_20%,var(--raised))] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label="Stop generating" title="Stop generating"><Square size={14} fill="currentColor" /></button>}
+            {running && localModelId && backgroundRunsRef.current.get(runIdRef.current)?.isReasoning && <button type="button" onClick={() => void skipReasoning()} className="mt-0.5 inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-[var(--raised)] px-3 text-xs text-[var(--text)] transition-colors hover:bg-[color-mix(in_srgb,var(--accent)_20%,var(--raised))] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label="Skip reasoning" title="End reasoning and continue the answer"><SkipForward size={14} />Skip reasoning</button>}
+            {running && <button type="button" onClick={stop} className="mt-0.5 grid size-9 shrink-0 place-items-center rounded-full bg-[var(--raised)] text-[var(--text)] transition-colors hover:bg-[color-mix(in_srgb,var(--accent)_20%,var(--raised))] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label="Stop generating" title="Stop generating"><Square size={14} fill="currentColor" /></button>}
             {/* While a reply runs the send button queues rather than disappearing, so
                 a message typed mid-reply is neither lost nor blocked on the model
                 stopping. A plain click or Enter adds it to the queue. */}
-            {!slashExact && (running ? input.trim().length > 0 : input.trim().length > 0 || attachments.length > 0) && <button type="submit" disabled={sessionLoading || (!endpointId && !localModelId)} className="mt-0.5 grid size-9 shrink-0 place-items-center rounded-lg bg-[var(--text)] text-[var(--page)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--accent-ink)] disabled:cursor-not-allowed disabled:opacity-35 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label={running ? "Queue message" : "Send message"} title={running ? "Queue message" : "Send message"}><ArrowUp size={18} strokeWidth={2.5} /></button>}
+            {!slashExact && (running ? input.trim().length > 0 : input.trim().length > 0 || attachments.length > 0) && <button type="submit" disabled={sessionLoading || (!endpointId && !localModelId)} className="mt-0.5 grid size-9 shrink-0 place-items-center rounded-full bg-[var(--text)] text-[var(--page)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--accent-ink)] disabled:cursor-not-allowed disabled:opacity-35 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label={running ? "Queue message" : "Send message"} title={running ? "Queue message" : "Send message"}><ArrowUp size={18} strokeWidth={2.5} /></button>}
             </div>
           </div>
           <div className="flex min-h-8 items-center justify-between gap-2 px-1">

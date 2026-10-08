@@ -46,7 +46,7 @@ export default function EffortControl({ values, value, onChange }: EffortControl
     <div ref={containerRef} className="relative">
       {/* "Effort" is dimmed so the label recedes; the value is not, because the
           current state is the information the user actually came to read. */}
-      <button type="button" aria-expanded={open} aria-label={`Effort ${label(value)}`} onClick={() => setOpen((current) => !current)} className="inline-flex h-6 items-center gap-1 rounded px-1.5 text-[10px] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]">
+      <button type="button" aria-expanded={open} aria-label={`Effort ${label(value)}`} onClick={() => setOpen((current) => !current)} className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-[11px] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]">
         <span className="text-[var(--quiet)]">Effort</span>
         <span className={value === "none" ? "text-[var(--text)]" : "text-[var(--accent)]"}>{label(value)}</span>
         <ChevronDown size={11} className="text-[var(--quiet)]" />

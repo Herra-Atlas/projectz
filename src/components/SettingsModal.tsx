@@ -489,35 +489,36 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
       onClick={(event) => { if (event.target === dialog) onClose(); }}
       className="m-0 h-dvh w-dvw max-h-none max-w-none overflow-hidden border-0 bg-transparent p-0 text-[var(--text)] backdrop:bg-black/65"
     >
-      <div className="mx-auto flex h-full w-full max-w-[1040px] flex-col overflow-hidden border-x border-[var(--line)] bg-[var(--page)] shadow-2xl sm:my-[5vh] sm:h-[90vh] sm:rounded-xl sm:border">
-        <header className="flex min-h-[58px] items-center justify-between border-b border-[var(--line)] px-4 sm:px-6">
+      <div className="mx-auto flex h-full w-full max-w-[1000px] flex-col overflow-hidden border-x border-[var(--line)] bg-[var(--page)] shadow-2xl sm:my-[6vh] sm:h-[88vh] sm:rounded-lg sm:border">
+        <header className="flex min-h-[60px] items-center justify-between border-b border-[var(--line)] px-4 sm:px-6">
           <div className="flex items-center gap-2.5">
-            {isSubPage && <button type="button" onClick={() => setPage(backTarget)} className="grid size-9 place-items-center rounded-md text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label={backLabel}><ArrowLeft size={17} /></button>}
-            <div><h1 id="settings-title" className="text-sm font-semibold">Settings</h1><p className="text-[11px] text-[var(--quiet)]">{pageTitle(page)}</p></div>
+            {isSubPage && <button type="button" onClick={() => setPage(backTarget)} className="grid size-8 place-items-center rounded-md text-[var(--muted)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label={backLabel}><ArrowLeft size={16} /></button>}
+            <div><h1 id="settings-title" className="text-[13px] font-semibold tracking-tight">Settings</h1><p className="text-[11px] text-[var(--quiet)]">{pageTitle(page)}</p></div>
           </div>
-          <button type="button" onClick={onClose} className="grid size-9 place-items-center rounded-md text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]" aria-label="Close settings"><X size={18} /></button>
+          <button type="button" onClick={onClose} className="grid size-8 place-items-center rounded-md text-[var(--muted)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label="Close settings"><X size={17} /></button>
         </header>
 
         <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
-          <nav aria-label="Settings sections" className="flex shrink-0 gap-1 overflow-x-auto border-b border-[var(--line)] bg-[var(--rail)] px-3 py-2 sm:w-[184px] sm:flex-col sm:gap-0 sm:overflow-visible sm:border-b-0 sm:border-r sm:py-3">
-            <button type="button" onClick={() => setPage({ view: "general" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-sm ${page.view === "general" ? "bg-[var(--raised)] text-[var(--text)]" : "text-[var(--muted)] hover:bg-[var(--raised)]"}`}><SlidersHorizontal size={15} />General</button>
-            <button type="button" onClick={() => setPage({ view: "preferences" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-sm ${page.view === "preferences" ? "bg-[var(--raised)] text-[var(--text)]" : "text-[var(--muted)] hover:bg-[var(--raised)]"}`}><Sparkles size={15} />Preferences</button>
-            <button type="button" onClick={() => setPage({ view: "skills" })} className={`mt-1 flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-sm ${page.view === "skills" || page.view === "skill" ? "bg-[var(--raised)] text-[var(--text)]" : "text-[var(--muted)] hover:bg-[var(--raised)]"}`}><BookMarked size={15} />Skills</button>
-            <p className="px-2 pb-1.5 pt-4 text-[11px] font-normal text-[color-mix(in_srgb,var(--quiet)_72%,transparent)]">Workspace</p>
-            <button type="button" onClick={() => setPage({ view: "providers" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-sm ${page.view === "providers" ? "bg-[var(--raised)] text-[var(--text)]" : "text-[var(--muted)] hover:bg-[var(--raised)]"}`}><Server size={15} />Providers</button>
-            <button type="button" onClick={() => setPage({ view: "local" })} className={`mt-1 flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-sm ${page.view === "local" || page.view === "model" ? "bg-[var(--raised)] text-[var(--text)]" : "text-[var(--muted)] hover:bg-[var(--raised)]"}`}><Cpu size={15} />Local</button>
-            <button type="button" onClick={() => setPage({ view: "engines" })} className={`mt-1 flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-sm ${page.view === "engines" ? "bg-[var(--raised)] text-[var(--text)]" : "text-[var(--muted)] hover:bg-[var(--raised)]"}`}><Zap size={15} />Engines</button>
-            <div className="mt-auto px-2 pb-1 text-[11px] leading-5 text-[var(--quiet)]"><CircleHelp size={13} className="mb-1 inline" /> Keys remain on this device.</div>
+          <nav aria-label="Settings sections" className="flex shrink-0 gap-1 overflow-x-auto border-b border-[var(--line)] bg-[var(--rail)] px-2.5 py-2 sm:w-[200px] sm:flex-col sm:gap-0.5 sm:overflow-visible sm:border-b-0 sm:border-r sm:py-3">
+            <p className="hidden px-2.5 pb-1.5 pt-1 text-[11px] font-medium text-[var(--quiet)] sm:block">Application</p>
+            <button type="button" onClick={() => setPage({ view: "general" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "general" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><SlidersHorizontal size={16} />General</button>
+            <button type="button" onClick={() => setPage({ view: "preferences" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "preferences" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Sparkles size={16} />Preferences</button>
+            <button type="button" onClick={() => setPage({ view: "skills" })} className={`mt-1 flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "skills" || page.view === "skill" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><BookMarked size={16} />Skills</button>
+            <p className="hidden px-2.5 pb-1.5 pt-5 text-[11px] font-medium text-[var(--quiet)] sm:block">Models</p>
+            <button type="button" onClick={() => setPage({ view: "providers" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "providers" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Server size={16} />Providers</button>
+            <button type="button" onClick={() => setPage({ view: "local" })} className={`mt-1 flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "local" || page.view === "model" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Cpu size={16} />Local</button>
+            <button type="button" onClick={() => setPage({ view: "engines" })} className={`mt-1 flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "engines" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Zap size={16} />Engines</button>
+            <div className="mt-auto flex items-start gap-1.5 px-2.5 pb-1 pt-4 text-[11px] leading-4 text-[var(--quiet)]"><CircleHelp size={13} className="mt-px shrink-0" /><span>Keys stay on this device.</span></div>
           </nav>
 
           <div className="min-w-0 flex-1 overflow-y-auto">
             <div className="mx-auto max-w-[760px] px-5 py-6 sm:px-9 sm:py-8">
               {page.view === "providers" ? <>
-                <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
-                  <div><h2 className="text-xl font-semibold tracking-tight">Providers</h2><p className="mt-1 text-sm text-[var(--muted)]">Manage compatible AI endpoints.</p></div>
-                  <button type="button" onClick={openAdd} className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3.5 text-sm font-medium text-[var(--text)] transition-colors hover:border-[color-mix(in_srgb,var(--accent)_45%,var(--line))] hover:bg-[var(--raised)]"><Plus size={16} />Add provider</button>
+                <div className="mb-6 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-5">
+                  <h2 className="text-[17px] font-semibold tracking-tight">Providers</h2>
+                  <button type="button" onClick={openAdd} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 text-[13px] font-medium text-[var(--text)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><Plus size={15} />Add provider</button>
                 </div>
-                {endpoints.length === 0 ? <div className="border-y border-[var(--line)] py-7"><p className="text-sm text-[var(--muted)]">No providers connected.</p><p className="mt-1 text-xs text-[var(--quiet)]">Add an endpoint to discover models and use them in chat.</p></div> : <div className="divide-y divide-[var(--line)] border-y border-[var(--line)]">
+                {endpoints.length === 0 ? <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-4 py-7"><p className="text-sm text-[var(--muted)]">No providers connected.</p><p className="mt-1 text-xs text-[var(--quiet)]">Add an endpoint to discover models and use them in chat.</p></div> : <div className="divide-y divide-[var(--line)] overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--panel)]">
                   {endpoints.map((endpoint) => {
                     const expanded = expandedProviders.includes(endpoint.id);
                     // Both lists are drawn, switched-off ones last. They used to
@@ -527,13 +528,13 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                     // of the flag is what let the two disagree.
                     const allModels = [...endpoint.models, ...endpoint.disabled_models];
                     const enabledCount = endpoint.models.length;
-                    return <article key={endpoint.id} className="border-b border-[var(--line)] last:border-b-0">
-                      <div className="flex min-h-[68px] items-center gap-2 py-3">
+                    return <article key={endpoint.id}>
+                      <div className="flex min-h-[68px] items-center gap-2 px-4 py-3">
                         <ProviderIcon baseUrl={endpoint.base_url} name={endpoint.name} expanded={expanded} onToggle={() => setExpandedProviders((current) => expanded ? current.filter((id) => id !== endpoint.id) : [...current, endpoint.id])} />
                         <div className="min-w-0 flex-1"><h3 className="truncate text-sm font-medium">{endpoint.name}</h3><p className="truncate text-xs text-[var(--quiet)]">{endpoint.base_url} · {enabledCount} of {allModels.length} models enabled</p></div>
-                        <button type="button" onClick={() => void testEndpoint(endpoint)} disabled={testingId === endpoint.id} className="grid size-9 shrink-0 place-items-center rounded-md text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--accent)] disabled:opacity-50" aria-label={`Test ${endpoint.name}`} title="Test connection and find models"><Zap size={15} className={testingId === endpoint.id ? "animate-pulse" : ""} /></button>
-                        <button type="button" onClick={() => openEdit(endpoint)} className="grid size-9 shrink-0 place-items-center rounded-md text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]" aria-label={`Edit ${endpoint.name}`} title="Edit provider"><Pencil size={15} /></button>
-                        <button type="button" onClick={() => void removeEndpoint(endpoint)} className="grid size-9 shrink-0 place-items-center rounded-md text-[var(--quiet)] hover:bg-[var(--raised)] hover:text-[var(--danger)]" aria-label={`Remove ${endpoint.name}`} title="Remove provider"><Trash2 size={15} /></button>
+                        <button type="button" onClick={() => void testEndpoint(endpoint)} disabled={testingId === endpoint.id} className="grid size-9 shrink-0 place-items-center rounded-md text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--accent)] disabled:opacity-50" aria-label={`Test ${endpoint.name}`} title="Test connection and find models"><Zap size={16} className={testingId === endpoint.id ? "animate-pulse" : ""} /></button>
+                        <button type="button" onClick={() => openEdit(endpoint)} className="grid size-9 shrink-0 place-items-center rounded-md text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]" aria-label={`Edit ${endpoint.name}`} title="Edit provider"><Pencil size={16} /></button>
+                        <button type="button" onClick={() => void removeEndpoint(endpoint)} className="grid size-9 shrink-0 place-items-center rounded-md text-[var(--quiet)] hover:bg-[var(--raised)] hover:text-[var(--danger)]" aria-label={`Remove ${endpoint.name}`} title="Remove provider"><Trash2 size={16} /></button>
                       </div>
                       {expanded && <div className="mb-3 ml-[2.75rem] max-h-64 overflow-y-auto border-l border-[var(--line)] py-1 pl-3">
                         <div className="sticky top-0 z-10 flex flex-wrap items-center gap-x-4 gap-y-2 bg-[var(--page)] pb-2 pr-2">
@@ -553,11 +554,11 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                   })}
                 </div>}
               </> : page.view === "engines" ? <EnginesSettingsPage onChanged={() => { onEndpointsChanged(); void refreshEngines(); }} notify={notify} /> : page.view === "local" ? <>
-                <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
-                  <div><h2 className="text-xl font-semibold tracking-tight">Local models</h2><p className="mt-1 text-sm text-[var(--muted)]">Add GGUF files by path. Files are not copied into ProjectZ.</p></div>
-                  <button type="button" onClick={() => void addLocalModel()} className="inline-flex min-h-10 items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3.5 text-sm font-medium text-[var(--text)] transition-colors hover:bg-[var(--raised)]"><Plus size={16} />Add models</button>
+                <div className="mb-6 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-5">
+                  <h2 className="text-[17px] font-semibold tracking-tight">Local models</h2>
+                  <button type="button" onClick={() => void addLocalModel()} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 text-[13px] font-medium text-[var(--text)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><Plus size={15} />Add models</button>
                 </div>
-                {localModels.length === 0 ? <div className="border-y border-[var(--line)] py-7"><p className="text-sm text-[var(--muted)]">No local models added.</p><p className="mt-1 text-xs text-[var(--quiet)]">Choose a GGUF file to register its path for local inference.</p></div> : <div className="space-y-4 border-y border-[var(--line)] py-1">
+                {localModels.length === 0 ? <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-4 py-7"><p className="text-sm text-[var(--muted)]">No local models added.</p><p className="mt-1 text-xs text-[var(--quiet)]">Choose a GGUF file to register its path for local inference.</p></div> : <div className="divide-y divide-[var(--line)] rounded-lg border border-[var(--line)] bg-[var(--panel)]">
                   {/* Grouped by engine, the same shape the providers page uses.
                       The group is the engine, not the model: a model is run by one
                       engine, so grouping by it answers the question someone
@@ -565,11 +566,11 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                       else is on it" -- which a flat alphabetical list of models
                       cannot. `engine_id` arrives as the model's own engine from
                       the backend, so this never has to guess. */}
-                  {localModelGroups.map((group) => <article key={group.id} className="border-b border-[var(--line)] last:border-b-0">
-                    <div className="flex min-h-[68px] items-center gap-2 py-3">
+                  {localModelGroups.map((group) => <article key={group.id}>
+                    <div className="flex min-h-[68px] items-center gap-2 px-4 py-3">
                       <button type="button" onClick={() => setExpandedEngines((current) => current.includes(group.id) ? current.filter((id) => id !== group.id) : [...current, group.id])} aria-expanded={expandedEngines.includes(group.id)} aria-label={`${expandedEngines.includes(group.id) ? "Collapse" : "Expand"} ${group.label}`} title={`${expandedEngines.includes(group.id) ? "Collapse" : "Expand"} ${group.label}`} className="grid size-9 shrink-0 place-items-center rounded-md text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><Cpu size={16} /></button>
                       <div className="min-w-0 flex-1"><h3 className="truncate text-sm font-medium">{group.label}</h3><p className="truncate text-xs text-[var(--quiet)]">{group.models.length === 1 ? "1 model" : `${group.models.length} models`}{group.id ? "" : " · pick an engine for it below"}</p></div>
-                      <span className="grid size-9 shrink-0 place-items-center text-[var(--quiet)]" aria-hidden="true">{expandedEngines.includes(group.id) ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span>
+                      <span className="grid size-9 shrink-0 place-items-center text-[var(--quiet)]" aria-hidden="true">{expandedEngines.includes(group.id) ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</span>
                     </div>
                     {expandedEngines.includes(group.id) && <div className="mb-3 ml-[2.75rem] border-l border-[var(--line)] py-1 pl-3">
                       <div className="divide-y divide-[var(--line)]">
@@ -606,15 +607,15 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                               notify={notify}
                             />
                           </div>
-                          <button type="button" onClick={() => { setFormError(""); setPage({ view: "model", model }); }} className="grid size-8 shrink-0 place-items-center rounded-md text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label={`Settings for ${model.name}`} title="Model settings"><Settings2 size={15} /></button>
-                          <button type="button" onClick={() => void removeLocalModel(model)} className="grid size-8 shrink-0 place-items-center rounded-md text-[var(--quiet)] hover:bg-[var(--raised)] hover:text-[var(--danger)]" aria-label={`Remove ${model.name}`} title="Remove model from list"><Trash2 size={15} /></button>
+                          <button type="button" onClick={() => { setFormError(""); setPage({ view: "model", model }); }} className="grid size-8 shrink-0 place-items-center rounded-md text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label={`Settings for ${model.name}`} title="Model settings"><Settings2 size={16} /></button>
+                          <button type="button" onClick={() => void removeLocalModel(model)} className="grid size-8 shrink-0 place-items-center rounded-md text-[var(--quiet)] hover:bg-[var(--raised)] hover:text-[var(--danger)]" aria-label={`Remove ${model.name}`} title="Remove model from list"><Trash2 size={16} /></button>
                         </div>)}
                       </div>
                     </div>}
                   </article>)}
                 </div>}
               </> : page.view === "model" ? <>
-                <div className="mb-5"><h2 className="text-xl font-semibold tracking-tight">{page.model.name}</h2></div>
+                <div className="mb-5"><h2 className="text-[17px] font-semibold tracking-tight">{page.model.name}</h2></div>
                 <RuntimeSettingsPage
                   key={page.model.id}
                   modelId={page.model.id}
@@ -637,13 +638,13 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                     here worth interrupting for, and `saveLocalRuntimeSettings`
                     reports it. */}
               </> : page.view === "general" ? <>
-                <div className="mb-7"><h2 className="text-xl font-semibold tracking-tight">General</h2></div>
+                <div className="mb-6 border-b border-[var(--line)] pb-5"><h2 className="text-[17px] font-semibold tracking-tight">General</h2></div>
                 <SettingsSection title="Instructions">
                   <SettingRow
                     label="Instructions for ProjectZ"
                     description="Kept in mind whenever ProjectZ generates a message."
                     stacked
-                    control={<textarea id="project-instructions" rows={5} value={generalSettings.instructions} onChange={(event) => updateGeneralSettings({ ...generalSettings, instructions: event.target.value })} placeholder={INSTRUCTION_EXAMPLES[instructionExampleIndex]} className="min-h-32 w-full resize-y rounded-md border border-[var(--line)] bg-[var(--rail)] px-3 py-2.5 text-sm leading-6 text-[var(--text)] placeholder:text-[var(--quiet)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" />}
+                    control={<textarea id="project-instructions" rows={5} value={generalSettings.instructions} onChange={(event) => updateGeneralSettings({ ...generalSettings, instructions: event.target.value })} placeholder={INSTRUCTION_EXAMPLES[instructionExampleIndex]} className="min-h-32 w-full resize-y rounded-md border border-[var(--line)] bg-[var(--rail)] px-3 py-2.5 text-[13px] leading-6 text-[var(--text)] placeholder:text-[var(--quiet)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" />}
                   />
                 </SettingsSection>
 
@@ -669,51 +670,59 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                   <SettingRow
                     label="Clear all sessions"
                     description="Delete every conversation on this device. This cannot be undone."
-                    control={<button type="button" disabled={clearingSessions} onClick={() => { setFormError(""); setConfirmClear(true); }} className="min-h-9 shrink-0 rounded-md border border-[var(--line)] px-3 text-xs text-[var(--muted)] transition-colors hover:border-[var(--danger)] hover:bg-[var(--raised)] hover:text-[var(--danger)] disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]">Clear…</button>}
+                    control={<button type="button" disabled={clearingSessions} onClick={() => { setFormError(""); setConfirmClear(true); }} className="min-h-9 shrink-0 rounded-lg border border-[var(--line)] px-3 text-[13px] text-[var(--muted)] transition-colors hover:border-[var(--danger)] hover:bg-[var(--raised)] hover:text-[var(--danger)] disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]">Clear…</button>}
                   />
                 </SettingsSection>
               </> : page.view === "preferences" ? <>
-                <div className="mb-7"><h2 className="text-xl font-semibold tracking-tight">Preferences</h2></div>
-                <TitleModelPicker
-                  models={preferences.sessionTitleModels}
-                  onChange={(sessionTitleModels) => { setFormError(""); onPreferencesChange({ ...preferences, sessionTitleModels }); }}
-                  groups={providerModelGroups}
-                  localModels={localModels}
-                />
-                {/* The same row shape as the picker above, because the two are the
-                    same kind of setting: a model choice for a background task.
-                    "Same as chat" is the default and names what it does rather
-                    than reading as an empty field. */}
-                <div className="flex min-h-[68px] items-center gap-3 border-b border-[var(--line)] py-3 last:border-b-0">
-                  <div className="min-w-0 flex-1">
-                    <h3 className="text-sm font-medium">Sub-agent model</h3>
-                    <p className="text-xs text-[var(--quiet)]">The model spawned agents run on. Defaults to whatever the chat is using.</p>
-                  </div>
-                  <SingleModelPicker
-                    value={preferences.subagentModel ?? null}
-                    onChange={(subagentModel) => { setFormError(""); onPreferencesChange({ ...preferences, subagentModel }); }}
+                <div className="mb-6 border-b border-[var(--line)] pb-5"><h2 className="text-[17px] font-semibold tracking-tight">Preferences</h2></div>
+                {/* Both model choices live in one panel, and the picker draws a
+                    row shaped exactly like the one below it. They are the same
+                    kind of setting -- a model choice for a background task -- and
+                    two different row treatments for one kind of thing is what
+                    makes a page look assembled rather than designed. */}
+                {/* Not `overflow-hidden`: the pickers below open a popover
+                    anchored inside this panel, and clipping the panel to round
+                    its corners would clip that popover with it. The rows here
+                    have no full-bleed background of their own, so nothing needs
+                    the clipping the corners would otherwise require. */}
+                <div className="divide-y divide-[var(--line)] rounded-lg border border-[var(--line)] bg-[var(--panel)]">
+                  <TitleModelPicker
+                    models={preferences.sessionTitleModels}
+                    onChange={(sessionTitleModels) => { setFormError(""); onPreferencesChange({ ...preferences, sessionTitleModels }); }}
                     groups={providerModelGroups}
                     localModels={localModels}
-                    emptyLabel="Same as chat"
-                    label="Default sub-agent model"
                   />
+                  <div className="flex min-h-[58px] items-center gap-3 px-4 py-3.5">
+                    <div className="min-w-0 flex-1">
+                      <h3 className="text-[13px]">Sub-agent model</h3>
+                      <p className="mt-0.5 text-[12px] leading-5 text-[var(--muted)]">The model spawned agents run on. Defaults to whatever the chat is using.</p>
+                    </div>
+                    <SingleModelPicker
+                      value={preferences.subagentModel ?? null}
+                      onChange={(subagentModel) => { setFormError(""); onPreferencesChange({ ...preferences, subagentModel }); }}
+                      groups={providerModelGroups}
+                      localModels={localModels}
+                      emptyLabel="Same as chat"
+                      label="Default sub-agent model"
+                    />
+                  </div>
                 </div>
               </> : page.view === "skills" ? <SkillsPage notify={notify} onOpenForm={(skill) => setPage({ view: "skill", skill })} /> : page.view === "skill" ? <SkillFormPage key={page.skill?.id ?? "new"} skill={page.skill} onSaved={() => setPage({ view: "skills" })} onCancel={() => setPage({ view: "skills" })} notify={notify} /> : <>
-                <div className="mb-6 border-b border-[var(--line)] pb-4"><h2 className="text-xl font-semibold tracking-tight">{page.endpoint ? "Edit provider" : "Add provider"}</h2><p className="mt-1 text-sm text-[var(--muted)]">Connect an OpenAI-compatible API endpoint.</p></div>
+                <div className="mb-6 border-b border-[var(--line)] pb-5"><h2 className="text-[17px] font-semibold tracking-tight">{page.endpoint ? "Edit provider" : "Add provider"}</h2></div>
                 <form onSubmit={(event) => void saveEndpoint(event)} className="max-w-xl space-y-4">
-                  <label className="block text-sm text-[var(--muted)]">Provider name<input ref={nameRef} required value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} className="mt-1.5 h-10 w-full rounded-md border border-[var(--line)] bg-[var(--rail)] px-3 text-sm text-[var(--text)] outline-none placeholder:text-[var(--quiet)] focus:border-[var(--accent)]" placeholder="e.g. Local Ollama" /></label>
-                  <label className="block text-sm text-[var(--muted)]">Base URL<input type="url" required value={draft.base_url} onChange={(event) => setDraft({ ...draft, base_url: event.target.value })} className="mt-1.5 h-10 w-full rounded-md border border-[var(--line)] bg-[var(--rail)] px-3 text-sm text-[var(--text)] outline-none placeholder:text-[var(--quiet)] focus:border-[var(--accent)]" placeholder="https://api.example.com/v1" /></label>
-                  <label className="block text-sm text-[var(--muted)]">API key <span className="text-[var(--quiet)]">({page.endpoint?.has_api_key ? "saved, leave blank to keep" : "optional"})</span><input type={showKey ? "text" : "password"} autoComplete="new-password" value={draft.api_key} onChange={(event) => setDraft({ ...draft, api_key: event.target.value })} className="mt-1.5 h-10 w-full rounded-md border border-[var(--line)] bg-[var(--rail)] px-3 text-sm text-[var(--text)] outline-none placeholder:text-[var(--quiet)] focus:border-[var(--accent)]" placeholder="Paste provider key" /><button type="button" onClick={() => setShowKey((value) => !value)} className="mt-1 min-h-8 text-xs text-[var(--muted)] hover:text-[var(--text)]">{showKey ? "Hide key" : "Show key"}</button></label>
+                  <label className="block text-sm text-[var(--muted)]">Provider name<input ref={nameRef} required value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} className="mt-1.5 h-10 w-full rounded-md border border-[var(--line)] bg-[var(--rail)] px-3 text-[13px] text-[var(--text)] outline-none placeholder:text-[var(--quiet)] focus:border-[var(--accent)]" placeholder="e.g. Local Ollama" /></label>
+                  <label className="block text-sm text-[var(--muted)]">Base URL<input type="url" required value={draft.base_url} onChange={(event) => setDraft({ ...draft, base_url: event.target.value })} className="mt-1.5 h-10 w-full rounded-md border border-[var(--line)] bg-[var(--rail)] px-3 text-[13px] text-[var(--text)] outline-none placeholder:text-[var(--quiet)] focus:border-[var(--accent)]" placeholder="https://api.example.com/v1" /></label>
+                  <label className="block text-sm text-[var(--muted)]">API key <span className="text-[var(--quiet)]">({page.endpoint?.has_api_key ? "saved, leave blank to keep" : "optional"})</span><input type={showKey ? "text" : "password"} autoComplete="new-password" value={draft.api_key} onChange={(event) => setDraft({ ...draft, api_key: event.target.value })} className="mt-1.5 h-10 w-full rounded-md border border-[var(--line)] bg-[var(--rail)] px-3 text-[13px] text-[var(--text)] outline-none placeholder:text-[var(--quiet)] focus:border-[var(--accent)]" placeholder="Paste provider key" /><button type="button" onClick={() => setShowKey((value) => !value)} className="mt-1 min-h-8 text-xs text-[var(--muted)] hover:text-[var(--text)]">{showKey ? "Hide key" : "Show key"}</button></label>
                   <p className="text-xs text-[var(--quiet)]">Model discovery runs when you test the connection.</p>
                   {/* The one message that stays inline. It is this form's own
                       validation rather than an outcome, and it points at the field
                       by focusing it -- which a row in the corner stack cannot do.
                       Everything else, including a failed save, is a notification. */}
                   {formError && <p role="alert" className="text-sm text-[var(--danger)]">{formError}</p>}
-                  <div className="flex flex-wrap gap-2 border-t border-[var(--line)] pt-4">
-                    <button type="submit" disabled={loading} className="inline-flex min-h-10 items-center gap-2 rounded-md bg-[var(--accent)] px-4 text-sm font-semibold text-[var(--accent-ink)] hover:opacity-90 disabled:opacity-50">{loading ? "Saving…" : page.endpoint ? "Save changes" : "Add provider"}</button>
-                    <button type="button" onClick={() => void testEndpoint(draft)} disabled={testingId === draft.id || !draft.base_url.trim()} className="inline-flex min-h-10 items-center gap-2 rounded-md border border-[var(--line)] px-3 text-sm text-[var(--text)] hover:bg-[var(--raised)] disabled:opacity-50"><Zap size={15} />{testingId === draft.id ? "Testing…" : "Test and find models"}</button>
-                    <button type="button" onClick={() => setPage({ view: "providers" })} className="min-h-10 rounded-md px-3 text-sm text-[var(--muted)] hover:bg-[var(--raised)]">Cancel</button>
+                  <div className="flex flex-wrap gap-2 border-t border-[var(--line)] pt-5">
+                    <button type="submit" disabled={loading} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-[var(--accent)] px-3.5 text-[13px] font-semibold text-[var(--accent-ink)] transition-opacity hover:opacity-90 disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]">{loading ? "Saving…" : page.endpoint ? "Save changes" : "Add provider"}</button>
+                    <button type="button" onClick={() => void testEndpoint(draft)} disabled={testingId === draft.id || !draft.base_url.trim()} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-[var(--line)] px-3 text-[13px] text-[var(--text)] transition-colors hover:bg-[var(--raised)] disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><Zap size={15} />{testingId === draft.id ? "Testing…" : "Test and find models"}</button>
+                    <button type="button" onClick={() => setPage({ view: "providers" })} className="min-h-9 rounded-lg px-3 text-[13px] text-[var(--muted)] transition-colors hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]">Cancel</button>
                   </div>
                 </form>
               </>}
@@ -722,12 +731,12 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
         </div>
       </div>
       {confirmClear && <div className="fixed inset-0 z-[150] grid place-items-center bg-black/65 p-4">
-        <section role="dialog" aria-modal="true" aria-labelledby="clear-sessions-title" className="w-full max-w-md rounded-xl border border-[var(--line)] bg-[var(--panel)] p-5 shadow-2xl" onKeyDown={(event) => { if (event.key === "Escape" && !clearingSessions) setConfirmClear(false); }}>
-          <h2 id="clear-sessions-title" className="text-lg font-semibold">Delete every session?</h2>
-          <p className="mt-2 text-sm text-[var(--muted)]">This removes all conversations stored on this device and cannot be undone. Providers, local models, and settings are kept.</p>
+        <section role="dialog" aria-modal="true" aria-labelledby="clear-sessions-title" className="w-full max-w-sm rounded-lg border border-[var(--line)] bg-[var(--panel)] p-5 shadow-2xl" onKeyDown={(event) => { if (event.key === "Escape" && !clearingSessions) setConfirmClear(false); }}>
+          <h2 id="clear-sessions-title" className="text-[17px] font-semibold tracking-tight">Delete every session?</h2>
+          <p className="mt-2 text-[13px] leading-5 text-[var(--muted)]">This removes all conversations stored on this device and cannot be undone. Providers, local models, and settings are kept.</p>
           <div className="mt-5 flex justify-end gap-2">
-            <button type="button" onClick={() => setConfirmClear(false)} disabled={clearingSessions} className="min-h-10 rounded-md border border-[var(--line)] px-4 text-sm text-[var(--muted)] hover:bg-[var(--raised)] disabled:opacity-50">Cancel</button>
-            <button type="button" onClick={() => void clearSessions()} disabled={clearingSessions} className="inline-flex min-h-10 items-center gap-2 rounded-md bg-[var(--danger)] px-4 text-sm font-semibold text-[var(--page)] hover:opacity-90 disabled:opacity-50">{clearingSessions && <LoaderCircle size={15} className="animate-spin" />}{clearingSessions ? "Deleting…" : "Delete all"}</button>
+            <button type="button" onClick={() => setConfirmClear(false)} disabled={clearingSessions} className="min-h-9 rounded-lg border border-[var(--line)] px-3.5 text-[13px] text-[var(--muted)] transition-colors hover:bg-[var(--raised)] disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]">Cancel</button>
+            <button type="button" onClick={() => void clearSessions()} disabled={clearingSessions} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-[var(--danger)] px-3.5 text-[13px] font-semibold text-[var(--page)] transition-opacity hover:opacity-90 disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--danger)]">{clearingSessions && <LoaderCircle size={15} className="animate-spin" />}{clearingSessions ? "Deleting…" : "Delete all"}</button>
           </div>
         </section>
       </div>}

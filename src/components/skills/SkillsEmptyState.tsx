@@ -9,7 +9,7 @@ import { Plus, Sparkles } from "lucide-react";
  */
 export default function SkillsEmptyState({ onCreate }: { onCreate: () => void }) {
   return (
-    <div className="rounded-xl border border-dashed border-[var(--line)] px-6 py-12">
+    <div className="rounded-lg border border-dashed border-[var(--line)] px-6 py-12">
       <div className="flex flex-col items-center">
         <span className="mb-2 grid size-10 place-items-center rounded-full bg-[var(--raised)] text-[var(--quiet)]">
           <Sparkles size={18} />
@@ -22,7 +22,7 @@ export default function SkillsEmptyState({ onCreate }: { onCreate: () => void })
         <button
           type="button"
           onClick={onCreate}
-          className="mt-4 inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3.5 text-xs font-medium text-[var(--text)] transition-colors hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+          className="mt-4 inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 text-[13px] font-medium text-[var(--text)] transition-colors hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
         >
           <Plus size={14} />Write your first
         </button>

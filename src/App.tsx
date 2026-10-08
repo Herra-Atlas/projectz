@@ -304,7 +304,7 @@ function AppShell() {
       {view === "statistics" && <div className="flex min-w-0 flex-1 flex-col"><Suspense fallback={<PageFallback />}><StatisticsPage refreshKey={endpointRefreshKey} sessions={chat.sessions} onOpenOverview={handleOpenOverview} /></Suspense></div>}
       <div className={`min-w-0 flex-1 flex-col ${view === "chat" ? "flex" : "hidden"}`}>
         {view === "chat" && <>
-        <header className="flex min-h-[68px] items-center justify-between gap-4 border-b border-[var(--line)] bg-[var(--page)] px-5 sm:px-7">
+        <header className="flex min-h-[60px] items-center justify-between gap-4 border-b border-[var(--line)] bg-[var(--page)] px-5 sm:px-7">
           <div className="min-w-0">
             {/* The folder name is the trigger, and nothing else is.
                 A second row reading "Change folder" said nothing the name did
@@ -320,12 +320,12 @@ function AppShell() {
                 aria-haspopup="menu"
                 aria-label={workspaces.selected ? `Workspace: ${workspaceLabel(workspaces.selected)}. Change folder` : "Choose a workspace folder"}
                 title={workspaces.selected ?? "No folder open"}
-                className="-mx-1 flex max-w-full items-center gap-1 rounded px-1 text-sm text-[var(--muted)] transition-colors hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+                className="-mx-1 flex max-w-full items-center gap-1 rounded px-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
               >
                 <span className="truncate">
                   {workspaces.selected ? workspaceLabel(workspaces.selected) : "Open a folder"}
                 </span>
-                <ChevronDown size={13} className="shrink-0 text-[var(--quiet)]" />
+                <ChevronDown size={12} className="shrink-0 text-[var(--quiet)]" />
               </button>
               {workspaceMenuOpen && (
                 <WorkspacePicker

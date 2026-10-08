@@ -143,7 +143,7 @@ export default function SingleModelPicker({
         onClick={() => setOpen((current) => !current)}
         aria-expanded={open}
         aria-label={label}
-        className="inline-flex h-9 w-[190px] items-center justify-between gap-2 rounded-md border border-[var(--line)] bg-[var(--rail)] px-3 text-sm text-[var(--text)] transition-colors hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+        className="inline-flex h-9 w-[190px] items-center justify-between gap-2 rounded-md border border-[var(--line)] bg-[var(--rail)] px-3 text-[13px] text-[var(--text)] transition-colors hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
       >
         <span className={`min-w-0 flex-1 truncate text-left ${value ? "" : "text-[var(--quiet)]"}`}>{triggerLabel}</span>
         <ChevronDown size={14} className="shrink-0 text-[var(--muted)]" />
@@ -152,7 +152,7 @@ export default function SingleModelPicker({
         <label className="flex min-h-10 items-center gap-2 border-b border-[var(--line)] px-3 text-[var(--muted)] focus-within:outline-none">
           <Search size={15} className="shrink-0" />
           <span className="sr-only">Search models</span>
-          <input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search models" className="min-w-0 flex-1 bg-transparent text-sm text-[var(--text)] outline-none placeholder:text-[var(--quiet)]" />
+          <input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search models" className="min-w-0 flex-1 bg-transparent text-[13px] text-[var(--text)] outline-none placeholder:text-[var(--quiet)]" />
         </label>
         <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
           {/* The "no choice" row, first. It is a real answer rather than a way to

@@ -263,14 +263,14 @@ export default function EnginesSettingsPage({ onChanged, notify }: EnginesSettin
 
   return (
     <section>
-      <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
-        <div><h2 className="text-xl font-semibold tracking-tight">Engines</h2><p className="mt-1 text-sm text-[var(--muted)]">Manage inference engines for local models.</p></div>
-        <button type="button" onClick={() => void loadEngines(true)} disabled={refreshing || loading} className="inline-flex min-h-9 items-center gap-2 rounded-md border border-[var(--line)] px-3 text-xs text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] disabled:opacity-50"><RefreshCw size={14} className={refreshing ? "animate-spin" : ""} />Refresh catalog</button>
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-5">
+        <h2 className="text-[17px] font-semibold tracking-tight">Engines</h2>
+        <button type="button" onClick={() => void loadEngines(true)} disabled={refreshing || loading} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-[var(--line)] px-3 text-[13px] text-[var(--muted)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><RefreshCw size={14} className={refreshing ? "animate-spin" : ""} />Refresh catalog</button>
       </div>
 
-      <div className="border-y border-[var(--line)]">
+      <div className="divide-y divide-[var(--line)] overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--panel)]">
         <article>
-          <div className="flex min-h-[68px] items-center gap-2 py-3">
+          <div className="flex min-h-[68px] items-center gap-2 px-4 py-3">
             <button type="button" onClick={() => setExpanded((current) => !current)} aria-expanded={expanded} aria-label={`${expanded ? "Collapse" : "Expand"} llama.cpp Vulkan engines`} title={`${expanded ? "Collapse" : "Expand"} llama.cpp Vulkan engines`} className="grid size-9 shrink-0 place-items-center rounded-md text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><Zap size={16} /></button>
             <div className="min-w-0 flex-1"><h3 className="truncate text-sm font-medium">llama.cpp Vulkan</h3><p className="truncate text-xs text-[var(--quiet)]">{summary}</p></div>
             <span className="hidden shrink-0 text-[11px] text-[var(--muted)] sm:block">Windows x64</span>
@@ -303,8 +303,8 @@ export default function EnginesSettingsPage({ onChanged, notify }: EnginesSettin
         {/* Always present rather than shown only once something is installed:
             the link field is how a fork gets added, and a section that appears
             after the fact is a section someone who has no fork yet never finds. */}
-        <article className="border-t border-[var(--line)]">
-          <div className="flex min-h-[68px] flex-wrap items-center gap-2 py-3">
+        <article>
+          <div className="flex min-h-[68px] flex-wrap items-center gap-2 px-4 py-3">
             <button type="button" onClick={() => setLinkOpen((current) => !current)} aria-expanded={linkOpen} aria-label={`${linkOpen ? "Collapse" : "Expand"} engines from a link`} title={`${linkOpen ? "Collapse" : "Expand"} engines from a link`} className="grid size-9 shrink-0 place-items-center rounded-md text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><Link2 size={16} /></button>
             <div className="min-w-0 flex-1">
               <h3 className="truncate text-sm font-medium">From a link</h3>

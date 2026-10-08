@@ -34,7 +34,7 @@ export default function SkillCard({
   const on = skill.enabled;
   return (
     <article
-      className={`group flex flex-col overflow-hidden rounded-xl border border-[var(--line)] transition-[border-color,box-shadow] duration-150 hover:border-[color-mix(in_srgb,var(--accent)_40%,var(--line))] hover:shadow-[0_8px_24px_rgba(0,0,0,0.22)] focus-within:border-[color-mix(in_srgb,var(--accent)_45%,var(--line))] ${
+      className={`group flex flex-col overflow-hidden rounded-lg border border-[var(--line)] transition-colors duration-150 hover:border-[color-mix(in_srgb,var(--accent)_40%,var(--line))] focus-within:border-[color-mix(in_srgb,var(--accent)_45%,var(--line))] ${
         on ? "bg-[var(--panel)]" : "bg-[var(--rail)]"
       }`}
     >

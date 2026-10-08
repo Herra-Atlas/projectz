@@ -65,14 +65,17 @@ export default function TitleModelPicker({ models, onChange, groups, localModels
       ? models[0].model ?? localModels.find((model) => model.id === models[0].localModelId)?.name ?? "1 model"
       : `${models.length} models`;
 
+  // A row of the panel it sits in, not a panel of its own: the caller supplies
+  // the border, the surface and the divider, so this and the sub-agent row
+  // below it are drawn by the same rules.
   return (
-    <div ref={containerRef} className="flex min-h-[68px] items-center gap-3 border-b border-[var(--line)] py-3 last:border-b-0">
+    <div ref={containerRef} className="flex min-h-[58px] items-center gap-3 px-4 py-3.5">
       <div className="min-w-0 flex-1">
-        <h3 className="text-sm font-medium">Title generation</h3>
-        <p className="text-xs text-[var(--quiet)]">Name new conversations after the first reply.</p>
+        <h3 className="text-[13px]">Title generation</h3>
+        <p className="mt-0.5 text-[12px] leading-5 text-[var(--muted)]">Name new conversations after the first reply.</p>
       </div>
       <div className="relative shrink-0">
-        <button type="button" onClick={() => setOpen((current) => !current)} aria-expanded={open} aria-label="Models used to generate session titles" className="inline-flex h-9 w-[150px] items-center justify-between gap-2 rounded-md border border-[var(--line)] bg-[var(--rail)] px-3 text-sm text-[var(--text)] transition-colors hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]">
+        <button type="button" onClick={() => setOpen((current) => !current)} aria-expanded={open} aria-label="Models used to generate session titles" className="inline-flex h-9 w-[150px] items-center justify-between gap-2 rounded-md border border-[var(--line)] bg-[var(--rail)] px-3 text-[13px] text-[var(--text)] transition-colors hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]">
           <span className={`min-w-0 flex-1 truncate text-left ${models.length === 0 ? "text-[var(--quiet)]" : ""}`}>{triggerLabel}</span>
           <ChevronDown size={14} className="shrink-0 text-[var(--muted)]" />
         </button>
@@ -80,7 +83,7 @@ export default function TitleModelPicker({ models, onChange, groups, localModels
           <label className="flex min-h-10 items-center gap-2 border-b border-[var(--line)] px-3 text-[var(--muted)] focus-within:outline-none">
             <Search size={15} className="shrink-0" />
             <span className="sr-only">Search models</span>
-            <input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search models" className="min-w-0 flex-1 bg-transparent text-sm text-[var(--text)] outline-none placeholder:text-[var(--quiet)]" />
+            <input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search models" className="min-w-0 flex-1 bg-transparent text-[13px] text-[var(--text)] outline-none placeholder:text-[var(--quiet)]" />
           </label>
           <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
             {[...grouped.entries()].map(([group, groupOptions]) => <section key={group} className="mt-1 first:mt-0">
