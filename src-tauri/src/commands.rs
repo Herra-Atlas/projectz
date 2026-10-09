@@ -11,6 +11,7 @@ use tracing::info;
 
 use crate::ai::runtime::AiRuntime;
 use crate::ai::types::ChatRequest;
+use crate::database::jobs::{Job, JobRun, NewJob};
 
 #[tauri::command]
 pub async fn ai_chat(
@@ -23,10 +24,8 @@ pub async fn ai_chat(
 }
 
 #[tauri::command]
-pub fn ai_cancel_chat(app: AppHandle, runtime: State<'_, AiRuntime>, run_id: String) {
-    if runtime.cancel_chat(&run_id) {
-        let _ = app.emit("local-model-event", serde_json::json!({"kind": "unloaded"}));
-    }
+pub fn ai_cancel_chat(runtime: State<'_, AiRuntime>, run_id: String) {
+    runtime.cancel_chat(&run_id);
 }
 
 #[tauri::command]
@@ -217,9 +216,32 @@ pub fn database_save_session(
     runtime.database().save_chat_session(&session)
 }
 
+/// Deletes a stored conversation.
+///
+/// A transcript a job produced takes that job with it, along with the job's other
+/// transcripts. To the reader the two are one thing -- they delete the run they can
+/// see and expect the job that made it to go too -- and the alternative leaves a job
+/// in the list pointing at a conversation that no longer exists.
 #[tauri::command]
-pub fn database_delete_session(runtime: State<'_, AiRuntime>, id: String) -> Result<(), String> {
-    runtime.database().delete_chat_session(&id)
+pub fn database_delete_session(
+    app: AppHandle,
+    runtime: State<'_, AiRuntime>,
+    id: String,
+) -> Result<(), String> {
+    runtime.database().delete_chat_session(&id)?;
+    match runtime.database().delete_job_for_session(&id) {
+        Ok(Some(job_id)) => {
+            let _ = app.emit(
+                "job-event",
+                serde_json::json!({ "jobId": job_id, "status": "deleted" }),
+            );
+        }
+        Ok(None) => {}
+        // The conversation is gone either way, and failing the delete over a
+        // follow-up would report a failure that did not happen.
+        Err(error) => tracing::warn!(%error, "the job behind a deleted transcript was not removed"),
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -332,6 +354,122 @@ pub fn skills_set_enabled(
 #[tauri::command]
 pub fn skills_delete(runtime: State<'_, AiRuntime>, id: String) -> Result<(), String> {
     runtime.database().delete_skill(&id)
+}
+
+/// Every saved job, for the editor's list.
+#[tauri::command]
+pub fn job_list(runtime: State<'_, AiRuntime>) -> Result<Vec<Job>, String> {
+    runtime.database().list_jobs()
+}
+
+/// Creates a job from the editor.
+#[tauri::command]
+pub fn job_create(runtime: State<'_, AiRuntime>, job: NewJob) -> Result<Job, String> {
+    let next = crate::jobs::first_run(&job.schedule, chrono::Utc::now());
+    runtime.database().create_job(&job, next.as_deref())
+}
+
+/// Replaces a job's editable fields, and re-arms its clock.
+///
+/// The schedule is re-read here rather than left alone, because editing a job is
+/// how its time changes: a job moved from "every 5 minutes" to "once at 3am" that
+/// kept its old next-run would fire at the wrong moment exactly once.
+#[tauri::command]
+pub fn job_update(runtime: State<'_, AiRuntime>, id: String, job: NewJob) -> Result<Job, String> {
+    runtime.database().update_job(&id, &job)?;
+    let next = crate::jobs::first_run(&job.schedule, chrono::Utc::now());
+    runtime.database().set_job_next_run(&id, next.as_deref())?;
+    runtime
+        .database()
+        .job(&id)?
+        .ok_or_else(|| format!("No job with id {id}"))
+}
+
+#[tauri::command]
+pub fn job_delete(runtime: State<'_, AiRuntime>, id: String) -> Result<(), String> {
+    runtime.database().delete_job(&id)
+}
+
+/// Turns a job on or off. Enabling re-arms its clock from the schedule, so a
+/// one-shot switched back on waits for its moment rather than running at once.
+#[tauri::command]
+pub fn job_set_enabled(
+    runtime: State<'_, AiRuntime>,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    runtime.database().set_job_enabled(&id, enabled)?;
+    if enabled {
+        if let Some(job) = runtime.database().job(&id)? {
+            let next = crate::jobs::first_run(&job.schedule, chrono::Utc::now());
+            runtime.database().set_job_next_run(&id, next.as_deref())?;
+        }
+    }
+    Ok(())
+}
+
+/// Total RAM and VRAM, so the editor can show a limit as the bytes it means.
+///
+/// Reported rather than computed in the frontend because only the backend can read
+/// either figure, and a second implementation of "how much memory is there" would
+/// be a second answer.
+#[derive(serde::Serialize)]
+pub struct MachineTotals {
+    pub ram_total_bytes: Option<u64>,
+    /// `None` when the build has no GPU query, which is the default. A limit on a
+    /// figure we cannot read is simply not enforced.
+    pub vram_total_bytes: Option<u64>,
+}
+
+#[tauri::command]
+pub fn job_machine_totals() -> MachineTotals {
+    MachineTotals {
+        ram_total_bytes: crate::jobs::ram_total_bytes(),
+        vram_total_bytes: crate::ai::local::device::DeviceMemory::local()
+            .map(|device| device.total_bytes),
+    }
+}
+
+/// One job's recent attempts, newest first.
+#[tauri::command]
+pub fn job_runs(runtime: State<'_, AiRuntime>, id: String) -> Result<Vec<JobRun>, String> {
+    runtime.database().job_runs(&id, 50)
+}
+
+/// Starts a job immediately, bypassing its clock and conditions but not its lane.
+#[tauri::command]
+pub fn job_run_now(
+    app: AppHandle,
+    runtime: State<'_, AiRuntime>,
+    scheduler: State<'_, crate::jobs::Scheduler>,
+    id: String,
+) -> Result<(), String> {
+    scheduler.run_now(&app, &runtime, &id)
+}
+
+/// Whether the scheduler is paused, and which jobs are running.
+#[tauri::command]
+pub fn job_scheduler_status(
+    scheduler: State<'_, crate::jobs::Scheduler>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "paused": scheduler.is_paused(),
+        // Ids rather than names: the window already has the jobs and can name
+        // them, and looking them up here would be a second read of the same rows.
+        "running": scheduler.running_jobs(),
+    })
+}
+
+/// The pause switch: one control that stops every job from starting.
+#[tauri::command]
+pub fn job_scheduler_pause(
+    app: AppHandle,
+    scheduler: State<'_, crate::jobs::Scheduler>,
+    paused: bool,
+) {
+    scheduler.set_paused(paused);
+    // The tray shows the same switch, so it is told rather than left to disagree.
+    crate::sync_jobs_toggle(&app, paused);
 }
 
 #[tauri::command]
@@ -1032,7 +1170,12 @@ pub fn local_model_load(
     )
     .map_err(|error| error.to_string())?;
     match runtime.local_models().load(app.clone(), id.clone()) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            // Asked for from the interface, so a scheduled run must leave it alone
+            // from here on -- even if a job was the one that started it.
+            runtime.local_models().mark_loaded_for_user();
+            Ok(())
+        }
         Err(error) => {
             let _ = app.emit(
                 "local-model-event",

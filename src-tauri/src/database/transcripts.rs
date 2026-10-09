@@ -50,7 +50,10 @@ impl Database {
             .prepare(&format!(
                 "SELECT {SESSION_COLUMNS} FROM sessions \
                  WHERE COALESCE(json_extract(metadata_json, '$.kind'), 'chat') <> 'subagent' \
-                 ORDER BY json_extract(metadata_json, '$.pinned') DESC, updated_at DESC"
+                 ORDER BY \
+                     CASE WHEN COALESCE(json_extract(metadata_json, '$.kind'), 'chat') = 'job' THEN 1 ELSE 0 END, \
+                     json_extract(metadata_json, '$.pinned') DESC, \
+                     updated_at DESC"
             ))
             .map_err(|error| error.to_string())?;
         let rows = statement

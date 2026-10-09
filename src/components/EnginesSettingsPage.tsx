@@ -251,15 +251,19 @@ export default function EnginesSettingsPage({ onChanged, notify }: EnginesSettin
    */
   const customEngines = engines.filter((engine) => engine.source === CUSTOM_SOURCE);
   const catalogEngines = engines.filter((engine) => engine.source !== CUSTOM_SOURCE);
-  const installed = engines.filter((engine) => engine.installed);
   const visible = showAll ? catalogEngines : catalogEngines.slice(0, VISIBLE_ENGINES);
   const hiddenCount = catalogEngines.length - visible.length;
-  // Counts every installed engine, not only the ones on screen. The earlier
-  // figure was taken from the visible rows, so an engine below them reported
-  // "0 installed" while it sat on disk taking up space.
+  // Counted across the whole catalog, not only the visible rows: an engine below
+  // the fold used to report "0 installed" while it sat on disk taking up space.
+  //
+  // Scoped to `catalogEngines`, and that is the part that was wrong. Counting
+  // every installed engine made this header claim the fork listed under "From a
+  // link" further down the page -- two builds, one of which is not a llama.cpp
+  // release and is already reported by its own section.
+  const installedCount = catalogEngines.filter((engine) => engine.installed).length;
   const summary = loading
     ? "Checking installed versions…"
-    : `${installed.length} installed · ${catalogEngines.length} versions available`;
+    : `${installedCount} installed · ${catalogEngines.length} versions available`;
 
   return (
     <section>

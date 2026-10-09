@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Notification, Notify } from "./types";
 
 /** How long a success or error row stays before it removes itself. */
-const EXPIRY_MS = 6000;
+const EXPIRY_MS = 3000;
 
 /** How often expiry is re-checked. */
 const SWEEP_MS = 250;

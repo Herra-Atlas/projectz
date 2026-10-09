@@ -71,6 +71,13 @@ pub struct RunHandle {
     /// so a local selection has already been turned into a live endpoint here
     /// and the tool never has to reach for the model registry itself.
     pub subagent_default: Option<(Endpoint, String)>,
+    /// How many jobs this run has scheduled.
+    ///
+    /// Per run rather than per conversation, so the ceiling is on what one reply may
+    /// arrange rather than on what a long conversation may accumulate. Here rather
+    /// than in the database because it is not a fact worth keeping: a restarted app
+    /// has no reply in flight to count for.
+    pub jobs_created: std::sync::atomic::AtomicUsize,
 }
 
 /// One sub-agent reporting that it has finished, so the panel can refresh.

@@ -568,6 +568,11 @@ function useRunSeconds(steps: ToolStep[], live: boolean): number {
 /**
  * A clock that advances once a second while something is running.
  *
+ * Once a second, matching the label: `formatSeconds` states whole seconds, so a
+ * faster tick would only re-render the row to print the same figure. The
+ * interval runs only while a row is in flight, so it costs nothing once the
+ * reply has landed.
+ *
  * Owned here rather than lifted into the page because it is only ever needed
  * while a row is in flight, and a page-level interval would keep ticking for
  * every conversation on screen for the life of the app. Deliberately
@@ -595,19 +600,17 @@ function useTick(active: boolean, ...deps: unknown[]): number {
 }
 
 /**
- * A duration the way the panel states it: milliseconds while a step is quick
- * enough that whole seconds would round it away, then whole seconds, then
- * minutes and seconds.
+ * A duration the way the panel states it: whole seconds, then minutes and
+ * seconds.
  *
- * Under two seconds the rounding is the problem: an instant tool and a slow one
- * both read "1s" (or "0s"), so the difference the reader is looking for is lost.
- * Milliseconds say which was which. At and above two seconds a decimal would
- * imply a precision nothing here measured, so it stays whole.
+ * Whole seconds throughout, so every figure in the panel counts in the same
+ * unit. Milliseconds used to be shown below two seconds to tell an instant tool
+ * from a slow one, but a number that jumps by a thousand at a time does not read
+ * as counting -- it reads as broken. Seconds everywhere does not have that
+ * problem, at the cost of an instant call and a slow one both reading "0s".
  */
 export function formatSeconds(seconds: number): string {
-  const clamped = Math.max(0, seconds);
-  if (clamped < 2) return `${Math.round(clamped * 1000)}ms`;
-  const total = Math.round(clamped);
+  const total = Math.round(Math.max(0, seconds));
   if (total < 60) return `${total}s`;
   return `${Math.floor(total / 60)}m ${total % 60}s`;
 }

@@ -28,7 +28,7 @@
 //! knows about, and the answer comes back through the shared map.
 
 mod prompt;
-mod transcript;
+pub(crate) mod transcript;
 
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -354,6 +354,7 @@ mod tests {
             approval: ApprovalGate::new(PermissionMode::Ask),
             emit: Arc::new(|_| {}),
             subagent_default,
+            jobs_created: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 

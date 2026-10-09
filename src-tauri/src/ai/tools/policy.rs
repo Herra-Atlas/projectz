@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::access::AccessSet;
+
 /// How much the agent may do without asking.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -62,6 +64,7 @@ const AUTO_WRITE_TOOLS: &[&str] = &[
     "edit_lines",
     "skill_manage",
     "sub_agent",
+    "schedule_job",
 ];
 
 /// Decides whether this tool name runs automatically in the selected mode.
@@ -79,6 +82,56 @@ pub fn decide(mode: PermissionMode, tool_name: &str) -> Decision {
         Decision::Allow
     } else {
         Decision::Ask
+    }
+}
+
+/// Decides whether a tool may run, given the level **and** the run's access set.
+///
+/// The access set is checked first and refuses outright: a capability the run does
+/// not hold is not something a prompt can grant, and in an unattended job there is
+/// nobody to prompt anyway. Only when the tool is permitted does the level decide
+/// whether it runs now or waits.
+///
+/// This is the function the gate calls; [`decide`] stays the pure level question
+/// and is what the tests exercise.
+pub fn decide_with_access(mode: PermissionMode, tool_name: &str, access: &AccessSet) -> Decision {
+    if !access.is_allowed(tool_name) {
+        return Decision::Deny(format!(
+            "this run is not allowed to use `{tool_name}`"
+        ));
+    }
+    decide(mode, tool_name)
+}
+
+#[cfg(test)]
+mod access_tests {
+    use super::*;
+
+    /// A capability the run lacks is refused, whatever the level -- including
+    /// `Full`, which is the whole point: a job at `Full` may act without asking,
+    /// but only within what it was allowed to touch.
+    #[test]
+    fn access_refuses_before_the_level_can_allow() {
+        let access = AccessSet {
+            terminal: false,
+            ..AccessSet::ALL
+        };
+        assert_eq!(
+            decide_with_access(PermissionMode::Full, "run_terminal", &access),
+            Decision::Deny("this run is not allowed to use `run_terminal`".to_string())
+        );
+    }
+
+    #[test]
+    fn a_permitted_tool_falls_through_to_the_level() {
+        assert_eq!(
+            decide_with_access(PermissionMode::Full, "write_file", &AccessSet::ALL),
+            Decision::Allow
+        );
+        assert_eq!(
+            decide_with_access(PermissionMode::Ask, "write_file", &AccessSet::ALL),
+            Decision::Ask
+        );
     }
 }
 

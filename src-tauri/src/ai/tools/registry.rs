@@ -203,6 +203,15 @@ impl ToolRegistry {
         self.tools.push(tool);
     }
 
+    /// Drops every tool the predicate rejects.
+    ///
+    /// The one way a run's access set narrows what is advertised: a tool removed
+    /// here is not in `specs()` and so never reaches the request body. Ordering is
+    /// untouched, so the cache-stable sort still holds.
+    pub fn retain(&mut self, keep: impl Fn(&str) -> bool) {
+        self.tools.retain(|tool| keep(tool.name));
+    }
+
     /// Builds a registry from a fixed tool set.
     ///
     /// `mode` selects the set so the choice stays in one place rather than at

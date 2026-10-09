@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openFile } from "@tauri-apps/plugin-dialog";
-import { ArrowLeft, BookMarked, ChevronDown, ChevronRight, CircleHelp, Cpu, LoaderCircle, Pencil, Plus, Search, Server, Settings2, SlidersHorizontal, Sparkles, Trash2, X, Zap } from "lucide-react";
+import { ArrowLeft, BookMarked, ChevronDown, ChevronRight, CircleHelp, Cpu, GripVertical, LoaderCircle, MoveRight, Palette, Pencil, Plus, Search, Server, Settings2, SlidersHorizontal, Sparkles, Trash2, X, Zap } from "lucide-react";
+import { resolveTheme, type Appearance } from "../features/appearance/appearance";
+import AccentPicker from "./appearance/AccentPicker";
+import ThemePicker from "./appearance/ThemePicker";
 import ProviderIcon from "./ProviderIcon";
 import ModelBadges from "./modelBadges/ModelBadges";
 import EnginesSettingsPage from "./EnginesSettingsPage";
-import EnginePicker, { engineLabel } from "./EnginePicker";
+import { engineLabel } from "./EnginePicker";
 import RuntimeSettingsPage, { type LocalRuntimeSettings } from "./RuntimeSettingsPage";
 import SkillsPage from "./SkillsPage";
 import SkillFormPage from "./skills/SkillFormPage";
@@ -53,6 +56,8 @@ function pageTitle(page: SettingsPage): string {
       return page.skill ? "Edit skill" : "New skill";
     case "general":
       return "General";
+    case "appearance":
+      return "Appearance";
     case "preferences":
       return "Preferences";
     case "skills":
@@ -67,8 +72,9 @@ function pageTitle(page: SettingsPage): string {
 }
 
 type EndpointDraft = { id: string; name: string; base_url: string; api_key: string; models: string[]; enabled: boolean };
-type SettingsModalProps = { open: boolean; onClose: () => void; onEndpointsChanged: () => void; onClearSessions: () => Promise<number>; preferences: Preferences; onPreferencesChange: (preferences: Preferences) => void; notify: Notify };
-type SettingsPage = { view: "providers" } | { view: "local" } | { view: "engines" } | { view: "general" } | { view: "preferences" } | { view: "skills" } | { view: "skill"; skill: Skill | null } | { view: "model"; model: LocalModel } | { view: "form"; endpoint: Endpoint | null };
+type SettingsModalProps = { open: boolean; onClose: () => void; onEndpointsChanged: () => void; onClearSessions: () => Promise<number>; preferences: Preferences; onPreferencesChange: (preferences: Preferences) => void; appearance: Appearance; onAppearanceChange: (appearance: Appearance) => void; notify: Notify };
+type SettingsPage = { view: "providers" } | { view: "local" } | { view: "engines" } | { view: "general" } | { view: "appearance" } | { view: "preferences" } | { view: "skills" } | { view: "skill"; skill: Skill | null } | { view: "model"; model: LocalModel } | { view: "form"; endpoint: Endpoint | null };
+
 type GeneralSettings = {
   instructions: string;
   responseNotifications: boolean;
@@ -89,7 +95,17 @@ const INSTRUCTION_EXAMPLES = [
 
 const blankEndpoint = (): EndpointDraft => ({ id: crypto.randomUUID(), name: "", base_url: "", api_key: "", models: [], enabled: true });
 
-export default function SettingsModal({ open, onClose, onEndpointsChanged, onClearSessions, preferences, onPreferencesChange, notify }: SettingsModalProps) {
+/**
+ * How far the pointer must travel before a press counts as a drag.
+ *
+ * Without a threshold, every click on a row would begin a drag and a drop on the
+ * row's own group -- so a plain press would occasionally move a model nobody
+ * meant to move. Four pixels is below the hand's natural wobble during a click
+ * and above what a click produces.
+ */
+const DRAG_THRESHOLD = 4;
+
+export default function SettingsModal({ open, onClose, onEndpointsChanged, onClearSessions, preferences, onPreferencesChange, appearance, onAppearanceChange, notify }: SettingsModalProps) {
   // This dialog is the app's only `showModal()` window, and the browser paints
   // that in the top layer -- above any z-index on the page. Claiming the host
   // while it is open is what puts the notification stack on top of it rather
@@ -104,6 +120,9 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
   const [dialog, setDialog] = useState<HTMLDialogElement | null>(null);
   useClaimNotificationHost(open, dialog);
   const nameRef = useRef<HTMLInputElement>(null);
+  // The theme actually on screen, so each accent swatch previews the colour it
+  // takes in the theme the user is looking at rather than in the other one.
+  const resolvedTheme = resolveTheme(appearance.theme);
   const localSettingsSaveQueue = useRef(Promise.resolve());
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
   const [expandedProviders, setExpandedProviders] = useState<string[]>([]);
@@ -118,14 +137,42 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
    */
   const [expandedEngines, setExpandedEngines] = useState<string[]>([]);
   /**
-   * The engine versions the group headers can name.
+   * The model being dragged, and the one picked up by pressing its handle.
    *
-   * Only `engineLabel` reads this -- the pickers fetch their own lists -- so it
-   * carries ids, versions and sources and nothing else. It stays in step with
-   * the group list because both are refreshed by `updateLocalModelEngine`;
-   * `refreshEngines` handles the Engines page changing names from under it.
+   * Two pieces of state for one idea, because there are two ways to start a
+   * move: a drag has the pointer held down and ends on release, while a pick-up
+   * has to survive until a destination is chosen. Both feed the same drop, so a
+   * destination never has to know which gesture put a model in flight.
    */
-  const [engineNames, setEngineNames] = useState<Pick<InstalledEngine, "id" | "version" | "source">[]>([]);
+  const [draggingModel, setDraggingModel] = useState<string | null>(null);
+  const [pickedModel, setPickedModel] = useState<{ id: string; name: string } | null>(null);
+  /** The group under the pointer during a drag, for the drop highlight. */
+  const [dropEngine, setDropEngine] = useState<string | null>(null);
+  /**
+   * The same value as `draggingModel`, readable synchronously.
+   *
+   * The pointer handlers need it mid-gesture, and a state update scheduled in
+   * the same event is not visible to the handler still running -- so a quick
+   * release could be read as a click and drop nothing.
+   */
+  const draggingRef = useRef<string | null>(null);
+  /** Where the pointer went down, before the movement counts as a drag. */
+  const pointerDrag = useRef<{ x: number; y: number; modelId: string } | null>(null);
+  /** Set when a drag ends, so the click that follows it does not also arm the model. */
+  const suppressClick = useRef(false);
+  /**
+   * The engines the group headers can name, and which of them exist.
+   *
+   * It stays in step with the group list because both are refreshed by
+   * `updateLocalModelEngine`; `refreshEngines` handles the Engines page changing
+   * names from under it.
+   *
+   * `installed` is carried because this is also what decides which groups the
+   * Local models page draws -- the command returns the whole catalog, so an
+   * unfiltered list here would offer drop targets for thirty releases nobody has
+   * downloaded.
+   */
+  const [engineNames, setEngineNames] = useState<Pick<InstalledEngine, "id" | "version" | "source" | "installed">[]>([]);
   const [generalSettings, setGeneralSettings] = useState<GeneralSettings>(DEFAULT_GENERAL);
   const [confirmClear, setConfirmClear] = useState(false);
   const [clearingSessions, setClearingSessions] = useState(false);
@@ -165,9 +212,19 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
    * dropping those rows would make an unchosen model look absent rather than
    * unrunnable. Ordered last, since that group is the one needing attention
    * rather than the one being browsed.
+   *
+   * **Every installed engine is seeded, not just the ones with models.** A group
+   * has to exist because the engine exists: an engine with nothing on it is
+   * precisely where a model needs to be draggable *to*, and a destination that
+   * only appears once it is occupied cannot be reached. Installed only -- the
+   * list carries the whole catalog, and offering a release that is not on disk
+   * would be offering a move that fails at load.
    */
   const localModelGroups = (() => {
     const byEngine = new Map<string, LocalModel[]>();
+    for (const engine of engineNames) {
+      if (engine.installed) byEngine.set(engine.id, []);
+    }
     for (const model of localModels) {
       // `""` rather than a null key: React needs a string, and the empty id is
       // what "no engine" already means everywhere else on this page.
@@ -177,12 +234,19 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
       else byEngine.set(key, [model]);
     }
     return [...byEngine.entries()]
-      .sort(([left], [right]) => (left === "" ? 1 : right === "" ? -1 : left.localeCompare(right)))
-      .map(([id, models]) => ({
-        id,
-        label: engineLabel(engineNames.find((engine) => engine.id === id)),
-        models,
-      }));
+      .map(([id, models]) => {
+        const engine = engineNames.find((entry) => entry.id === id);
+        return {
+          id,
+          // An id with no installed engine behind it is a choice pointing at
+          // something since removed, which is not the same as no choice -- the
+          // empty id -- and telling them apart is what stops a vanished engine
+          // reading as merely unassigned.
+          label: id === "" ? "No engine" : engine ? engineLabel(engine) : `${id} · not installed`,
+          models,
+        };
+      })
+      .sort((left, right) => (left.id === "" ? 1 : right.id === "" ? -1 : left.label.localeCompare(right.label)));
   })();
 
   // Capabilities for every listed model, one request per provider rather than
@@ -443,17 +507,68 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
   };
 
   /**
-   * Move a model onto another engine, and re-file it.
+   * Re-reads the models after an engine change.
    *
-   * The command itself is issued by `EnginePicker`, which reports a failure and
-   * rolls the control back. This only keeps the list in step with the choice, by
-   * re-reading the models -- deliberately a refetch rather than a local edit,
-   * because `engine_id` on a row is *resolved* rather than stored, and writing it
-   * here would mean this page reproducing the backend's pin-then-default order.
-   * That is the one fact in this file that must not have a second copy.
+   * A refetch rather than a local edit, because `engine_id` on a row is
+   * *resolved* by the backend rather than stored, and writing it here would mean
+   * this page reproducing the pin-then-default order. That is the one fact in
+   * this file that must not have a second copy.
    */
   const updateLocalModelEngine = async () => {
     setLocalModels(await invoke<LocalModel[]>("local_models_list"));
+  };
+
+  /** The model in flight, whichever gesture put it there. */
+  const movingModelId = draggingModel ?? pickedModel?.id ?? null;
+
+  /**
+   * True when a model is in flight and this group is somewhere it could land.
+   *
+   * The `""` group -- models with no engine at all -- is never a destination:
+   * the backend has no command to unset an engine, and a drop that silently did
+   * nothing would be worse than a group that visibly refuses. A model already
+   * filed under the group is refused too, since that move is a no-op.
+   */
+  const canDropOn = (groupId: string) => {
+    if (!movingModelId || !groupId) return false;
+    return (localModels.find((model) => model.id === movingModelId)?.engine_id ?? "") !== groupId;
+  };
+
+  /**
+   * The engine group under a viewport point, when it is one this model may move
+   * to.
+   *
+   * Hit-tested from the document rather than collected from each group's own
+   * `dragenter`, because this drag runs on pointer events: the pointer is
+   * captured by the row it started on, so the groups never receive an event of
+   * their own to react to. `data-engine-group` on each header is what this looks
+   * for.
+   */
+  const dropTargetAt = (x: number, y: number, modelId: string): string | null => {
+    const groupId = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-engine-group]")?.dataset.engineGroup ?? null;
+    if (!groupId) return null;
+    return (localModels.find((model) => model.id === modelId)?.engine_id ?? "") === groupId ? null : groupId;
+  };
+
+  /**
+   * Moves a model onto an engine, and re-files it.
+   *
+   * The in-flight state is cleared first, so a failed move still ends the
+   * gesture: a model left stuck to the pointer with an error in the corner is
+   * the one outcome worse than the failure itself.
+   */
+  const moveModelToEngine = async (modelId: string, engineId: string) => {
+    const name = localModels.find((model) => model.id === modelId)?.name ?? "Model";
+    setDraggingModel(null);
+    setPickedModel(null);
+    setDropEngine(null);
+    try {
+      await invoke("local_model_engine_set", { modelId, engineId });
+      await updateLocalModelEngine();
+      notify("success", `${name} moved to ${engineLabel(engineNames.find((engine) => engine.id === engineId))}`);
+    } catch (reason) {
+      notify("error", `Engine could not be changed: ${String(reason)}`);
+    }
   };
 
   const formatSize = (bytes: number) => {
@@ -486,6 +601,11 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
       ref={setDialog}
       aria-labelledby="settings-title"
       onClose={onClose}
+      // Escape cancels a model that is mid-move rather than closing the window.
+      // Intercepting the dialog's own cancel event is the only way to stop it:
+      // the browser closes the dialog itself, and that is not a keydown this
+      // component ever sees.
+      onCancel={(event) => { if (pickedModel) { event.preventDefault(); setPickedModel(null); } }}
       onClick={(event) => { if (event.target === dialog) onClose(); }}
       className="m-0 h-dvh w-dvw max-h-none max-w-none overflow-hidden border-0 bg-transparent p-0 text-[var(--text)] backdrop:bg-black/65"
     >
@@ -502,6 +622,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
           <nav aria-label="Settings sections" className="flex shrink-0 gap-1 overflow-x-auto border-b border-[var(--line)] bg-[var(--rail)] px-2.5 py-2 sm:w-[200px] sm:flex-col sm:gap-0.5 sm:overflow-visible sm:border-b-0 sm:border-r sm:py-3">
             <p className="hidden px-2.5 pb-1.5 pt-1 text-[11px] font-medium text-[var(--quiet)] sm:block">Application</p>
             <button type="button" onClick={() => setPage({ view: "general" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "general" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><SlidersHorizontal size={16} />General</button>
+            <button type="button" onClick={() => setPage({ view: "appearance" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "appearance" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Palette size={16} />Appearance</button>
             <button type="button" onClick={() => setPage({ view: "preferences" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "preferences" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Sparkles size={16} />Preferences</button>
             <button type="button" onClick={() => setPage({ view: "skills" })} className={`mt-1 flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "skills" || page.view === "skill" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><BookMarked size={16} />Skills</button>
             <p className="hidden px-2.5 pb-1.5 pt-5 text-[11px] font-medium text-[var(--quiet)] sm:block">Models</p>
@@ -558,6 +679,15 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                   <h2 className="text-[17px] font-semibold tracking-tight">Local models</h2>
                   <button type="button" onClick={() => void addLocalModel()} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 text-[13px] font-medium text-[var(--text)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><Plus size={15} />Add models</button>
                 </div>
+                {/* Only while a model is armed. The move is a mode, and a mode
+                    with no visible state is one the user cannot tell they are
+                    in -- or get out of. */}
+                {pickedModel && (
+                  <p className="mb-3 flex items-center gap-2 rounded-md border border-[color-mix(in_srgb,var(--accent)_35%,var(--line))] bg-[color-mix(in_srgb,var(--accent)_8%,transparent)] px-3 py-2 text-[12px] text-[var(--text)]">
+                    <MoveRight size={13} className="shrink-0 text-[var(--accent)]" />
+                    Moving {pickedModel.name}. Choose an engine below, or press Escape to cancel.
+                  </p>
+                )}
                 {localModels.length === 0 ? <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-4 py-7"><p className="text-sm text-[var(--muted)]">No local models added.</p><p className="mt-1 text-xs text-[var(--quiet)]">Choose a GGUF file to register its path for local inference.</p></div> : <div className="divide-y divide-[var(--line)] rounded-lg border border-[var(--line)] bg-[var(--panel)]">
                   {/* Grouped by engine, the same shape the providers page uses.
                       The group is the engine, not the model: a model is run by one
@@ -567,49 +697,117 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                       cannot. `engine_id` arrives as the model's own engine from
                       the backend, so this never has to guess. */}
                   {localModelGroups.map((group) => <article key={group.id}>
-                    <div className="flex min-h-[68px] items-center gap-2 px-4 py-3">
+                    <div
+                      // Marks the target for `dropTargetAt`, which hit-tests the
+                      // document while a model is in flight. A collapsed group is
+                      // still a target: opening it is what the drop is *for*, not
+                      // a precondition of it.
+                      data-engine-group={group.id}
+                      className={`flex min-h-[68px] items-center gap-2 border-l-2 px-4 py-3 transition-colors ${dropEngine === group.id ? "border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_10%,transparent)]" : "border-transparent"}`}
+                    >
                       <button type="button" onClick={() => setExpandedEngines((current) => current.includes(group.id) ? current.filter((id) => id !== group.id) : [...current, group.id])} aria-expanded={expandedEngines.includes(group.id)} aria-label={`${expandedEngines.includes(group.id) ? "Collapse" : "Expand"} ${group.label}`} title={`${expandedEngines.includes(group.id) ? "Collapse" : "Expand"} ${group.label}`} className="grid size-9 shrink-0 place-items-center rounded-md text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><Cpu size={16} /></button>
-                      <div className="min-w-0 flex-1"><h3 className="truncate text-sm font-medium">{group.label}</h3><p className="truncate text-xs text-[var(--quiet)]">{group.models.length === 1 ? "1 model" : `${group.models.length} models`}{group.id ? "" : " · pick an engine for it below"}</p></div>
+                      <div className="min-w-0 flex-1"><h3 className="truncate text-sm font-medium">{group.label}</h3><p className="truncate text-xs text-[var(--quiet)]">{group.models.length === 0 ? "No models" : group.models.length === 1 ? "1 model" : `${group.models.length} models`}{group.id ? "" : " · no engine chosen"}</p></div>
+                      {/* How a move started with the handle is finished. A drag
+                          needs a held pointer, so without this the feature does
+                          not exist for anyone working from the keyboard. */}
+                      {pickedModel && canDropOn(group.id) && (
+                        <button type="button" onClick={() => void moveModelToEngine(pickedModel.id, group.id)} className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-md bg-[var(--accent)] px-2.5 text-[12px] font-medium text-[var(--accent-ink)] transition-opacity hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><MoveRight size={13} />Move here</button>
+                      )}
                       <span className="grid size-9 shrink-0 place-items-center text-[var(--quiet)]" aria-hidden="true">{expandedEngines.includes(group.id) ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</span>
                     </div>
                     {expandedEngines.includes(group.id) && <div className="mb-3 ml-[2.75rem] border-l border-[var(--line)] py-1 pl-3">
+                      {/* An engine with nothing on it is the whole point of
+                          showing every engine, so an opened empty group says so
+                          rather than rendering as a blank panel. */}
+                      {group.models.length === 0 && <p className="py-2 text-xs text-[var(--quiet)]">Nothing on this engine yet. Drag a model here.</p>}
                       <div className="divide-y divide-[var(--line)]">
-                        {group.models.map((model) => <div key={model.id} title={fileLabel(model.path)} className="flex min-h-9 flex-wrap items-center gap-3 py-1.5 pr-2">
-                          <div className="min-w-0 flex-1">
-                            <h4 className="truncate text-xs font-medium text-[var(--muted)]">{model.name}</h4>
-                            {/* Facts read from the file itself. The path used to be
-                                shown here and said nothing a reader did not already
-                                have in the tooltip -- a quantisation and a context
-                                window are things they cannot get from the filename,
-                                which is usually the name of a fine-tune. */}
-                            <p className="truncate text-[11px] text-[var(--quiet)]">
-                              {[
-                                model.quantization,
-                                model.context_length ? `${Math.round(model.context_length / 1000)}K context` : null,
-                              ].filter(Boolean).join(" · ") || "Reading model details…"}
-                            </p>
-                          </div>
-                          {/* Only when the backend says the file is gone. It computes
-                              this where it already stats the model, so the frontend
-                              cannot disagree with the loader about what exists. */}
-                          {!model.present && <span className="shrink-0 text-[11px] text-[var(--danger)]">File missing</span>}
-                          <span className="hidden text-[11px] text-[var(--muted)] sm:block">{formatSize(model.size_bytes)}</span>
-                          <div className="w-40 shrink-0">
-                            {/* Per-model engine choice, on the row of the model it
-                                belongs to. Present here as well as on the settings
-                                page because the group a model is filed under is the
-                                thing being changed -- moving a model between groups
-                                is the visible result of using it. */}
-                            <EnginePicker
-                              modelId={model.id}
-                              engineId={model.engine_id}
-                              onChange={() => void updateLocalModelEngine()}
-                              notify={notify}
-                            />
-                          </div>
-                          <button type="button" onClick={() => { setFormError(""); setPage({ view: "model", model }); }} className="grid size-8 shrink-0 place-items-center rounded-md text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label={`Settings for ${model.name}`} title="Model settings"><Settings2 size={16} /></button>
-                          <button type="button" onClick={() => void removeLocalModel(model)} className="grid size-8 shrink-0 place-items-center rounded-md text-[var(--quiet)] hover:bg-[var(--raised)] hover:text-[var(--danger)]" aria-label={`Remove ${model.name}`} title="Remove model from list"><Trash2 size={16} /></button>
-                        </div>)}
+                        {group.models.map((model) => {
+                          const picked = pickedModel?.id === model.id;
+                          return <div
+                            key={model.id}
+                            title={fileLabel(model.path)}
+                            // Pointer events, not HTML5 drag-and-drop. On Windows
+                            // Tauri consumes the native drag to implement its own
+                            // file drop, so `dragstart` never reaches the page --
+                            // and switching that off would cost the chat its
+                            // drop-a-file-to-attach.
+                            onPointerDown={(event) => {
+                              if (event.button !== 0) return;
+                              suppressClick.current = false;
+                              pointerDrag.current = { x: event.clientX, y: event.clientY, modelId: model.id };
+                            }}
+                            onPointerMove={(event) => {
+                              const origin = pointerDrag.current;
+                              if (!origin || origin.modelId !== model.id) return;
+                              if (draggingRef.current !== model.id) {
+                                if (Math.hypot(event.clientX - origin.x, event.clientY - origin.y) < DRAG_THRESHOLD) return;
+                                // Past the threshold this is a drag. The row takes
+                                // the pointer capture, so the moves keep arriving
+                                // as it crosses the groups below it.
+                                event.currentTarget.setPointerCapture(event.pointerId);
+                                draggingRef.current = model.id;
+                                suppressClick.current = true;
+                                setDraggingModel(model.id);
+                              }
+                              setDropEngine(dropTargetAt(event.clientX, event.clientY, model.id));
+                            }}
+                            onPointerUp={(event) => {
+                              const origin = pointerDrag.current;
+                              pointerDrag.current = null;
+                              if (!origin || origin.modelId !== model.id || draggingRef.current !== model.id) return;
+                              const target = dropTargetAt(event.clientX, event.clientY, model.id);
+                              draggingRef.current = null;
+                              setDraggingModel(null);
+                              setDropEngine(null);
+                              if (target) void moveModelToEngine(model.id, target);
+                            }}
+                            onPointerCancel={() => { pointerDrag.current = null; draggingRef.current = null; setDraggingModel(null); setDropEngine(null); }}
+                            className={`flex min-h-9 flex-wrap items-center gap-3 py-1.5 pr-2 transition-[background-color,opacity] ${draggingModel === model.id ? "select-none opacity-40" : ""} ${picked ? "bg-[color-mix(in_srgb,var(--accent)_10%,transparent)]" : ""}`}
+                          >
+                            {/* Two ways to start a move, one handle. Dragging is the
+                                obvious one; pressing it arms the model so a group's
+                                "Move here" finishes the job, which is the only
+                                version of this a keyboard can perform. */}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                // A drag ends with a click on whatever the pointer
+                                // was over. Arming the model on the way out of a
+                                // drag would leave it armed for a move the user
+                                // has already made.
+                                if (suppressClick.current) { suppressClick.current = false; return; }
+                                setPickedModel((current) => (current?.id === model.id ? null : { id: model.id, name: model.name }));
+                              }}
+                              aria-pressed={picked}
+                              aria-label={`Move ${model.name} to another engine`}
+                              title="Drag onto another engine, or press and then choose one"
+                              className={`grid size-7 shrink-0 cursor-grab place-items-center rounded-md hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] active:cursor-grabbing ${picked ? "text-[var(--accent)]" : "text-[var(--quiet)]"}`}
+                            >
+                              <GripVertical size={14} />
+                            </button>
+                            <div className="min-w-0 flex-1">
+                              <h4 className="truncate text-xs font-medium text-[var(--muted)]">{model.name}</h4>
+                              {/* Facts read from the file itself. The path used to be
+                                  shown here and said nothing a reader did not already
+                                  have in the tooltip -- a quantisation and a context
+                                  window are things they cannot get from the filename,
+                                  which is usually the name of a fine-tune. */}
+                              <p className="truncate text-[11px] text-[var(--quiet)]">
+                                {[
+                                  model.quantization,
+                                  model.context_length ? `${Math.round(model.context_length / 1000)}K context` : null,
+                                ].filter(Boolean).join(" · ") || "Reading model details…"}
+                              </p>
+                            </div>
+                            {/* Only when the backend says the file is gone. It computes
+                                this where it already stats the model, so the frontend
+                                cannot disagree with the loader about what exists. */}
+                            {!model.present && <span className="shrink-0 text-[11px] text-[var(--danger)]">File missing</span>}
+                            <span className="hidden text-[11px] text-[var(--muted)] sm:block">{formatSize(model.size_bytes)}</span>
+                            <button type="button" onClick={() => { setFormError(""); setPage({ view: "model", model }); }} className="grid size-8 shrink-0 place-items-center rounded-md text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label={`Settings for ${model.name}`} title="Model settings"><Settings2 size={16} /></button>
+                            <button type="button" onClick={() => void removeLocalModel(model)} className="grid size-8 shrink-0 place-items-center rounded-md text-[var(--quiet)] hover:bg-[var(--raised)] hover:text-[var(--danger)]" aria-label={`Remove ${model.name}`} title="Remove model from list"><Trash2 size={16} /></button>
+                          </div>;
+                        })}
                       </div>
                     </div>}
                   </article>)}
@@ -637,6 +835,28 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                     they were not already looking at. A failure is the one thing
                     here worth interrupting for, and `saveLocalRuntimeSettings`
                     reports it. */}
+              </> : page.view === "appearance" ? <>
+                <div className="mb-6 border-b border-[var(--line)] pb-5"><h2 className="text-[17px] font-semibold tracking-tight">Appearance</h2></div>
+                <SettingsSection title="Theme">
+                  <SettingRow
+                    label="Theme"
+                    description="System follows whatever your operating system is set to."
+                    stacked
+                    control={<ThemePicker appearance={appearance} onChange={onAppearanceChange} />}
+                  />
+                </SettingsSection>
+
+                <SettingsSection title="Accent">
+                  <SettingRow
+                    label="Accent colour"
+                    // Says the one thing that is not obvious from the swatches: a
+                    // custom colour is not used as-is where text sits on it, so a
+                    // dark choice cannot make a button's label disappear.
+                    description="Used for highlights, the active view, and buttons. Anything drawn on top of the accent is picked for contrast."
+                    stacked
+                    control={<AccentPicker appearance={appearance} theme={resolvedTheme} onChange={onAppearanceChange} />}
+                  />
+                </SettingsSection>
               </> : page.view === "general" ? <>
                 <div className="mb-6 border-b border-[var(--line)] pb-5"><h2 className="text-[17px] font-semibold tracking-tight">General</h2></div>
                 <SettingsSection title="Instructions">

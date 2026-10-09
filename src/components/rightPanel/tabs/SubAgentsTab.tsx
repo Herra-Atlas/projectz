@@ -1,8 +1,7 @@
 import { useMemo } from "react";
 import { Bot, ChevronRight, LoaderCircle } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import ActivityPanel from "../../../pages/chat/ActivityPanel";
+import { Markdown } from "../../../pages/chat/Markdown";
 import FileChanges from "../../../pages/chat/FileChanges";
 import { MARKDOWN_STYLES } from "../../../pages/chat/markdownStyles";
 import LiveSpinner from "../../LiveSpinner";
@@ -64,9 +63,7 @@ export default function SubAgentsTab({ parentSessionId, onOpenUrl }: SubAgentsTa
     }),
     [onOpenUrl],
   );
-  const renderMarkdown = (text: string) => (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{text}</ReactMarkdown>
-  );
+  const renderMarkdown = (text: string) => <Markdown text={text} components={markdownComponents} />;
 
   const active = runs.find((run) => run.id === activeId) ?? null;
 

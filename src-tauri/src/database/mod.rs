@@ -12,6 +12,7 @@ use crate::ai::{
 };
 
 pub mod bundled_skills;
+pub mod jobs;
 pub mod skills;
 pub mod statistics;
 pub mod transcripts;
@@ -27,7 +28,7 @@ pub struct Database {
 /// both refer to this, so adding a migration is one edit here plus one in
 /// `migrate`. Before this existed, each new migration silently broke a test that
 /// had hardcoded the old number.
-pub const LATEST_SCHEMA_VERSION: i64 = 13;
+pub const LATEST_SCHEMA_VERSION: i64 = 14;
 
 /// The current time as UTC ISO-8601, the format every timestamp uses.
 ///
@@ -1539,6 +1540,55 @@ fn migrate(connection: &mut Connection) -> Result<(), String> {
         }
         tx.execute_batch(&format!("PRAGMA user_version={LATEST_SCHEMA_VERSION};"))
             .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+    }
+    // Scheduled jobs: a saved instruction plus when and under what machine
+    // conditions it runs. `job_runs` is the history, one row per attempt, and it
+    // cascades with its job so deleting a job takes its history with it rather
+    // than leaving runs pointing at nothing.
+    if version < 14 {
+        let tx = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        tx.execute_batch(&format!(
+            "CREATE TABLE IF NOT EXISTS jobs (
+                 id TEXT PRIMARY KEY,
+                 name TEXT NOT NULL,
+                 prompt TEXT NOT NULL,
+                 workspace TEXT,
+                 mode TEXT NOT NULL DEFAULT 'agent',
+                 permission TEXT NOT NULL DEFAULT 'full',
+                 access_json TEXT NOT NULL,
+                 model_json TEXT NOT NULL,
+                 schedule_json TEXT NOT NULL,
+                 conditions_json TEXT NOT NULL,
+                 lane TEXT NOT NULL DEFAULT 'default',
+                 depends_on_json TEXT NOT NULL DEFAULT '[]',
+                 enabled INTEGER NOT NULL DEFAULT 1,
+                 next_run_at TEXT,
+                 last_run_at TEXT,
+                 last_status TEXT,
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL
+             );
+             -- The scheduler's one hot query: jobs that are enabled and due. Partial
+             -- on `next_run_at` because a job with no next time never matches it.
+             CREATE INDEX IF NOT EXISTS idx_jobs_due ON jobs(enabled, next_run_at) WHERE next_run_at IS NOT NULL;
+             CREATE TABLE IF NOT EXISTS job_runs (
+                 id TEXT PRIMARY KEY,
+                 job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                 session_id TEXT,
+                 status TEXT NOT NULL,
+                 reason TEXT,
+                 started_at TEXT NOT NULL,
+                 finished_at TEXT,
+                 created_at TEXT NOT NULL
+             );
+             -- History is read newest-first for one job.
+             CREATE INDEX IF NOT EXISTS idx_job_runs_job ON job_runs(job_id, started_at DESC);
+             PRAGMA user_version={LATEST_SCHEMA_VERSION};"
+        ))
+        .map_err(|error| error.to_string())?;
         tx.commit().map_err(|error| error.to_string())?;
     }
     Ok(())

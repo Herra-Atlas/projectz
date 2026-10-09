@@ -103,8 +103,9 @@ impl AiRuntime {
     fn approval_gate(
         &self,
         mode: crate::ai::tools::PermissionMode,
+        access: crate::ai::tools::AccessSet,
     ) -> crate::ai::tools::ApprovalGate {
-        self.approval.with_mode(mode)
+        self.approval.with_mode(mode).with_access(access)
     }
 
     /// Records the user's answer to a pending tool prompt.
@@ -197,16 +198,20 @@ impl AiRuntime {
         }
     }
 
-    pub fn cancel_chat(&self, run_id: &str) -> bool {
+    /// Stops a run by setting its cancel flag.
+    ///
+    /// **A local run's server is left up on purpose.** Stopping a reply and
+    /// unloading the model are two different wishes, and killing `llama-server`
+    /// to halt one generation made "stop" mean "unload": the user lost a model
+    /// they had waited to load and had to pay for it again on the next message.
+    /// The loop notices the flag between reads and returns, which drops the
+    /// response stream -- the closed stream is what ends the generation.
+    pub fn cancel_chat(&self, run_id: &str) {
         if let Some(cancelled) = self.active_runs.lock().unwrap().get(run_id) {
             cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         self.local_completions.lock().unwrap().remove(run_id);
-        let was_local = self.local_runs.lock().unwrap().remove(run_id);
-        if was_local {
-            self.local_models.unload();
-        }
-        was_local
+        self.local_runs.lock().unwrap().remove(run_id);
     }
 
     fn set_local_completion_id(&self, run_id: &str, completion_id: String) {
@@ -613,7 +618,7 @@ impl AiRuntime {
             &run_id_clone,
             session_id.as_deref(),
             Some(&self.database),
-            self.approval_gate(request.permission),
+            self.approval_gate(request.permission, request.access.unwrap_or_default()),
             cancelled,
             subagent_default,
             // The top-level run may delegate; a sub-agent's own run passes false.

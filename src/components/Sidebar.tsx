@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ChartNoAxesColumn, ChartSpline, Check, ChevronLeft, ChevronRight, CircleDot, Database, MessageSquareText, MoreHorizontal, Pin, Pencil, Settings2, Trash2, X } from "lucide-react";
+import { ChartNoAxesColumn, ChartSpline, Check, ChevronLeft, ChevronRight, CircleDot, Clock, Database, MessageSquareText, MoreHorizontal, Pin, Pencil, Settings2, Trash2, X } from "lucide-react";
 import type { ChatSessionHeader, SessionActivity, SessionRunStatus } from "../features/chat/types";
 import { SESSION_DOT_COLORS, SESSION_DOT_DEFAULT, SESSION_DOT_DONE, SESSION_DOT_ERROR } from "../features/chat/types";
 import LiveSpinner from "./LiveSpinner";
@@ -22,6 +22,9 @@ const DOT_SUBMENU_WIDTH = 152;
  * disagreeing with the reader about what day it is.
  */
 function sessionGroupLabel(session: ChatSessionHeader): string {
+  // Jobs first, and before the pin: a job run belongs in its own section whatever
+  // else is true of it, and the list is ordered so the section is contiguous.
+  if (session.kind === "job") return "Jobs";
   if (session.pinned) return "Pinned";
   const updated = new Date(session.updatedAt);
   if (Number.isNaN(updated.getTime())) return "Earlier";
@@ -63,8 +66,8 @@ type SidebarProps = {
    */
   onOpenOverview: (id: string) => void;
   onSettings: () => void;
-  view: "chat" | "database" | "statistics";
-  onViewChange: (view: "chat" | "database" | "statistics") => void;
+  view: "chat" | "database" | "statistics" | "jobs";
+  onViewChange: (view: "chat" | "database" | "statistics" | "jobs") => void;
 };
 
 /** One primary-nav entry. The active treatment and the collapsed layout are
@@ -281,6 +284,13 @@ export default function Sidebar({
           active={view === "statistics"}
           collapsed={collapsed}
           onClick={() => onViewChange("statistics")}
+        />
+        <NavButton
+          icon={<Clock size={16} />}
+          label="Jobs"
+          active={view === "jobs"}
+          collapsed={collapsed}
+          onClick={() => onViewChange("jobs")}
         />
       </nav>
 

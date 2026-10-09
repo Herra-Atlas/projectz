@@ -4,6 +4,45 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#0e0e10" />
+    <script>
+      /*
+        Puts the saved theme on the document before the first paint.
+
+        The database cannot be read this early, so the value comes from the
+        mirror `useAppearance` writes alongside it. Without this a light theme
+        would open dark and correct itself a moment later, on every launch.
+
+        Deliberately tiny and dependency-free: it runs before anything else, and
+        anything it imported would be a second thing that could fail here. It
+        knows nothing about the preset table -- the mirror already carries the
+        resolved colour for each theme.
+      */
+      (function () {
+        try {
+          var saved = JSON.parse(localStorage.getItem("projectz.appearance.v1") || "null");
+          var choice = saved && saved.theme ? saved.theme : "dark";
+          var theme =
+            choice === "system"
+              ? window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "dark"
+                : "light"
+              : choice;
+          var root = document.documentElement;
+          root.dataset.theme = theme;
+          var entry = saved && saved.themes ? saved.themes[theme] : null;
+          if (entry) {
+            root.style.setProperty("--accent", entry.accent);
+            root.style.setProperty("--accent-ink", entry.ink);
+          }
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) meta.setAttribute("content", theme === "light" || theme === "paper" ? "#fbfbfc" : "#0e0e10");
+        } catch (error) {
+          /* A missing or malformed mirror is not a reason to fail to render:
+             the app starts on the default theme and corrects itself once the
+             database is open. */
+        }
+      })();
+    </script>
     <title>ProjectZ · AI workspace</title>
   </head>
 

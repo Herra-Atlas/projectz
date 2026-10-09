@@ -16,15 +16,18 @@ mod diff;
 mod fetch;
 mod file;
 mod output;
+mod access;
 mod policy;
 mod registry;
 mod run;
+mod schedule;
 mod search;
 pub mod skills;
 mod terminal;
 mod websearch;
 mod write;
 
+pub use access::AccessSet;
 pub use approval::{Approval, ApprovalGate, ApprovalRequest};
 pub use cache::ToolCache;
 pub use policy::{Decision, PermissionMode};
@@ -109,6 +112,12 @@ pub fn registry_for_with(
     if allow_subagents && mode == ToolMode::Agent {
         registry.add(agent::SUB_AGENT);
     }
+    // Agent-only for the same reason, and one capability narrower: scheduling is only
+    // reachable by a run whose access set carries `jobs`, so a job's own run never sees
+    // this tool and scheduled work cannot schedule more of itself.
+    if mode == ToolMode::Agent {
+        registry.add(schedule::SCHEDULE_JOB);
+    }
     if web_search_enabled {
         registry.add(websearch::spec());
         // Fetching a specific URL only makes sense once searching is on: a model
@@ -191,6 +200,7 @@ mod tests {
                 "list_dir",
                 "read_file",
                 "run_terminal",
+                "schedule_job",
                 "search_files",
                 "search_web",
                 "skill_manage",
@@ -241,6 +251,7 @@ mod tests {
                 "list_dir",
                 "read_file",
                 "run_terminal",
+                "schedule_job",
                 "search_files",
                 "search_web",
                 "skill_manage",
@@ -258,6 +269,7 @@ mod tests {
                 "list_dir",
                 "read_file",
                 "run_terminal",
+                "schedule_job",
                 "search_files",
                 "skill_manage",
                 "skill_read",

@@ -3,9 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen } from "@tauri-apps/api/event";
 import { ArrowUp, Check, Clipboard, LoaderCircle, Paperclip, RotateCcw, SkipForward, Square, X } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import ActivityPanel from "./ActivityPanel";
+import { Markdown } from "./Markdown";
 import FileChanges from "./FileChanges";
 import ModelSwitcher from "../../components/ModelSwitcher";
 import ModeSelector from "../../components/ModeSelector";
@@ -261,6 +260,30 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   const sessionRunIdsRef = useRef<Map<string, string>>(new Map());
   const streamTextRef = useRef("");
   const streamReasoningRef = useRef("");
+  const streamActivityRef = useRef<ActivityStep[]>([]);
+  // One paint per frame. Streamed tokens arrive faster than the display
+  // refreshes, and drawing each one re-rendered the whole chat -- which is what
+  // made the text arrive in stutters and starved the "Worked for" clock beside
+  // it. The newest values are kept in the refs above and painted together on the
+  // next animation frame, so a burst of tokens becomes a single update.
+  const streamFrameRef = useRef<number | null>(null);
+  const scheduleStreamFlush = useCallback(() => {
+    if (streamFrameRef.current !== null) return;
+    streamFrameRef.current = window.requestAnimationFrame(() => {
+      streamFrameRef.current = null;
+      setStreamText(streamTextRef.current);
+      setStreamReasoning(streamReasoningRef.current);
+      setStreamActivity(streamActivityRef.current);
+    });
+  }, []);
+  // Clears the queued frame's activity alongside the state, so a run that has
+  // just finished or been stopped cannot be redrawn by a frame scheduled before
+  // it ended. The text refs are cleared first at every call site, so a frame that
+  // still fires paints empty values rather than the reply it was holding.
+  const resetStreamActivity = useCallback(() => {
+    streamActivityRef.current = [];
+    setStreamActivity([]);
+  }, []);
   const listenerReadyRef = useRef<Promise<void>>(Promise.resolve());
   const onActivityRef = useRef(onActivity);
   onActivityRef.current = onActivity;
@@ -310,7 +333,13 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       </a>
     ),
   }), [onOpenUrl]);
-  const renderMarkdown = (text: string) => <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{text}</ReactMarkdown>;
+  // Stable identity, and it returns a memoised `Markdown`: a rerender driven by
+  // the streaming reply therefore leaves every finished reply's parse untouched
+  // instead of re-rendering it through `react-markdown` on each token.
+  const renderMarkdown = useCallback(
+    (text: string) => <Markdown text={text} components={markdownComponents} />,
+    [markdownComponents],
+  );
 
   useEffect(() => {
     // `activeId` rather than `session?.id`: the two disagree exactly while a
@@ -359,6 +388,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     // Restored from the run rather than kept in state alone: a reply that kept
     // going while the user read another session has to come back with the steps
     // it took, or switching away would silently drop the record of them.
+    streamActivityRef.current = run?.activity ?? [];
     setStreamActivity(run?.activity ?? []);
     setSearching(run?.searching === true);
     setRunning(Boolean(run));
@@ -530,7 +560,10 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
 
         const runId = sessionRunIdsRef.current.get(sessionId);
         const live = runId ? backgroundRunsRef.current.get(runId) : undefined;
-        if (live && fill(live.activity)) setStreamActivity([...live.activity]);
+        if (live && fill(live.activity)) {
+          streamActivityRef.current = [...live.activity];
+          scheduleStreamFlush();
+        }
 
         const next = [...messagesRef.current];
         for (let index = next.length - 1; index >= 0; index--) {
@@ -651,8 +684,8 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         run.reasoning += payload.text;
         if (isActive) {
           streamReasoningRef.current = run.reasoning;
-          setStreamReasoning(run.reasoning);
-          setStreamActivity([...steps]);
+          streamActivityRef.current = [...steps];
+          scheduleStreamFlush();
         }
       } else if (payload.kind === "reasoning_segment" && payload.text) {
         // The backend closed a stretch of thinking, which is the only moment its
@@ -666,7 +699,10 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         const segment: ActivityStep = { kind: "thought", text: payload.text, seconds, running: false };
         if (last?.kind === "thought" && last.running) steps[steps.length - 1] = segment;
         else steps.push(segment);
-        if (isActive) setStreamActivity([...steps]);
+        if (isActive) {
+          streamActivityRef.current = [...steps];
+          scheduleStreamFlush();
+        }
       } else if (payload.kind === "tool_call" && payload.metrics) {
         // A call the model has asked for but not yet run. The row appears now so
         // a slow tool is visibly in flight rather than absent until it returns.
@@ -681,7 +717,10 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           running: true,
           startedAt: Date.now(),
         });
-        if (isActive) setStreamActivity([...steps]);
+        if (isActive) {
+          streamActivityRef.current = [...steps];
+          scheduleStreamFlush();
+        }
       } else if (payload.kind === "tool_result" && payload.metrics) {
         // Closes the row the matching `tool_call` opened. Matched on the tool
         // name rather than the index: indices restart every round, and two
@@ -727,14 +766,17 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
             ...(metrics.created ? { created: true } : {}),
           });
         }
-        if (isActive) setStreamActivity([...steps]);
+        if (isActive) {
+          streamActivityRef.current = [...steps];
+          scheduleStreamFlush();
+        }
       } else if (payload.kind === "delta" && payload.text) {
         if (!run.generationStartedAt) run.generationStartedAt = performance.now();
         run.text += payload.text;
         if (isActive) {
           generationStartedAtRef.current = run.generationStartedAt;
           streamTextRef.current = run.text;
-          setStreamText(run.text);
+          scheduleStreamFlush();
         }
       } else if (payload.kind === "completed") {
         const completedAt = performance.now();
@@ -765,7 +807,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           streamReasoningRef.current = "";
           setStreamText("");
           setStreamReasoning("");
-          setStreamActivity([]);
+          resetStreamActivity();
           setSearching(false);
           setRunning(false);
           setMessages(next);
@@ -802,7 +844,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           streamReasoningRef.current = "";
           setStreamText("");
           setStreamReasoning("");
-          setStreamActivity([]);
+          resetStreamActivity();
         }
         drainQueued(run.sessionId, base);
       } else if (payload.kind === "failed") {
@@ -818,7 +860,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           streamReasoningRef.current = "";
           setStreamText("");
           setStreamReasoning("");
-          setStreamActivity([]);
+          resetStreamActivity();
           setSearching(false);
           setRunning(false);
           setMessages(next);
@@ -899,7 +941,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     streamReasoningRef.current = "";
     setStreamText("");
     setStreamReasoning("");
-    setStreamActivity([]);
+    resetStreamActivity();
     setSearching(false);
     setRunning(true);
     // A queued message is sent from a draft the user already cleared, so the field
@@ -1143,7 +1185,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         streamReasoningRef.current = "";
         setStreamText("");
         setStreamReasoning("");
-        setStreamActivity([]);
+        resetStreamActivity();
         setSearching(false);
       }
     } else if (run && run.sessionId === sessionIdRef.current) {
@@ -1151,7 +1193,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       streamReasoningRef.current = "";
       setStreamText("");
       setStreamReasoning("");
-      setStreamActivity([]);
+      resetStreamActivity();
       setSearching(false);
     }
     void invoke("ai_cancel_chat", { runId });

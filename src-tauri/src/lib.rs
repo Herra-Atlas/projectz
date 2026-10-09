@@ -1,17 +1,49 @@
 mod ai;
 mod commands;
 mod database;
+mod jobs;
 mod observation;
 mod panel;
 mod websearch;
 mod window;
 
 use tauri::{
-    menu::{Menu, MenuItem},
-    tray::TrayIconBuilder,
-    Manager, RunEvent,
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
+    tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
+    Emitter, Manager, RunEvent,
 };
 use tracing_subscriber::EnvFilter;
+
+/// The tray's jobs item, held in app state.
+///
+/// Kept here so anything that pauses or resumes the scheduler can bring the menu
+/// up to date, not only a click on the menu itself: the Jobs screen's own Pause all
+/// and the tray are two doors into one switch, and a menu that only knows about its
+/// own door tells the user the wrong thing.
+#[derive(Clone)]
+pub struct JobsToggle(pub CheckMenuItem<tauri::Wry>);
+
+/// Puts the scheduler's paused state on the tray item.
+pub fn sync_jobs_toggle(app: &tauri::AppHandle, paused: bool) {
+    let Some(item) = app.try_state::<JobsToggle>() else {
+        return;
+    };
+    let _ = item.0.set_checked(!paused);
+    let _ = item.0.set_text(if paused { "Jobs paused" } else { "Jobs running" });
+}
+
+/// Brings the main window up and in front.
+///
+/// Shared by the tray's Show item and by double-clicking the icon, so both arrive
+/// the same way -- a window minimised from the taskbar comes back rather than being
+/// shown while still minimised.
+fn show_main(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -47,26 +79,60 @@ pub fn run() {
             // resolves against the folder they picked last time rather than the
             // app's launch directory.
             runtime.restore_workspace();
+            // Started before the runtime is managed, so the scheduler task holds
+            // its own clone of it rather than reaching back into app state: a run
+            // it starts needs the runtime while a command may be using the same
+            // entry, and a clone is what keeps those two from borrowing one.
+            let scheduler = jobs::Scheduler::start(app.handle().clone(), runtime.clone());
             app.manage(runtime);
+            app.manage(scheduler);
             // The panel browser's history, installed before anything can ask for
             // a browser so the first `panel_browser_open` finds live state rather
             // than reporting a page it then forgets.
             panel::browser::install(app.handle());
 
             let show = MenuItem::with_id(app, "show", "Show ProjectZ", true, None::<&str>)?;
+            // A check item that states the situation rather than the action: the
+            // label reads "Jobs running" or "Jobs paused", the tick shows which,
+            // and clicking flips it. An item labelled with what it *does* leaves
+            // the reader to work out what is true now.
+            let jobs_item =
+                CheckMenuItem::with_id(app, "jobs", "Jobs running", true, true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let menu = Menu::with_items(
+                app,
+                &[
+                    &show,
+                    &PredefinedMenuItem::separator(app)?,
+                    &jobs_item,
+                    &PredefinedMenuItem::separator(app)?,
+                    &quit,
+                ],
+            )?;
             let mut tray = TrayIconBuilder::new().menu(&menu);
             if let Some(icon) = app.default_window_icon() {
                 tray = tray.icon(icon.clone());
             }
-            tray.show_menu_on_left_click(true)
-                .on_menu_event(|app, event| match event.id().as_ref() {
-                    "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
+            // The menu is on the right button and the left one opens the window, the
+            // way a tray icon is normally read. Left click opening the menu as well
+            // would mean a double click never reaches the window at all: the first
+            // click would raise a menu over it.
+            let jobs_toggle = jobs_item.clone();
+            app.manage(JobsToggle(jobs_toggle.clone()));
+            tray.show_menu_on_left_click(false)
+                .on_menu_event(move |app, event| match event.id().as_ref() {
+                    "show" => show_main(app),
+                    "jobs" => {
+                        let Some(scheduler) = app.try_state::<jobs::Scheduler>() else {
+                            return;
+                        };
+                        let pause = !scheduler.is_paused();
+                        scheduler.set_paused(pause);
+                        sync_jobs_toggle(app, pause);
+                        // The Jobs screen reads its state from the database, so it
+                        // needs telling that the switch moved -- and this is the same
+                        // event a run emits, which it already listens for.
+                        let _ = app.emit("job-event", serde_json::json!({ "status": "paused", "paused": pause }));
                     }
                     "quit" => {
                         if let Some(runtime) = app.try_state::<ai::runtime::AiRuntime>() {
@@ -83,6 +149,15 @@ pub fn run() {
                         app.exit(0);
                     }
                     _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::DoubleClick {
+                        button: MouseButton::Left,
+                        ..
+                    } = event
+                    {
+                        show_main(tray.app_handle());
+                    }
                 })
                 .build(app)?;
 
@@ -113,6 +188,16 @@ pub fn run() {
             commands::skills_update,
             commands::skills_set_enabled,
             commands::skills_delete,
+            commands::job_list,
+            commands::job_create,
+            commands::job_update,
+            commands::job_delete,
+            commands::job_set_enabled,
+            commands::job_runs,
+            commands::job_run_now,
+            commands::job_scheduler_status,
+            commands::job_scheduler_pause,
+            commands::job_machine_totals,
             commands::database_initialize,
             commands::database_frontend_imported,
             commands::database_import_frontend,

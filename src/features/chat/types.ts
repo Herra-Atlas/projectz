@@ -247,9 +247,10 @@ export type ChatSessionHeader = {
    * each query filters on this rather than one list being asked to show both.
    *
    * `undefined` reads as `chat`, which is what every conversation saved before
-   * sub-agents existed is.
+   * sub-agents existed is. `job` is a session a scheduled job ran as: listed like a
+   * chat, because its transcript is worth reopening, but started by nobody.
    */
-  kind?: "chat" | "subagent";
+  kind?: "chat" | "subagent" | "job";
   /**
    * The conversation that spawned this run, present only when `kind` is
    * `subagent`. The panel groups runs under the chat they came from.

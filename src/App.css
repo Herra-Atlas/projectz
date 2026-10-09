@@ -27,7 +27,23 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   font-optical-sizing: auto;
+}
 
+/*
+  The palettes.
+
+  `:root` carries the default, so an app that has never chosen a theme renders
+  exactly as it did before this existed. Every other palette declares the same
+  names in the same roles.
+
+  `[data-theme=...]` matches a nested element as well as the document, and that
+  is deliberate: it is what lets the settings page draw a *real* sample of each
+  theme. The preview in the picker is styled by the same rules that style the
+  app, so a theme cannot be added without its preview being correct and a
+  preview cannot drift from the thing it is previewing.
+*/
+:root,
+[data-theme="dark"] {
   /* Surfaces, darkest to lightest. Each step is a small, even lift so nesting
      reads as depth rather than as separate materials: page is the window, rail
      the sidebar and side panels, panel a control or card, raised a hover or an
@@ -77,6 +93,174 @@
   --series-4: #93c98d;
   --series-5: #dc93ac;
   --series-6: #cdc37e;
+}
+
+/*
+  The light theme. The same token names in the same roles, with the surface
+  scale inverted: on a light ground `raised` steps *down* toward the content
+  rather than up, which is what elevation looks like when the page is the
+  brightest thing on screen.
+
+  Chosen per token rather than derived by inverting the dark values. An
+  inversion of near-black is not the white a page should be, and a green that
+  reads as "added" on black is unreadable on white -- so the semantic colours
+  are re-picked for a light ground rather than reused.
+
+  Selected by `data-theme` on the document element, which `useAppearance` sets.
+  The dark values above stay in `:root` as the default, so an app that has never
+  chosen a theme renders exactly as it did before this existed.
+*/
+[data-theme="light"] {
+  color-scheme: light;
+  /* The page is a shade off white and the panels are pure white, which is the
+     light theme's version of the dark build's lift: a control or a card reads as
+     raised because it is the brightest thing against its ground. Making both
+     white would leave the composer and every settings panel visible only by
+     their border. */
+  --page: #f4f5f7;
+  --rail: #ebeef2;
+  --panel: #ffffff;
+  --raised: #e9ecf1;
+  --line: #dee2e9;
+  --line-strong: #c2c9d4;
+  --text: #17171a;
+  --muted: #55555e;
+  --quiet: #86868f;
+  /* A deeper amber than the dark theme's. The accent is used as text in several
+     places -- the active nav item, the mode label, a focus ring -- and the pale
+     value that reads well as a fill on near-black is unreadable on white. A
+     preset or custom accent overwrites this from the document element. */
+  --accent: #a9660f;
+  --accent-ink: #ffffff;
+  --danger: #bf4232;
+  --added: #2f7d3a;
+  --removed: #b35242;
+  --series-1: #a9660f;
+  --series-2: #1f6fbf;
+  --series-3: #6d3fd1;
+  --series-4: #2f7d3a;
+  --series-5: #b83f63;
+  --series-6: #8a6d1f;
+}
+
+/*
+  Midnight: the dark palette taken down to near-black, for an OLED panel or a
+  dark room. The surfaces sit closer to black and the text is pushed brighter,
+  which keeps the same separation between them across a smaller range.
+*/
+[data-theme="midnight"] {
+  color-scheme: dark;
+  --page: #000000;
+  --rail: #08080a;
+  --panel: #0f0f12;
+  --raised: #1a1a1f;
+  --line: #26262d;
+  --line-strong: #3a3a44;
+  --text: #f6f6f8;
+  --muted: #a9a9b4;
+  --quiet: #70707c;
+}
+
+/*
+  Slate: cool blue-grey rather than neutral. The one palette with a temperature
+  of its own -- the rest are warm-neutral -- and the one for someone who wants
+  the window to read as an instrument rather than as a page.
+*/
+[data-theme="slate"] {
+  color-scheme: dark;
+  --page: #0d1117;
+  --rail: #121820;
+  --panel: #161d26;
+  --raised: #1f2833;
+  --line: #273040;
+  --line-strong: #38445a;
+  --text: #e7edf5;
+  --muted: #9ba8ba;
+  --quiet: #6c7a8d;
+}
+
+/*
+  Paper: a warm off-white. The light palette with the blue taken out, which is
+  what makes a long read easier on the eyes than a pure white ground.
+*/
+[data-theme="paper"] {
+  color-scheme: light;
+  --page: #f6f1e7;
+  --rail: #efe8da;
+  --panel: #fffdf8;
+  --raised: #eae3d4;
+  --line: #e0d8c7;
+  --line-strong: #c9bda6;
+  --text: #23201a;
+  --muted: #5f594e;
+  --quiet: #8d8677;
+  --danger: #b0432f;
+  --added: #2f7d3a;
+  --removed: #a8503c;
+  --series-1: #a9660f;
+  --series-2: #1f6fbf;
+  --series-3: #6d3fd1;
+  --series-4: #2f7d3a;
+  --series-5: #b83f63;
+  --series-6: #8a6d1f;
+}
+
+/*
+  Forest: the dark palette with a green cast. A nod to what this app looked like
+  before the tokens were neutral -- kept because a tinted dark ground is easier on
+  the eye at night than a neutral one for some people, not as a revival.
+*/
+[data-theme="forest"] {
+  color-scheme: dark;
+  --page: #0c120f;
+  --rail: #111815;
+  --panel: #151d19;
+  --raised: #1d2721;
+  --line: #27332c;
+  --line-strong: #3a4a40;
+  --text: #e6efe9;
+  --muted: #9aab9f;
+  --quiet: #6b7a70;
+}
+
+/* Plum: the dark palette with a violet cast. The cool counterpart to Forest. */
+[data-theme="plum"] {
+  color-scheme: dark;
+  --page: #0f0c14;
+  --rail: #15111c;
+  --panel: #1a1524;
+  --raised: #231c30;
+  --line: #2e2540;
+  --line-strong: #413356;
+  --text: #ece7f3;
+  --muted: #a89bbd;
+  --quiet: #766a8c;
+}
+
+/*
+  Mist: a cool light palette. Light and Paper are both warm-neutral, so this is
+  the one light ground with a blue cast -- the counterpart to Slate.
+*/
+[data-theme="mist"] {
+  color-scheme: light;
+  --page: #f5f7fa;
+  --rail: #eceff4;
+  --panel: #ffffff;
+  --raised: #e5e9f0;
+  --line: #dde2ea;
+  --line-strong: #c3cbd8;
+  --text: #1a1f26;
+  --muted: #566072;
+  --quiet: #8792a3;
+  --danger: #bf4232;
+  --added: #2f7d3a;
+  --removed: #b35242;
+  --series-1: #a9660f;
+  --series-2: #1f6fbf;
+  --series-3: #6d3fd1;
+  --series-4: #2f7d3a;
+  --series-5: #b83f63;
+  --series-6: #8a6d1f;
 }
 
 *,

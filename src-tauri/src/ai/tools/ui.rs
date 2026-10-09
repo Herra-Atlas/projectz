@@ -209,6 +209,12 @@ fn detail_for(tool: &str, arguments: &Value) -> String {
             })
             .unwrap_or_default();
     }
+    // A scheduled job is named by the model that created it, and that name is what
+    // the user will look for in the Jobs screen -- so the row is the name, not the
+    // instruction it will run hours from now.
+    if tool == "schedule_job" {
+        return string_at(arguments, "name").unwrap_or_default();
+    }
     let fields: &[&str] = if matches!(tool, "search_web" | "web_fetch" | "run_terminal") {
         &["query", "url", "command", "path", "pattern"]
     } else {
@@ -243,6 +249,7 @@ fn label_for(tool: &str) -> &'static str {
         "skill_read" => "Read skill",
         "skill_manage" => "Save skill",
         "sub_agent" => "Run agent",
+        "schedule_job" => "Schedule job",
         _ => "Tool call",
     }
 }

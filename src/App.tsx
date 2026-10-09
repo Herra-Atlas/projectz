@@ -11,11 +11,13 @@ import ChatPage from "./pages/chat/ChatPage";
 import SettingsModal from "./components/SettingsModal";
 import StartupScreen from "./components/StartupScreen";
 import DatabasePage from "./pages/DatabasePage";
+import JobsPage from "./pages/jobs/JobsPage";
 import WorkspacePicker from "./components/WorkspacePicker";
 import RightPanel from "./components/rightPanel/RightPanel";
 import { useChatSessions } from "./features/chat/useChatSessions";
 import { chatRepository } from "./features/chat/chatRepository";
 import { usePreferences } from "./features/models/usePreferences";
+import { useAppearance } from "./features/appearance/useAppearance";
 import { useRightPanel } from "./features/rightPanel/useRightPanel";
 import { useWorkspaces, workspaceLabel } from "./features/workspace/useWorkspaces";
 import type { ChatMessage, SessionActivity, SessionRunStatus } from "./features/chat/types";
@@ -60,7 +62,7 @@ function AppShell() {
   const [startupError, setStartupError] = useState("");
   const [sessionReloadKey, setSessionReloadKey] = useState(0);
   const [startupProgress, setStartupProgress] = useState<StartupProgress>({ phase: "database", message: "Opening database", progress: 4 });
-  const [view, setView] = useState<"chat" | "database" | "statistics">("chat");
+  const [view, setView] = useState<"chat" | "database" | "statistics" | "jobs">("chat");
   const [endpointId, setEndpointId] = useState("");
   const [model, setModel] = useState("");
   const [localModelId, setLocalModelId] = useState("");
@@ -69,7 +71,7 @@ function AppShell() {
   // The corner stack lives in its own module rather than here, so a view like the
   // settings modal can be handed a `notify` without the stack's shape being a
   // detail of the app shell. `App` renders it once and owns the wiring.
-  const { notifications, notify, dismiss: dismissNotification, clearKey, clearWhere } = useNotifications();
+  const { notifications, notify, dismiss: dismissNotification } = useNotifications();
   const { copiedId: copiedNotificationId, markCopied } = useCopiedNotification();
   const [sessionActivity, setSessionActivity] = useState<SessionActivity>({});
   // The conversation the right panel's Overview view is showing, plus a nonce so
@@ -81,6 +83,10 @@ function AppShell() {
   // Preferences live here so the chat view and the settings modal always agree
   // on the title-model choice without one re-reading a stale copy.
   const { preferences, savePreferences } = usePreferences(startupDone);
+  // Theme and accent, applied to the document element rather than passed to the
+  // tree: every screen already reads the tokens they set, so this is what makes
+  // the change cover surfaces this component has never heard of.
+  const { appearance, saveAppearance } = useAppearance(startupDone);
   const rightPanel = useRightPanel();
   // The file the transcript asked the panel to show, and the acknowledgement that
   // clears it. Held here rather than inside `RightPanel` because the request comes
@@ -181,6 +187,7 @@ function AppShell() {
     let mounted = true;
     let unlistenProgress: (() => void) | null = null;
     let unlistenLocal: (() => void) | null = null;
+    let unlistenJob: (() => void) | null = null;
     void Promise.all([
       listen<StartupProgress>("startup-progress", (event) => setStartupProgress(event.payload)).then((unlisten) => {
         if (mounted) unlistenProgress = unlisten;
@@ -190,21 +197,27 @@ function AppShell() {
         const payload = event.payload;
         if (payload.kind === "loading") {
           setLocalRuntime((current) => ({ ...current, loading_model_id: payload.modelId ?? null }));
-          notify("loading", "Loading local model…", "local-model-loading");
         } else if (payload.kind === "loaded") {
           setLocalRuntime((current) => ({ ...current, loaded_model_id: payload.modelId ?? null, loading_model_id: null }));
-          clearKey("local-model-loading");
           notify("success", "Local model ready");
         } else if (payload.kind === "unloaded") {
           setLocalRuntime((current) => ({ ...current, loaded_model_id: null, loading_model_id: null }));
-          clearWhere((notification) => notification.key?.startsWith("local-model:") === true);
         } else {
           setLocalRuntime((current) => ({ ...current, loaded_model_id: null, loading_model_id: null }));
-          clearKey("local-model-loading");
           notify("error", payload.message || "Local model failed to load");
         }
       }).then((unlisten) => {
         if (mounted) unlistenLocal = unlisten;
+        else unlisten();
+      }),
+      // A scheduled run writes its own transcript with no window watching, so this
+      // is the only word the sidebar gets that a conversation it has never heard of
+      // now exists. Without it a finished job appears to have produced nothing until
+      // something else happens to reload the list.
+      listen("job-event", () => {
+        if (mounted) setSessionReloadKey((key) => key + 1);
+      }).then((unlisten) => {
+        if (mounted) unlistenJob = unlisten;
         else unlisten();
       }),
     ]).then(() => mounted ? invoke("database_initialize") : Promise.reject(new Error("Startup cancelled"))).then(() => {
@@ -221,8 +234,9 @@ function AppShell() {
       mounted = false;
       unlistenProgress?.();
       unlistenLocal?.();
+      unlistenJob?.();
     };
-  }, [clearKey, notify]);
+  }, [notify]);
 
   useEffect(() => {
     if (!startupDone) return;
@@ -265,9 +279,7 @@ function AppShell() {
     try {
       await invoke("local_model_unload");
       setLocalRuntime((current) => ({ ...current, loaded_model_id: null, loading_model_id: null }));
-      clearWhere((notification) => notification.key?.startsWith("local-model:") === true);
     } catch (reason) {
-      clearKey("local-model-loading");
       notify("error", String(reason));
     }
   };
@@ -301,6 +313,7 @@ function AppShell() {
         onViewChange={setView}
       />
       {view === "database" && <div className="flex min-w-0 flex-1 flex-col"><DatabasePage refreshKey={endpointRefreshKey} /></div>}
+      {view === "jobs" && <div className="flex min-w-0 flex-1 flex-col"><JobsPage notify={notify} onOpenSession={(id) => { void chat.selectSession(id); setView("chat"); }} /></div>}
       {view === "statistics" && <div className="flex min-w-0 flex-1 flex-col"><Suspense fallback={<PageFallback />}><StatisticsPage refreshKey={endpointRefreshKey} sessions={chat.sessions} onOpenOverview={handleOpenOverview} /></Suspense></div>}
       <div className={`min-w-0 flex-1 flex-col ${view === "chat" ? "flex" : "hidden"}`}>
         {view === "chat" && <>
@@ -396,7 +409,7 @@ function AppShell() {
       />
 
       <NotificationStack notifications={notifications} copiedId={copiedNotificationId} onDismiss={dismissNotification} onCopy={copyNotification} />
-      <SettingsModal open={settingsOpen} onClose={() => { setSettingsOpen(false); setSettingsRefreshKey((key) => key + 1); }} onEndpointsChanged={() => setEndpointRefreshKey((key) => key + 1)} onClearSessions={chat.clearSessions} preferences={preferences} onPreferencesChange={savePreferences} notify={notify} />
+      <SettingsModal open={settingsOpen} onClose={() => { setSettingsOpen(false); setSettingsRefreshKey((key) => key + 1); }} onEndpointsChanged={() => setEndpointRefreshKey((key) => key + 1)} onClearSessions={chat.clearSessions} preferences={preferences} onPreferencesChange={savePreferences} appearance={appearance} onAppearanceChange={saveAppearance} notify={notify} />
     </div>
   );
 }

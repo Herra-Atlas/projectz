@@ -115,6 +115,14 @@ struct ProcessState {
     child: Option<Child>,
     loaded_model_id: Option<String>,
     loading_model_id: Option<String>,
+    /// Whether a scheduled job, rather than the interface, started this model.
+    ///
+    /// It decides who may stop it. A model the user asked for is theirs, so a job
+    /// that happens to pass through it must not switch it off underneath them --
+    /// and, the other way round, a model a job started for a run that has finished
+    /// is the job's to release. Tracked here so it is cleared with the process:
+    /// nothing is loaded, so nothing was loaded for a job.
+    loaded_for_job: bool,
     logs: VecDeque<String>,
 }
 
@@ -371,6 +379,35 @@ impl LocalModelManager {
         stop_process(&mut process);
     }
 
+    /// Records that a scheduled job started the loaded model.
+    ///
+    /// Called by the job runner after a load it performed, so the run that is last
+    /// to need the model may release it -- including when a *later* job is the one
+    /// that ends, having found the model already up.
+    pub fn mark_loaded_for_job(&self) {
+        if let Ok(mut process) = self.process.lock() {
+            process.loaded_for_job = true;
+        }
+    }
+
+    /// Records that the interface, not a job, started the loaded model.
+    ///
+    /// The user asking for a model outranks the job that may have started it
+    /// earlier: from here on a scheduled run leaves it running.
+    pub fn mark_loaded_for_user(&self) {
+        if let Ok(mut process) = self.process.lock() {
+            process.loaded_for_job = false;
+        }
+    }
+
+    /// Whether a scheduled job, rather than the interface, started the loaded model.
+    pub fn loaded_for_job(&self) -> bool {
+        self.process
+            .lock()
+            .map(|process| process.loaded_for_job)
+            .unwrap_or(false)
+    }
+
     /// Stop a model if it is the one running, leaving any other alone.
     ///
     /// Used when a model's engine changes: the process in flight was started by
@@ -588,6 +625,7 @@ fn stop_process(process: &mut ProcessState) {
     }
     process.loaded_model_id = None;
     process.loading_model_id = None;
+    process.loaded_for_job = false;
 }
 
 fn port_is_available(port: u16) -> bool {

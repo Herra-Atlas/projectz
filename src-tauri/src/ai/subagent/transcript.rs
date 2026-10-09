@@ -122,7 +122,12 @@ fn title_from(prompt: &str) -> String {
 }
 
 /// Folds the event stream into the activity steps the panel renders.
-fn steps_from(events: &[Stamped]) -> Vec<Value> {
+///
+/// Shared with the job runner, which has no frontend to assemble them: a scheduled
+/// run collects the same events its own way and folds them with this, so a job's
+/// transcript shows the tool calls and thoughts the run actually performed rather
+/// than only its final answer.
+pub fn steps_from(events: &[Stamped]) -> Vec<Value> {
     let mut steps: Vec<Value> = Vec::new();
     // When the currently-open thought began, so its duration can be measured
     // against the moment it closed. `None` when no thought is open.

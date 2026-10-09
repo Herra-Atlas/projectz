@@ -119,7 +119,12 @@ pub async fn stream_chat(
         .build()
         .map_err(|error| error.to_string())?;
     let payload = prepare_messages(messages, attachments)?;
-    let registry = crate::ai::tools::registry_for_with(mode, web_search_enabled, allow_subagents);
+    // Filtered by the run's access set before anything else sees it, so a
+    // capability this run does not hold is never advertised and cannot be asked
+    // for. A call that arrives anyway is refused by `policy` in the loop; hiding
+    // is the first half, refusing is the backstop.
+    let mut registry = crate::ai::tools::registry_for_with(mode, web_search_enabled, allow_subagents);
+    registry.retain(|name| approval.access().is_allowed(name));
 
     let session = session_id.unwrap_or_default();
     let cache = session_id
@@ -161,6 +166,8 @@ pub async fn stream_chat(
         approval: approval.clone(),
         emit: Arc::clone(&on_event),
         subagent_default,
+        // Counted per run, so the ceiling is on what this reply may arrange.
+        jobs_created: std::sync::atomic::AtomicUsize::new(0),
     });
     for _ in 0..MAX_TOOL_ROUNDS {
         if cancelled.load(Ordering::Relaxed) {
@@ -582,6 +589,28 @@ pub(crate) fn subagent_started_event(
     }
 }
 
+/// A provider's refusal, explained when the cause is one we recognise.
+///
+/// A local engine reports a malformed tool call as a bare HTTP 500 carrying its own
+/// parser's JSON -- "Failed to parse tool call arguments as JSON" -- which reads as a
+/// bug in the app rather than what it is: the model wrote a call the server could not
+/// read, nearly always because its answer ran past the context window and was cut off
+/// mid-argument. Naming that is the difference between the user raising their context
+/// size or giving the job a smaller task, and a bug report about a 500.
+fn explain_failure(status: reqwest::StatusCode, body: &str) -> String {
+    if body.contains("Failed to parse tool call arguments") {
+        return format!(
+            "The model wrote a tool call that could not be read ({status}). Its answer was most \
+             likely cut off before the call finished, which happens when a conversation runs past \
+             the context window. Raise the context size, or give the job a smaller task."
+        );
+    }
+    if body.is_empty() {
+        return format!("HTTP {status}");
+    }
+    format!("HTTP {status}: {body}")
+}
+
 /// Shortest stretch of thinking worth a row of its own.
 ///
 /// Providers emit fragments — a stray newline, an opening token of the answer
@@ -744,11 +773,7 @@ async fn stream_completion(
         let status = response.status();
         let response_body = response.text().await.unwrap_or_default();
         warn!(run_id, %status, "remote rejected");
-        return Err(if response_body.is_empty() {
-            format!("HTTP {status}")
-        } else {
-            format!("HTTP {status}: {response_body}")
-        });
+        return Err(explain_failure(status, &response_body));
     }
 
     let mut bytes = response.bytes_stream();
@@ -1020,11 +1045,7 @@ pub async fn complete_once(
         let status = response.status();
         let response_body = response.text().await.unwrap_or_default();
         warn!(endpoint = %endpoint.name, model, %status, "completion rejected");
-        return Err(if response_body.is_empty() {
-            format!("HTTP {status}")
-        } else {
-            format!("HTTP {status}: {response_body}")
-        });
+        return Err(explain_failure(status, &response_body));
     }
     let payload: Value = response
         .json()

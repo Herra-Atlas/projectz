@@ -34,9 +34,10 @@ use super::ToolSpec;
 /// is relevant.
 pub const SKILL_READ: ToolSpec = ToolSpec {
     name: "skill_read",
-    description: "Read the full instructions of a saved skill. Use this when the available \
-                  skills suggest one applies to what you are doing, before writing code that \
-                  has to follow the user's house style or conventions.",
+    description: "Read a saved skill's full instructions. Call this before your first tool call \
+                  or edit whenever the task matches a skill listed in your system prompt — \
+                  writing, editing, reviewing, researching or drafting. Returns the instructions \
+                  to follow.",
     parameters: r#"{
         "type": "object",
         "properties": {
@@ -104,10 +105,12 @@ pub fn index(database: Option<&crate::database::Database>) -> Option<String> {
         .collect::<Vec<_>>()
         .join("\n");
     Some(format!(
-        "The skills available to you are listed below, one per line as \
-`name [type] — when to use it`. Each is a set of instructions about how the user wants something \
-done. When one applies to the task, read it with `skill_read` before you start, and follow it. \
-If none of them apply, ignore this section.\n\n{listed}"
+        "You have skills: saved sets of instructions for how this user wants particular kinds of \
+work done, listed below one per line as `name [type] — when to use it`. Read this list before \
+your first action on every task. When a skill's name, type or description matches what you are \
+about to do, call `skill_read` with its exact name and follow what it returns. Do this before you \
+write or edit code, review, research or draft prose, and do not skip it because the task looks \
+simple. When more than one applies, read each. If none apply, ignore this list.\n\n{listed}"
     ))
 }
 
@@ -265,6 +268,12 @@ fn read(arguments: Value, database: Option<&crate::database::Database>) -> Resul
             format!("No skill named `{name}`. Available: {available}")
         })?;
 
+    // A read is a use. The user watched the model choose this skill -- the
+    // `skill_read` row is right there in the activity panel -- so the stored
+    // count has to agree with what was on screen. The composer's checked skills
+    // are counted on the reply path; this is the other half, and without it the
+    // Skills screen undercounts every skill the model pulled for itself.
+    database.record_skill_use(&skill.id);
     Ok(format!("# {}\n\n{}", skill.name, skill.instructions))
 }
 
@@ -468,6 +477,41 @@ mod tests {
         // assertions with nothing to attach them to a topic.
         assert!(out.contains("Rust house style"), "{out}");
         assert!(out.contains("Prefer Result over panic."), "{out}");
+    }
+
+    /// Reading a skill counts as using it, so the Skills screen's figure matches
+    /// the `skill_read` row the user already saw in the panel.
+    #[test]
+    fn reading_a_skill_counts_as_a_use() {
+        let database = database();
+        let before = use_count(&database, "Rust house style");
+        read(
+            json!({ "name": "Rust house style" }),
+            Some(database.as_ref()),
+        )
+        .expect("read");
+        assert_eq!(use_count(&database, "Rust house style"), before + 1);
+    }
+
+    /// A failed read resolves to no skill, so there is nothing to count -- and
+    /// counting the attempt would make the figure rise on every typo.
+    #[test]
+    fn a_refused_read_counts_nothing() {
+        let database = database();
+        let before = use_count(&database, "Rust house style");
+        assert!(read(json!({ "name": "nope" }), Some(database.as_ref())).is_err());
+        assert_eq!(use_count(&database, "Rust house style"), before);
+    }
+
+    /// The stored use count for a skill, by name.
+    fn use_count(database: &std::sync::Arc<crate::database::Database>, name: &str) -> i64 {
+        database
+            .enabled_skills()
+            .expect("skills")
+            .into_iter()
+            .find(|skill| skill.name == name)
+            .expect("seeded skill")
+            .use_count
     }
 
     /// The model is never shown an id, so matching on one would make the tool

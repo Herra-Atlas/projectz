@@ -22,6 +22,7 @@ use std::sync::{
 
 use tokio::sync::oneshot;
 
+use super::access::AccessSet;
 use super::policy::{Decision, PermissionMode};
 
 /// What the user was asked, and what they said.
@@ -68,6 +69,8 @@ pub struct ApprovalGate {
     /// Shared rather than copied, so [`ApprovalGate::with_mode`] can re-point it.
     mode: Arc<std::sync::Mutex<PermissionMode>>,
     pending: Arc<std::sync::Mutex<std::collections::HashMap<String, oneshot::Sender<Approval>>>>,
+    /// What this run may touch. See [`super::access`].
+    access: Arc<AccessSet>,
 }
 
 impl ApprovalGate {
@@ -75,7 +78,28 @@ impl ApprovalGate {
         Self {
             mode: Arc::new(std::sync::Mutex::new(mode)),
             pending: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            access: Arc::new(AccessSet::ALL),
         }
+    }
+
+    /// This gate with a different access set, **sharing the mode and the pending
+    /// map**.
+    ///
+    /// A fresh `Arc` rather than a mutation in place, unlike `with_mode`: two jobs
+    /// may run at once and each must keep its own capabilities, while both still
+    /// need the one pending map the answer command reaches. It is also what a
+    /// sub-agent inherits, since it is handed its parent's gate.
+    pub fn with_access(&self, access: AccessSet) -> Self {
+        Self {
+            mode: Arc::clone(&self.mode),
+            pending: Arc::clone(&self.pending),
+            access: Arc::new(access),
+        }
+    }
+
+    /// The capabilities this run holds.
+    pub fn access(&self) -> AccessSet {
+        *self.access
     }
 
     /// This gate with a different mode, **sharing the same pending map**.
@@ -137,7 +161,7 @@ impl ApprovalGate {
             run_id: run_id.to_string(),
             ..request
         };
-        match super::policy::decide(self.mode(), &request.tool_name) {
+        match super::policy::decide_with_access(self.mode(), &request.tool_name, &self.access) {
             Decision::Allow => Ok(Decision::Allow),
             Decision::Deny(reason) => Ok(Decision::Deny(reason)),
             Decision::Ask => {

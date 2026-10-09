@@ -78,6 +78,17 @@ export function useChatSessions(enabled: boolean, reloadKey = 0, modelId = "", p
   // Read inside the load effect, which must not re-run every time the user
   // switches conversation -- it would re-read the whole list on every click.
   const lastActiveIdRef = useRef(lastActiveId);
+  /**
+   * Whether the list has ever loaded, and which conversation is open.
+   *
+   * Both are read by the load effect, which has to be able to tell a first read from
+   * a later one. A refresh -- a scheduled job has written a transcript of its own --
+   * must not blank the list or re-read the conversation the reader is looking at;
+   * doing either is what made the panel appear to restart under them.
+   */
+  const loadedRef = useRef(false);
+  const activeIdRef = useRef<string | null>(activeId);
+  activeIdRef.current = activeId;
   lastActiveIdRef.current = lastActiveId;
   // Read inside `selectSession`, which must not be rebuilt whenever a transcript
   // finishes loading -- otherwise the sidebar's click handler changes identity on
@@ -120,7 +131,10 @@ export function useChatSessions(enabled: boolean, reloadKey = 0, modelId = "", p
   useEffect(() => {
     if (!enabled) return;
     let mounted = true;
-    setLoaded(false);
+    // Only a first read empties the list. A later one is a background refresh, and
+    // taking the panel away to put it back is the flicker that made refreshing feel
+    // like a restart.
+    if (!loadedRef.current) setLoaded(false);
     chatRepository.listHeaders().then((saved) => {
       if (!mounted) return;
       setSessions(sortSessions(saved));
@@ -130,8 +144,12 @@ export function useChatSessions(enabled: boolean, reloadKey = 0, modelId = "", p
       // view stuck loading a transcript that is never coming.
       const remembered = lastActiveIdRef.current;
       const restore = remembered && saved.some((session) => session.id === remembered) ? remembered : null;
+      // The transcript is fetched only when the open conversation actually changes:
+      // a refresh is about the list, and re-reading the messages under the reader
+      // would redraw what they are in the middle of reading.
+      if (restore && restore !== activeIdRef.current) void fetchTranscript(restore);
       setActiveId(restore);
-      if (restore) void fetchTranscript(restore);
+      loadedRef.current = true;
       setLoaded(true);
       setLoadError("");
     }).catch((reason: unknown) => {

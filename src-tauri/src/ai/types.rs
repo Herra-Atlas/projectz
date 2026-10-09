@@ -88,6 +88,14 @@ pub struct ChatRequest {
     /// rather than failing the whole request on an unknown field.
     #[serde(default)]
     pub skill_ids: Vec<String>,
+    /// Which capabilities this run may use.
+    ///
+    /// Absent means everything, so a frontend that never sends it keeps exactly
+    /// the behaviour it had. A job sends its own set, and because it rides on the
+    /// approval gate the same value is inherited by every sub-agent the run
+    /// spawns, which is the requirement: a job's agents may do what the job may.
+    #[serde(default)]
+    pub access: Option<crate::ai::tools::AccessSet>,
 }
 
 /// Accepts a level string, the legacy boolean, or nothing at all, so a frontend
