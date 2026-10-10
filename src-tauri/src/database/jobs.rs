@@ -210,7 +210,9 @@ impl Database {
     pub fn list_jobs(&self) -> Result<Vec<Job>, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let mut statement = connection
-            .prepare(&format!("SELECT {JOB_COLUMNS} FROM jobs ORDER BY name COLLATE NOCASE"))
+            .prepare(&format!(
+                "SELECT {JOB_COLUMNS} FROM jobs ORDER BY name COLLATE NOCASE"
+            ))
             .map_err(|error| error.to_string())?;
         let rows = statement
             .query_map([], job_from_row)
@@ -633,7 +635,10 @@ mod tests {
         let read = database.job(&created.id).expect("read").expect("exists");
         assert_eq!(read.name, "Nightly");
         assert_eq!(read.schedule, JobSchedule::Every { minutes: 30 });
-        assert!(!read.access.terminal, "the access set must survive the round trip");
+        assert!(
+            !read.access.terminal,
+            "the access set must survive the round trip"
+        );
         assert_eq!(
             read.model,
             JobModel::Remote {
@@ -677,9 +682,19 @@ mod tests {
             .create_job(&job("Toggle"), Some(&crate::database::utc_now()))
             .expect("create");
         database.set_job_enabled(&created.id, false).expect("off");
-        assert!(database.job(&created.id).expect("read").expect("exists").next_run_at.is_none());
+        assert!(database
+            .job(&created.id)
+            .expect("read")
+            .expect("exists")
+            .next_run_at
+            .is_none());
         database.set_job_enabled(&created.id, true).expect("on");
-        assert!(database.job(&created.id).expect("read").expect("exists").next_run_at.is_some());
+        assert!(database
+            .job(&created.id)
+            .expect("read")
+            .expect("exists")
+            .next_run_at
+            .is_some());
     }
 
     #[test]
@@ -688,7 +703,9 @@ mod tests {
         let created = database
             .create_job(&job("Runs"), Some(&crate::database::utc_now()))
             .expect("create");
-        let run = database.start_job_run(&created.id, Some("session-1")).expect("start");
+        let run = database
+            .start_job_run(&created.id, Some("session-1"))
+            .expect("start");
         database
             .finish_job_run(&run, "completed", None, Some("session-1"))
             .expect("finish");
@@ -696,7 +713,10 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].status, "completed");
         assert_eq!(runs[0].session_id.as_deref(), Some("session-1"));
-        assert!(database.last_success_at(&created.id).expect("success").is_some());
+        assert!(database
+            .last_success_at(&created.id)
+            .expect("success")
+            .is_some());
     }
 
     /// History belongs to the job: deleting the job must not leave runs behind.
@@ -715,9 +735,14 @@ mod tests {
             .create_job(&job("Doomed"), Some(&crate::database::utc_now()))
             .expect("create");
         let run = database.start_job_run(&created.id, None).expect("start");
-        database.finish_job_run(&run, "failed", Some("boom"), None).expect("finish");
+        database
+            .finish_job_run(&run, "failed", Some("boom"), None)
+            .expect("finish");
         database.delete_job(&created.id).expect("delete");
-        assert!(database.job_runs(&created.id, 10).expect("history").is_empty());
+        assert!(database
+            .job_runs(&created.id, 10)
+            .expect("history")
+            .is_empty());
     }
 
     /// Deleting a job's transcript from the sidebar deletes the job, and the job's
@@ -753,22 +778,39 @@ mod tests {
         }
 
         assert_eq!(
-            database.job_id_for_session("one").expect("lookup").as_deref(),
+            database
+                .job_id_for_session("one")
+                .expect("lookup")
+                .as_deref(),
             Some(created.id.as_str()),
             "the transcript did not point back at its job"
         );
         assert_eq!(
-            database.delete_job_for_session("one").expect("delete").as_deref(),
+            database
+                .delete_job_for_session("one")
+                .expect("delete")
+                .as_deref(),
             Some(created.id.as_str())
         );
 
-        assert!(database.job(&created.id).expect("read").is_none(), "the job outlived its transcript");
-        assert!(database.job_runs(&created.id, 10).expect("history").is_empty());
+        assert!(
+            database.job(&created.id).expect("read").is_none(),
+            "the job outlived its transcript"
+        );
+        assert!(database
+            .job_runs(&created.id, 10)
+            .expect("history")
+            .is_empty());
         assert!(
             database.list_session_headers().expect("list").is_empty(),
             "the job's other transcript outlived its job"
         );
         // A conversation that belongs to no job is not a job's to delete.
-        assert_eq!(database.delete_job_for_session("unrelated").expect("delete"), None);
+        assert_eq!(
+            database
+                .delete_job_for_session("unrelated")
+                .expect("delete"),
+            None
+        );
     }
 }

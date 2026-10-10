@@ -21,7 +21,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
 
-use super::ToolSpec;
+use super::{ToolContext, ToolSpec};
 
 /// Workspace-relative paths never resolve above the workspace.
 ///
@@ -60,15 +60,87 @@ pub const READ_FILE: ToolSpec = ToolSpec {
     // not from inspecting text.
     command_argument: None,
     execute: |arguments, context| {
-        // A filesystem read is synchronous, so the future is already complete.
-        // Boxing it anyway is what keeps every tool on one signature; a model
-        // may call several in one round and they must be awaited the same way.
-        let _ = &context;
-        Box::pin(std::future::ready(
-            require_workspace().and_then(|root| run(arguments, root)),
-        ))
+        // Reading a plain file is synchronous, but a document has to be extracted
+        // and an image has to be shown to a vision model, so the executor is async
+        // and this future is the one place those three paths meet.
+        Box::pin(async move {
+            let root = require_workspace()?;
+            read(arguments, root, context).await
+        })
     },
 };
+
+/// Reads whatever kind of file the path names.
+///
+/// Three kinds: an image goes to a vision model, a document has its text layer
+/// pulled out, and anything else is read as text by [`run`]. The order matters --
+/// image before document, because an image is never a document, and both before
+/// the text path, which would otherwise try to decode a PDF as UTF-8.
+async fn read(arguments: Value, root: PathBuf, context: ToolContext) -> Result<String, String> {
+    let path = arguments
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or("read_file requires a string `path`")?
+        .to_string();
+    let resolved = resolve_within(&root, &path)?;
+
+    if let Some(media_type) = crate::documents::image_media_type(&resolved) {
+        return describe_image(&resolved, media_type, &context).await;
+    }
+    if let Some(document) = crate::documents::extract(&resolved) {
+        let text = document?;
+        // The offset and limit apply to the extracted text, so a long document is
+        // still paged the same way a long source file is.
+        let offset = positive_usize(arguments.get("offset"), "offset")?.unwrap_or(1);
+        let limit =
+            Some(positive_usize(arguments.get("limit"), "limit")?.unwrap_or(DEFAULT_READ_LINES));
+        return Ok(format!(
+            "[Text extracted from {path}]\n\n{}",
+            numbered_slice(&text, offset, limit)
+        ));
+    }
+    run(arguments, root)
+}
+
+/// The question a read of an image asks the vision model.
+///
+/// It asks for the text *and* the picture because an image handed to this tool is
+/// usually a screenshot, and a description that omits what it says is useless to
+/// a model trying to act on it.
+const IMAGE_QUESTION: &str = "Describe this image in full for another program that cannot see it. \
+Include every piece of text it contains, verbatim, and describe the layout and anything a viewer \
+would notice — errors, diagrams, UI state.";
+
+/// Reads an image by showing it to the vision model the user chose.
+async fn describe_image(
+    resolved: &Path,
+    media_type: &str,
+    context: &ToolContext,
+) -> Result<String, String> {
+    // The vision model is resolved by the runtime and carried on the run, because
+    // a tool has no model registry. Absent means the user has not chosen one.
+    let Some((endpoint, model)) = context
+        .run
+        .as_ref()
+        .and_then(|run| run.vision_model.clone())
+    else {
+        return Err(
+            "This is an image and no vision model is set, so it cannot be read. Ask the user to \
+             choose a vision model in Settings, then read it again."
+                .to_string(),
+        );
+    };
+    let bytes = std::fs::read(resolved)
+        .map_err(|error| format!("Could not read {}: {error}", resolved.display()))?;
+    let name = resolved
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| resolved.display().to_string());
+    let description =
+        super::vision::describe_image(&endpoint, &model, &bytes, media_type, IMAGE_QUESTION)
+            .await?;
+    Ok(format!("[{name} — seen by {model}]\n\n{description}"))
+}
 
 /// The root every relative path is resolved against.
 ///
@@ -166,7 +238,7 @@ pub const LIST_DIR: ToolSpec = ToolSpec {
 /// is this folder for" and starts costing a turn per screenful, so the entries
 /// the model actually wanted are the ones it has to go back and narrow for.
 /// The cap is reported in the output ("N of M entries") and points at
-/// `search_files`, so hitting it reads as a direction rather than as a wall.
+/// `grep`, so hitting it reads as a direction rather than as a wall.
 const MAX_ENTRIES: usize = 100;
 
 fn list_dir(arguments: Value, root: PathBuf) -> Result<String, String> {
@@ -227,7 +299,7 @@ fn list_dir(arguments: Value, root: PathBuf) -> Result<String, String> {
     }
     out.push_str(&format!("\n{shown} of {total} entries"));
     if total > shown {
-        out.push_str(". Narrow with search_files rather than listing a larger directory.");
+        out.push_str(". Narrow with grep or glob rather than listing a larger directory.");
     }
     Ok(out)
 }

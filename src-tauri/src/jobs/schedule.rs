@@ -168,19 +168,27 @@ mod tests {
     use super::*;
 
     fn at(text: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(text).expect("parse").with_timezone(&Utc)
+        DateTime::parse_from_rfc3339(text)
+            .expect("parse")
+            .with_timezone(&Utc)
     }
 
     #[test]
     fn an_interval_is_measured_from_now() {
-        let next = next_run(&JobSchedule::Every { minutes: 30 }, at("2026-01-01T10:00:00Z"));
+        let next = next_run(
+            &JobSchedule::Every { minutes: 30 },
+            at("2026-01-01T10:00:00Z"),
+        );
         assert_eq!(next.as_deref(), Some("2026-01-01T10:30:00.000Z"));
     }
 
     /// An interval job is due the moment it is saved, not one interval later.
     #[test]
     fn an_interval_job_first_runs_now() {
-        let first = first_run(&JobSchedule::Every { minutes: 30 }, at("2026-01-01T10:00:00Z"));
+        let first = first_run(
+            &JobSchedule::Every { minutes: 30 },
+            at("2026-01-01T10:00:00Z"),
+        );
         assert_eq!(first.as_deref(), Some("2026-01-01T10:00:00.000Z"));
     }
 
@@ -232,7 +240,9 @@ mod tests {
     /// is exactly one day after the previous occurrence.
     #[test]
     fn a_daily_time_advances_by_one_day() {
-        let schedule = JobSchedule::Daily { at: "03:00".to_string() };
+        let schedule = JobSchedule::Daily {
+            at: "03:00".to_string(),
+        };
         let first = next_run(&schedule, at("2026-01-01T00:00:00Z")).expect("first");
         let second = next_run(&schedule, at(&first)).expect("second");
         let gap = DateTime::parse_from_rfc3339(&second)
@@ -263,7 +273,10 @@ mod tests {
     /// itself, that is now; afterwards it is the start of the next one.
     #[test]
     fn a_weekly_day_with_no_time_runs_as_soon_as_the_day_arrives() {
-        let schedule = JobSchedule::Weekly { weekday: 3, at: None };
+        let schedule = JobSchedule::Weekly {
+            weekday: 3,
+            at: None,
+        };
         // Thursday 2026-01-01, saved that same day.
         assert_eq!(
             first_run(&schedule, at("2026-01-01T12:00:00Z")).as_deref(),
@@ -273,19 +286,30 @@ mod tests {
         let next = next_run(&schedule, at("2026-01-01T12:00:00Z")).expect("next");
         let landed = DateTime::parse_from_rfc3339(&next).expect("parse");
         assert_eq!(landed.with_timezone(&Local).weekday(), Weekday::Thu);
-        assert!(landed > at("2026-01-01T12:00:00Z"), "{next} was not in the future");
+        assert!(
+            landed > at("2026-01-01T12:00:00Z"),
+            "{next} was not in the future"
+        );
     }
 
     #[test]
     fn a_day_that_is_not_a_weekday_is_refused() {
-        let schedule = JobSchedule::Weekly { weekday: 9, at: None };
+        let schedule = JobSchedule::Weekly {
+            weekday: 9,
+            at: None,
+        };
         assert_eq!(next_run(&schedule, at("2026-01-01T00:00:00Z")), None);
     }
 
     #[test]
     fn a_malformed_time_is_ignored_rather_than_guessed_at() {
         assert_eq!(
-            next_run(&JobSchedule::Daily { at: "25:99".to_string() }, at("2026-01-01T00:00:00Z")),
+            next_run(
+                &JobSchedule::Daily {
+                    at: "25:99".to_string()
+                },
+                at("2026-01-01T00:00:00Z")
+            ),
             None
         );
     }

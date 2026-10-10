@@ -120,12 +120,15 @@ mod tests {
     /// the test. Cleared rather than reset to anything real: clearing is the
     /// neutral state and leaves no test asserting against another's choice.
     struct SerialRoot {
-        lock: std::sync::MutexGuard<'static, ()>,
+        /// Held to keep the mutex locked and released on drop. Named with a
+        /// leading underscore because it is never read -- its whole job is to be
+        /// alive.
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl Drop for SerialRoot {
         fn drop(&mut self) {
-            // `self.lock` is still held here, so this cannot race another test
+            // `self._lock` is still held here, so this cannot race another test
             // that is waiting to set the root.
             clear_root();
         }
@@ -133,7 +136,7 @@ mod tests {
 
     fn serial() -> SerialRoot {
         SerialRoot {
-            lock: SERIAL
+            _lock: SERIAL
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
         }

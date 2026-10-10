@@ -9,26 +9,34 @@
 //! round trip per tool call would add latency to every step of an agent loop
 //! while putting the permission boundary somewhere it could be bypassed.
 
+mod access;
 pub mod agent;
 mod approval;
+mod ask;
+mod background;
 mod cache;
 mod diff;
+mod export;
 mod fetch;
 mod file;
+mod glob;
+mod grep;
 mod output;
-mod access;
+mod paths;
 mod policy;
 mod registry;
 mod run;
 mod schedule;
-mod search;
 pub mod skills;
 mod terminal;
+mod todo;
+mod vision;
+mod walk;
 mod websearch;
 mod write;
 
 pub use access::AccessSet;
-pub use approval::{Approval, ApprovalGate, ApprovalRequest};
+pub use approval::{Approval, ApprovalGate, ApprovalRequest, QuestionRequest};
 pub use cache::ToolCache;
 pub use policy::{Decision, PermissionMode};
 pub use registry::{Effect, Sink, ToolContext, ToolRegistry, ToolSpec};
@@ -195,18 +203,26 @@ mod tests {
         assert_eq!(
             registry_for(ToolMode::Agent, true).names(),
             vec![
+                "ask_user",
+                "delete_file",
                 "edit_file",
                 "edit_lines",
+                "glob",
+                "grep",
                 "list_dir",
+                "move_file",
                 "read_file",
                 "run_terminal",
                 "schedule_job",
-                "search_files",
                 "search_web",
                 "skill_manage",
                 "skill_read",
                 "sub_agent",
+                "terminal_kill",
+                "terminal_output",
+                "todo",
                 "web_fetch",
+                "write_document",
                 "write_file"
             ]
         );
@@ -246,34 +262,50 @@ mod tests {
         assert_eq!(
             names(ToolMode::Agent, true),
             vec![
+                "ask_user",
+                "delete_file",
                 "edit_file",
                 "edit_lines",
+                "glob",
+                "grep",
                 "list_dir",
+                "move_file",
                 "read_file",
                 "run_terminal",
                 "schedule_job",
-                "search_files",
                 "search_web",
                 "skill_manage",
                 "skill_read",
                 "sub_agent",
+                "terminal_kill",
+                "terminal_output",
+                "todo",
                 "web_fetch",
+                "write_document",
                 "write_file"
             ]
         );
         assert_eq!(
             names(ToolMode::Agent, false),
             vec![
+                "ask_user",
+                "delete_file",
                 "edit_file",
                 "edit_lines",
+                "glob",
+                "grep",
                 "list_dir",
+                "move_file",
                 "read_file",
                 "run_terminal",
                 "schedule_job",
-                "search_files",
                 "skill_manage",
                 "skill_read",
                 "sub_agent",
+                "terminal_kill",
+                "terminal_output",
+                "todo",
+                "write_document",
                 "write_file"
             ]
         );

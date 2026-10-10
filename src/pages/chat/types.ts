@@ -50,6 +50,15 @@ export type AiEvent = {
     diff?: ToolDiff;
     created?: boolean;
     /**
+     * The `ask_user` prompt: the id the answer is keyed on, the question, and
+     * any suggested answers offered as buttons.
+     */
+    question_id?: string;
+    question?: string;
+    options?: string[];
+    /** The agent's checklist, carried on a `todo` event. */
+    items?: { text: string; status: string }[];
+    /**
      * The sub-agent lifecycle fields, carried on a `subagent` event.
      *
      * `agent_id` names the run, `state` is `running` or `done`, and the rest are

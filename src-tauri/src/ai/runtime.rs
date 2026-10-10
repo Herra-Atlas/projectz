@@ -120,6 +120,14 @@ impl AiRuntime {
         )
     }
 
+    /// Records the user's answer to a pending `ask_user` question.
+    ///
+    /// The reply is free text rather than a decision, which is why it goes to the
+    /// gate's question map and not its approval one.
+    pub fn answer_question(&self, question_id: &str, answer: String) -> bool {
+        self.approval.answer_question(question_id, answer)
+    }
+
     /// Records which session is on screen. `None` means the user is on a new, unsaved
     /// conversation, which matches no run and so never suppresses a notification.
     pub fn set_viewed_session(&self, session_id: Option<String>) {
@@ -334,6 +342,35 @@ impl AiRuntime {
             return None;
         }
         self.resolve_selection(selection).ok()
+    }
+
+    /// The model `read_file` shows an image to, from Settings.
+    ///
+    /// The same shape as [`Self::subagent_default`], for the same reason: the tool
+    /// gets a live endpoint rather than a stored selection. `None` when the user
+    /// has chosen no vision model, or when the one they chose no longer resolves.
+    fn vision_default(&self) -> Option<(crate::ai::remote::types::Endpoint, String)> {
+        let preferences: serde_json::Value = self.database.setting("app.preferences")?;
+        let selection = preferences.get("visionModel")?;
+        if selection.is_null() {
+            return None;
+        }
+        self.resolve_selection(selection).ok()
+    }
+
+    /// How aggressively to elide old context, from Settings.
+    ///
+    /// A plain string preference rather than a resolved model, so it needs none of
+    /// the registry work the two above do. An unset or unknown value parses to
+    /// `Normal`, which is the safe default: compressing old tool output is never
+    /// as bad as a request the provider refuses for being too long.
+    fn compaction(&self) -> crate::ai::compact::Compaction {
+        let preferences: Option<serde_json::Value> = self.database.setting("app.preferences");
+        let stored = preferences
+            .as_ref()
+            .and_then(|value| value.get("compaction"))
+            .and_then(serde_json::Value::as_str);
+        crate::ai::compact::Compaction::parse(stored)
     }
 
     /// Turn one persisted selection into a requestable endpoint and model.
@@ -577,6 +614,12 @@ impl AiRuntime {
         // selection into a live endpoint needs the model registry, which the tool
         // does not have.
         let subagent_default = self.subagent_default();
+        // Resolved here too, for the same reason: the vision choice becomes a live
+        // endpoint before it reaches the tool that reads an image.
+        let vision_default = self.vision_default();
+        // A plain string preference, so it is read here rather than resolved into
+        // an endpoint; it rides on the request the way `reasoning` does.
+        let compaction = self.compaction();
         // Shareable rather than `FnMut` so several sub-agents launched from this
         // run can each report through the one event path the frontend listens on.
         let emitter = self.clone();
@@ -621,6 +664,8 @@ impl AiRuntime {
             self.approval_gate(request.permission, request.access.unwrap_or_default()),
             cancelled,
             subagent_default,
+            vision_default,
+            compaction,
             // The top-level run may delegate; a sub-agent's own run passes false.
             true,
             on_event,

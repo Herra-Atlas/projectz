@@ -10,6 +10,8 @@ import ModelSwitcher from "../../components/ModelSwitcher";
 import ModeSelector from "../../components/ModeSelector";
 import SelectionActions, { type SelectionAction } from "./SelectionActions";
 import ToolApproval, { type PendingApproval } from "./ToolApproval";
+import ToolQuestion, { type PendingQuestion } from "./ToolQuestion";
+import TodoStrip, { type TodoEntry } from "./TodoStrip";
 import { userTextOnly } from "../../features/skills/skillMessage";
 import { useSessionTitle } from "../../features/models/useSessionTitle";
 import {
@@ -187,6 +189,16 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
    * cancelled. The oldest is shown; the rest follow as they are answered.
    */
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
+  /**
+   * Questions the agent is waiting on, queued for the same reason approvals are:
+   * concurrent runs can each be parked on one at the same moment.
+   */
+  const [pendingQuestions, setPendingQuestions] = useState<PendingQuestion[]>([]);
+  /**
+   * The agent's checklist, tagged with the session it belongs to so switching
+   * conversations does not carry one session's plan onto another's screen.
+   */
+  const [todoList, setTodoList] = useState<{ sessionId: string | null; items: TodoEntry[] } | null>(null);
   const [contextLimit, setContextLimit] = useState<number | null>(null);
   // What the selected model's provider says it supports. Null until it has been
   // read, and every field inside it may still be unknown.
@@ -619,6 +631,28 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         setPendingApprovals((current) => current.some((entry) => entry.approvalId === approval.approvalId) ? current : [...current, approval]);
         return;
       }
+      // A question the agent asked with `ask_user`, handled here for the same
+      // reason as an approval: the run it belongs to may already be over.
+      if (payload.kind === "user_question" && payload.metrics?.question_id) {
+        const question: PendingQuestion = {
+          runId: payload.run_id,
+          questionId: payload.metrics.question_id,
+          question: payload.metrics.question ?? "The agent has a question.",
+          options: Array.isArray(payload.metrics.options) ? payload.metrics.options : [],
+        };
+        setPendingQuestions((current) => current.some((entry) => entry.questionId === question.questionId) ? current : [...current, question]);
+        return;
+      }
+      // The agent updated its checklist, so the strip above the composer reflects
+      // it. Tagged with the session so a notice from a background run does not
+      // draw on the conversation that is on screen.
+      if (payload.kind === "todo" && Array.isArray(payload.metrics?.items)) {
+        setTodoList({
+          sessionId: payload.session_id ?? null,
+          items: payload.metrics.items.map((item) => ({ text: item.text, status: item.status as TodoEntry["status"] })),
+        });
+        return;
+      }
       const run = backgroundRunsRef.current.get(payload.run_id);
       if (!run) return;
       const isActive = run.sessionId === sessionIdRef.current;
@@ -838,6 +872,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         }
         if (isActive) {
           setPendingApprovals([]);
+          setPendingQuestions([]);
           setSearching(false);
           setRunning(false);
           streamTextRef.current = "";
@@ -1169,6 +1204,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     if (sessionId && sessionRunIdsRef.current.get(sessionId) === runId) sessionRunIdsRef.current.delete(sessionId);
     if (run && sessionId) onActivityRef.current(sessionId, null);
     setPendingApprovals([]);
+    setPendingQuestions([]);
     if (sessionId === sessionIdRef.current) {
       runIdRef.current = "";
       setRunning(false);
@@ -1458,6 +1494,9 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
               it is plainly a question about the run, and the composer stays
               exactly as it was. The gap is one `mb` because it belongs to the
               transcript above, not to the control below. */}
+          {todoList && todoList.sessionId === (session?.id ?? null) && todoList.items.length > 0 && (
+            <TodoStrip items={todoList.items} />
+          )}
           {pendingApprovals.length > 0 && (
             <div className="mb-2">
               <ToolApproval
@@ -1470,6 +1509,21 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
                   dismissApproval(approvalId);
                 }}
                 onCancel={() => dismissApproval(pendingApprovals[0].approvalId)}
+              />
+            </div>
+          )}
+          {/* A question the agent is waiting on, in the same place as an approval
+              for the same reason: the run is parked until it is answered. */}
+          {pendingQuestions.length > 0 && (
+            <div className="mb-2">
+              <ToolQuestion
+                request={pendingQuestions[0]}
+                onAnswer={(questionId, answer) => {
+                  void invoke("ai_answer_question", { questionId, answer }).catch(() => {
+                    // The run was already stopped, so there was nothing to answer.
+                  });
+                  setPendingQuestions((current) => current.filter((entry) => entry.questionId !== questionId));
+                }}
               />
             </div>
           )}

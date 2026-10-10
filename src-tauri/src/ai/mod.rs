@@ -1,3 +1,4 @@
+pub mod compact;
 pub mod local;
 pub mod prompts;
 pub mod remote;

@@ -33,7 +33,7 @@ use super::Effect;
 /// Built from the canonical argument JSON so two calls that differ only in key
 /// order still hit. `serde_json` preserves object insertion order, so two
 /// `Value`s from different sources can serialize differently; the tool name is
-/// included because `read_file` and `search_files` can legitimately be called
+/// included because `read_file` and `grep` can legitimately be called
 /// with the same arguments and must not share an entry.
 ///
 /// Hashed rather than stored raw: the arguments can be a page of text, and the
@@ -272,11 +272,11 @@ mod tests {
 
     #[test]
     fn the_same_arguments_on_two_tools_do_not_collide() {
-        // `read_file` and `search_files` can be called with the same object and
+        // `read_file` and `grep` can be called with the same object and
         // must not share an entry.
         assert_ne!(
             cache_key("read_file", &json!({ "path": "a" })),
-            cache_key("search_files", &json!({ "path": "a" }))
+            cache_key("grep", &json!({ "path": "a" }))
         );
     }
 

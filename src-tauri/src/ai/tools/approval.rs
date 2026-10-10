@@ -50,6 +50,21 @@ impl ApprovalRequest {
     }
 }
 
+/// A question put to the user, with any suggested answers.
+///
+/// Its own type rather than a reused [`ApprovalRequest`]: the two travel through
+/// separate pending maps and carry different shapes -- a yes/no and a free-text
+/// reply -- and letting one stand in for the other is how an id from one is
+/// answered into the other's slot.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct QuestionRequest {
+    pub run_id: String,
+    /// The question itself.
+    pub question: String,
+    /// Answers to offer as buttons. Empty for a question with no natural choices.
+    pub options: Vec<String>,
+}
+
 /// A decision the user made.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -69,6 +84,12 @@ pub struct ApprovalGate {
     /// Shared rather than copied, so [`ApprovalGate::with_mode`] can re-point it.
     mode: Arc<std::sync::Mutex<PermissionMode>>,
     pending: Arc<std::sync::Mutex<std::collections::HashMap<String, oneshot::Sender<Approval>>>>,
+    /// Outstanding questions, keyed by the id the frontend answers with.
+    ///
+    /// A second map, not the approval one: a question's answer is a string and an
+    /// approval's is a decision, so one map would have to hold an enum covering
+    /// both and every lookup would have to say which it expected.
+    questions: Arc<std::sync::Mutex<std::collections::HashMap<String, oneshot::Sender<String>>>>,
     /// What this run may touch. See [`super::access`].
     access: Arc<AccessSet>,
 }
@@ -78,6 +99,7 @@ impl ApprovalGate {
         Self {
             mode: Arc::new(std::sync::Mutex::new(mode)),
             pending: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            questions: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             access: Arc::new(AccessSet::ALL),
         }
     }
@@ -93,6 +115,7 @@ impl ApprovalGate {
         Self {
             mode: Arc::clone(&self.mode),
             pending: Arc::clone(&self.pending),
+            questions: Arc::clone(&self.questions),
             access: Arc::new(access),
         }
     }
@@ -199,6 +222,67 @@ impl ApprovalGate {
                     Approval::Deny => Decision::Deny("The user declined this call".into()),
                 })
             }
+        }
+    }
+
+    /// Asks the user a question and waits for the reply.
+    ///
+    /// The same shape as [`ApprovalGate::settle`] -- register, emit, wait, select
+    /// on cancel -- because a question is a prompt too. It is a separate method
+    /// over a separate map because the answer is free text rather than a yes/no,
+    /// and the two must not be confusable: an id from one map resolving in the
+    /// other would answer a permission prompt with a sentence, or a question with
+    /// a boolean.
+    pub async fn ask(
+        &self,
+        run_id: &str,
+        request: QuestionRequest,
+        cancelled: &Arc<AtomicBool>,
+        on_prompt: impl FnOnce(&QuestionRequest, &str),
+    ) -> Result<String, String> {
+        // Stamped here for the same reason as an approval: the run id is what the
+        // frontend keys its prompt on.
+        let request = QuestionRequest {
+            run_id: run_id.to_string(),
+            ..request
+        };
+        let question_id = uuid::Uuid::new_v4().to_string();
+        let (sender, receiver) = oneshot::channel();
+        // Registered before the prompt is emitted, so an answer cannot arrive for
+        // an id that is not yet in the map.
+        self.questions
+            .lock()
+            .map_err(|error| error.to_string())?
+            .insert(question_id.clone(), sender);
+
+        on_prompt(&request, &question_id);
+
+        tokio::select! {
+            received = receiver => received.map_err(|_| {
+                // The gate was dropped without an answer, which happens when the
+                // run ends. Reported so the loop can carry on rather than hang.
+                "The question was never answered".to_string()
+            }),
+            _ = wait_until_cancelled(cancelled) => {
+                Err("The user stopped this reply".to_string())
+            }
+        }
+    }
+
+    /// Records the user's answer to a pending question and releases the run.
+    ///
+    /// Returns `false` for an id nothing was waiting on -- a stale answer from a
+    /// closed prompt, or one whose run was stopped -- which is a normal race and
+    /// not an error.
+    pub fn answer_question(&self, question_id: &str, answer: String) -> bool {
+        let sender = self
+            .questions
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.remove(question_id));
+        match sender {
+            Some(sender) => sender.send(answer).is_ok(),
+            None => false,
         }
     }
 }

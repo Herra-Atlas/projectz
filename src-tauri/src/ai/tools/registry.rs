@@ -223,7 +223,11 @@ impl ToolRegistry {
             crate::ai::tools::ToolMode::Agent => &[
                 super::file::LIST_DIR,
                 super::file::READ_FILE,
-                super::search::SEARCH_FILES,
+                // `grep` replaces the old `search_files`: one search tool, by
+                // regular expression with a literal fallback, rather than two
+                // that overlap.
+                super::grep::GREP,
+                super::glob::GLOB,
                 // The skill tools are agent-only for the same reason the filesystem
                 // ones are: `skill_read` is a decision the model makes for itself,
                 // and a model that was handed the body inline by the composer has no
@@ -232,6 +236,15 @@ impl ToolRegistry {
                 super::skills::SKILL_MANAGE,
                 super::skills::SKILL_READ,
                 super::terminal::RUN_TERMINAL,
+                // Reading and stopping a command `run_terminal` left running.
+                // Split so a poll is a read -- it changes nothing and asks for
+                // nothing -- while stopping one is a write.
+                super::terminal::TERMINAL_OUTPUT,
+                super::terminal::TERMINAL_KILL,
+                // Moving and removing files, so a refactor does not have to go
+                // through the shell to rename one.
+                super::paths::MOVE_FILE,
+                super::paths::DELETE_FILE,
                 // Line-numbered editing is the tool a `read_file` is designed to
                 // feed, so it ships with the readers rather than as an
                 // afterthought. `edit_file` stays for the case where the model
@@ -240,6 +253,17 @@ impl ToolRegistry {
                 super::write::EDIT_LINES,
                 super::write::EDIT_FILE,
                 super::write::WRITE_FILE,
+                // A deliverable, not an edit: it builds a document the user asked
+                // for, which is why it ships with the writers rather than the tools
+                // that change source.
+                super::export::WRITE_DOCUMENT,
+                // Asking the user, which parks the run until they answer. With the
+                // writes because its result must never be cached, not because it
+                // edits anything.
+                super::ask::ASK_USER,
+                // The agent's own checklist. A write for caching too: the list
+                // changes as work progresses.
+                super::todo::TODO,
             ],
         };
         let mut tools = specs.to_vec();

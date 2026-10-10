@@ -12,8 +12,13 @@ export type SaveState = "clean" | "dirty" | "saving" | "error";
  * One hook rather than logic inside `FilePreview` because the save lifecycle --
  * load, debounce, flush on unmount, Ctrl+S -- is a concern beside rendering.
  * The text always renders from `text`; the save only reads it.
+ *
+ * `enabled` is false for a file with no text: a picture, a PDF, a Word document.
+ * The hook is still called -- it is a hook, so it cannot be skipped -- but it
+ * reads nothing and writes nothing, which is what keeps a `.docx` from failing
+ * with a UTF-8 error on its way to being drawn as a document.
  */
-export function useFileEditor(path: string) {
+export function useFileEditor(path: string, enabled = true) {
   const [text, setText] = useState<string | undefined>(undefined);
   const [savedText, setSavedText] = useState<string | null>(null);
   const [state, setState] = useState<SaveState>("clean");
@@ -22,6 +27,9 @@ export function useFileEditor(path: string) {
   const latestRef = useRef<string | null>(null);
   const savedRef = useRef<string | null>(null);
   const timerRef = useRef<number | null>(null);
+  /** Read inside `flush`, which is assigned once per render but called later. */
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
 
   latestRef.current = text ?? null;
 
@@ -48,6 +56,7 @@ export function useFileEditor(path: string) {
 
   const flushRef = useRef<() => void>(() => undefined);
   flushRef.current = () => {
+    if (!enabledRef.current) return;
     const latest = latestRef.current;
     const saved = savedRef.current;
     if (latest === null || saved === null || latest === saved) return;
@@ -82,6 +91,9 @@ export function useFileEditor(path: string) {
     setState("clean");
     setError(null);
     clearTimer();
+    // Cleared before the early return, so switching from a text file to a
+    // picture does not leave the old file's text on screen behind the preview.
+    if (!enabled) return;
     invoke<string>("panel_read_preview", { relative: path })
       .then((value) => {
         if (!active) return;
@@ -99,7 +111,7 @@ export function useFileEditor(path: string) {
       flushRef.current();
       clearTimer();
     };
-  }, [path, clearTimer]);
+  }, [path, enabled, clearTimer]);
 
   return { text, savedText, state, error, set, retry, saveNow: () => flushRef.current() };
 }

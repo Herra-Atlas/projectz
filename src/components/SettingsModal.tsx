@@ -15,7 +15,7 @@ import SkillFormPage from "./skills/SkillFormPage";
 import TitleModelPicker from "./TitleModelPicker";
 import SingleModelPicker from "./ModelSelectionPicker";
 import { Segmented, SettingRow, SettingsSection, Toggle } from "./SettingsSection";
-import type { Preferences } from "../features/models/usePreferences";
+import { COMPACTION_LABELS, type Compaction, type Preferences } from "../features/models/usePreferences";
 import type { Endpoint, LocalModel } from "../features/models/types";
 import type { Skill } from "../features/skills/types";
 import type { InstalledEngine } from "../features/models/useInstalledEngines";
@@ -926,7 +926,43 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                       label="Default sub-agent model"
                     />
                   </div>
+                  <div className="flex min-h-[58px] items-center gap-3 px-4 py-3.5">
+                    <div className="min-w-0 flex-1">
+                      <h3 className="text-[13px]">Vision model</h3>
+                      <p className="mt-0.5 text-[12px] leading-5 text-[var(--muted)]">The model an image is shown to when a file is read. Leave off and images cannot be read.</p>
+                    </div>
+                    <SingleModelPicker
+                      value={preferences.visionModel ?? null}
+                      onChange={(visionModel) => { setFormError(""); onPreferencesChange({ ...preferences, visionModel }); }}
+                      groups={providerModelGroups}
+                      localModels={localModels}
+                      emptyLabel="Off"
+                      label="Default vision model"
+                    />
+                  </div>
                 </div>
+
+                <SettingsSection title="Context">
+                  <SettingRow
+                    label="Context compaction"
+                    description="How ProjectZ trims a long conversation before sending it. Off keeps everything; Normal elides old tool output; Fast also drops older turns."
+                    control={
+                      <Segmented
+                        label="Context compaction"
+                        value={COMPACTION_LABELS[preferences.compaction]}
+                        options={["Off", "Normal", "Fast"]}
+                        onChange={(label) => {
+                          // The stored value is the lowercase wire name the backend
+                          // parses, so the display label is mapped back rather than
+                          // saved directly.
+                          const next = (Object.keys(COMPACTION_LABELS) as Compaction[]).find((key) => COMPACTION_LABELS[key] === label) ?? "normal";
+                          setFormError("");
+                          onPreferencesChange({ ...preferences, compaction: next });
+                        }}
+                      />
+                    }
+                  />
+                </SettingsSection>
               </> : page.view === "skills" ? <SkillsPage notify={notify} onOpenForm={(skill) => setPage({ view: "skill", skill })} /> : page.view === "skill" ? <SkillFormPage key={page.skill?.id ?? "new"} skill={page.skill} onSaved={() => setPage({ view: "skills" })} onCancel={() => setPage({ view: "skills" })} notify={notify} /> : <>
                 <div className="mb-6 border-b border-[var(--line)] pb-5"><h2 className="text-[17px] font-semibold tracking-tight">{page.endpoint ? "Edit provider" : "Add provider"}</h2></div>
                 <form onSubmit={(event) => void saveEndpoint(event)} className="max-w-xl space-y-4">

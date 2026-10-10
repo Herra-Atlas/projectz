@@ -47,6 +47,20 @@ pub fn ai_answer_approval(runtime: State<'_, AiRuntime>, approval_id: String, al
     runtime.answer_approval(&approval_id, allow)
 }
 
+/// Answers a pending `ask_user` question with the user's reply text.
+///
+/// Returns whether a question was actually waiting, on the same reasoning as
+/// [`ai_answer_approval`]: `false` is a stale answer from a prompt whose run has
+/// already ended, which is normal and not an error to retry.
+#[tauri::command]
+pub fn ai_answer_question(
+    runtime: State<'_, AiRuntime>,
+    question_id: String,
+    answer: String,
+) -> bool {
+    runtime.answer_question(&question_id, answer)
+}
+
 /// Tells the backend which session is on screen so a reply finishing in it stays silent.
 #[tauri::command]
 pub fn ai_set_viewed_session(runtime: State<'_, AiRuntime>, session_id: Option<String>) {
@@ -449,9 +463,7 @@ pub fn job_run_now(
 
 /// Whether the scheduler is paused, and which jobs are running.
 #[tauri::command]
-pub fn job_scheduler_status(
-    scheduler: State<'_, crate::jobs::Scheduler>,
-) -> serde_json::Value {
+pub fn job_scheduler_status(scheduler: State<'_, crate::jobs::Scheduler>) -> serde_json::Value {
     serde_json::json!({
         "paused": scheduler.is_paused(),
         // Ids rather than names: the window already has the jobs and can name

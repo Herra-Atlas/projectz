@@ -105,6 +105,12 @@ pub async fn stream_chat(
     // become a live endpoint by the time it arrives here and a tool never has to
     // reach for the model registry itself.
     subagent_default: Option<(Endpoint, String)>,
+    // The model `read_file` shows an image to, resolved by the runtime from the
+    // stored vision preference. `None` when the user has chosen none.
+    vision_default: Option<(Endpoint, String)>,
+    // How aggressively to elide old context before sending. Read from the stored
+    // preference by the runtime and carried on the request, like `reasoning`.
+    compaction: crate::ai::compact::Compaction,
     // Whether a spawned sub-agent may itself spawn. `false` for a sub-agent's own
     // run, which is what keeps delegation one level deep.
     allow_subagents: bool,
@@ -123,7 +129,8 @@ pub async fn stream_chat(
     // capability this run does not hold is never advertised and cannot be asked
     // for. A call that arrives anyway is refused by `policy` in the loop; hiding
     // is the first half, refusing is the backstop.
-    let mut registry = crate::ai::tools::registry_for_with(mode, web_search_enabled, allow_subagents);
+    let mut registry =
+        crate::ai::tools::registry_for_with(mode, web_search_enabled, allow_subagents);
     registry.retain(|name| approval.access().is_allowed(name));
 
     let session = session_id.unwrap_or_default();
@@ -138,6 +145,10 @@ pub async fn stream_chat(
     // See `ToolCache::next_stamp`.
 
     let mut conversation = prepend_environment(payload, mode, database);
+    // Elide old context before the first send, so a conversation reopened from a
+    // long history does not fail on its own length. The transcript in the database
+    // is untouched; only this request's copy of it is trimmed.
+    crate::ai::compact::apply(&mut conversation, compaction);
     let mut usage = Value::Null;
     // Tools are advertised on every round rather than only the first. A model
     // that finishes a turn after using a tool has still seen the schema, so
@@ -154,7 +165,6 @@ pub async fn stream_chat(
         model: model.to_string(),
         reasoning: reasoning.clone(),
         web_search_enabled,
-        mode,
         enable_reasoning_control,
         // The same flag the reasoning control rides on is exactly whether the
         // model is local: a request carries `reasoning_control` only for the
@@ -166,6 +176,8 @@ pub async fn stream_chat(
         approval: approval.clone(),
         emit: Arc::clone(&on_event),
         subagent_default,
+        vision_model: vision_default,
+        compaction,
         // Counted per run, so the ceiling is on what this reply may arrange.
         jobs_created: std::sync::atomic::AtomicUsize::new(0),
     });

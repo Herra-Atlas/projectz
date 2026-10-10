@@ -33,7 +33,8 @@ the task as a complete brief — it cannot see this conversation and cannot ask 
 Good fits: research, a broad search across a codebase, or any job you only need the conclusion of. \
 Do not overlap them: never point two agents at the same files, and do not delegate an edit you \
 are making yourself, because concurrent writes to one file race and one of them is lost. If you \
-are unsure whether the work is independent, do it yourself.",
+are unsure whether the work is independent, do it yourself. Set `type` to `explore` for a \
+read-only investigation or `plan` for a read-only plan; both are barred from changing anything.",
     parameters: r#"{
         "type": "object",
         "properties": {
@@ -48,6 +49,11 @@ are unsure whether the work is independent, do it yourself.",
             "model": {
                 "type": "string",
                 "description": "Optional model id to run this agent on, for a task that does not need the main model. Omit to use the configured sub-agent model."
+            },
+            "type": {
+                "type": "string",
+                "enum": ["general", "explore", "plan"],
+                "description": "The kind of agent. `general` (the default) may do anything you can. `explore` reads and searches only. `plan` reads only and returns a plan instead of making changes. Both non-general kinds are barred from writing, running commands or editing, so they cannot change the workspace."
             }
         },
         "required": ["instructions"],

@@ -37,7 +37,7 @@ use serde_json::Value;
 
 use crate::ai::remote::client::{stream_chat, subagent_event, subagent_started_event};
 use crate::ai::remote::types::Endpoint;
-use crate::ai::tools::{RunHandle, SubAgentNotice, ToolContext, ToolMode};
+use crate::ai::tools::{AccessSet, RunHandle, SubAgentNotice, ToolContext, ToolMode};
 use crate::ai::types::{ChatEvent, ChatMessage};
 
 use transcript::{RunRecord, Stamped};
@@ -63,7 +63,9 @@ pub async fn spawn(arguments: Value, context: ToolContext) -> Result<String, Str
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|text| !text.is_empty())
-        .ok_or_else(|| "sub_agent requires an `instructions` field describing the task".to_string())?
+        .ok_or_else(|| {
+            "sub_agent requires an `instructions` field describing the task".to_string()
+        })?
         .to_string();
     let label = arguments
         .get("label")
@@ -73,6 +75,26 @@ pub async fn spawn(arguments: Value, context: ToolContext) -> Result<String, Str
         .map(str::to_string)
         .unwrap_or_default();
     let (endpoint, model) = resolve_model(&run, &arguments);
+    // The kind narrows what the agent may do, not only what it is told. A
+    // read-only agent is handed a gate whose access set has every writing
+    // capability switched off, so even a cached or invented call is refused by
+    // `decide_with_access` -- the prompt and the gate agree, and the gate is the
+    // one that cannot be argued with.
+    let kind = prompt::Kind::parse(arguments.get("type").and_then(Value::as_str));
+    let approval = if kind.may_change() {
+        run.approval.clone()
+    } else {
+        run.approval.with_access(AccessSet {
+            write: false,
+            terminal: false,
+            subagents: false,
+            jobs: false,
+            // Reading, including the web, is exactly what an explore or plan agent
+            // is for.
+            read: true,
+            web: true,
+        })
+    };
 
     let agent_id = uuid::Uuid::new_v4().to_string();
     let started_at = crate::database::utc_now();
@@ -108,6 +130,8 @@ pub async fn spawn(arguments: Value, context: ToolContext) -> Result<String, Str
         display_label: display_label.clone(),
         agent_id: agent_id.clone(),
         started_at,
+        kind,
+        approval,
     };
     tokio::spawn(run_agent(task));
 
@@ -133,6 +157,11 @@ struct AgentTask {
     display_label: String,
     agent_id: String,
     started_at: String,
+    /// What kind of work this is, which frames the prompt and narrowed the gate.
+    kind: prompt::Kind,
+    /// The approval gate to run under. Its own clone of the parent's when the kind
+    /// may change things, or a read-only narrowed one when it may not.
+    approval: crate::ai::tools::ApprovalGate,
 }
 
 /// Runs the sub-agent to completion and delivers its result.
@@ -153,6 +182,8 @@ async fn run_agent(task: AgentTask) {
         display_label,
         agent_id,
         started_at,
+        kind,
+        approval,
     } = task;
 
     // Collected with arrival times so a thought can be timed. Shared into the
@@ -202,7 +233,7 @@ async fn run_agent(task: AgentTask) {
 
     let messages = vec![ChatMessage {
         role: "user".to_string(),
-        content: prompt::instruction(&label, &prompt),
+        content: prompt::instruction(kind, &label, &prompt),
     }];
 
     let result = stream_chat(
@@ -223,11 +254,20 @@ async fn run_agent(task: AgentTask) {
         // to answer with pre-edit content.
         run.session_id.as_deref(),
         context.database.as_ref(),
-        run.approval.clone(),
+        // The narrowed gate for a read-only kind, or the parent's own for a
+        // general one. Either way the pending-prompt map is shared, so an
+        // approval still reaches the same answer command.
+        approval,
         Arc::clone(&context.cancelled),
         // A sub-agent's own run has no sub-agent default: it cannot spawn, so
         // there is nothing for the value to configure.
         None,
+        // Nor a vision model: a sub-agent has no reason to open an image, and
+        // withholding it keeps the preference resolved in one place.
+        None,
+        // The parent's compaction setting, so a long delegated run compacts the
+        // same way the conversation that started it does.
+        run.compaction,
         false,
         on_event,
         on_search,
@@ -346,7 +386,6 @@ mod tests {
             model: "parent-model".into(),
             reasoning: ReasoningEffort("medium".into()),
             web_search_enabled: false,
-            mode: ToolMode::Agent,
             enable_reasoning_control: false,
             local: false,
             run_id: "run-1".into(),
@@ -354,6 +393,8 @@ mod tests {
             approval: ApprovalGate::new(PermissionMode::Ask),
             emit: Arc::new(|_| {}),
             subagent_default,
+            vision_model: None,
+            compaction: crate::ai::compact::Compaction::Normal,
             jobs_created: std::sync::atomic::AtomicUsize::new(0),
         })
     }
@@ -382,7 +423,8 @@ mod tests {
             },
             "sub-model".to_string(),
         ));
-        let (endpoint, model) = resolve_model(&run(configured.clone()), &json!({ "instructions": "x" }));
+        let (endpoint, model) =
+            resolve_model(&run(configured.clone()), &json!({ "instructions": "x" }));
         assert_eq!(endpoint.id, "sub-provider");
         assert_eq!(model, "sub-model");
 
@@ -421,7 +463,9 @@ mod tests {
             run: Some(run(None)),
             ..ToolContext::default()
         };
-        let error = spawn(json!({}), context).await.expect_err("no instructions");
+        let error = spawn(json!({}), context)
+            .await
+            .expect_err("no instructions");
         assert!(error.contains("instructions"), "{error}");
     }
 }

@@ -304,11 +304,13 @@ fn job_model(
     selected_local: impl FnOnce() -> Option<String>,
 ) -> Result<JobModel, String> {
     if local {
-        let id = selected_local().filter(|id| !id.trim().is_empty()).ok_or_else(|| {
-            "This run is on a local model that is not recorded, so a job could not load it. \
+        let id = selected_local()
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| {
+                "This run is on a local model that is not recorded, so a job could not load it. \
              Pick the model in Settings > Local and try again."
-                .to_string()
-        })?;
+                    .to_string()
+            })?;
         return Ok(JobModel::Local { id });
     }
     Ok(JobModel::Remote {
@@ -411,9 +413,11 @@ mod tests {
     /// A relative time is turned into the absolute moment the database stores.
     #[test]
     fn a_once_job_in_twenty_minutes_becomes_a_moment() {
-        let schedule =
-            parse_schedule(Some(&json!({"kind": "once", "in_minutes": 20})), at("2026-01-01T10:00:00Z"))
-                .expect("once");
+        let schedule = parse_schedule(
+            Some(&json!({"kind": "once", "in_minutes": 20})),
+            at("2026-01-01T10:00:00Z"),
+        )
+        .expect("once");
         assert_eq!(
             schedule,
             JobSchedule::Once {
@@ -458,7 +462,13 @@ mod tests {
             at("2026-01-01T10:00:00Z"),
         )
         .expect("weekly");
-        assert_eq!(untimed, JobSchedule::Weekly { weekday: 4, at: None });
+        assert_eq!(
+            untimed,
+            JobSchedule::Weekly {
+                weekday: 4,
+                at: None
+            }
+        );
     }
 
     /// A typo has to come back as something the model can correct, not as a job that
@@ -471,13 +481,17 @@ mod tests {
         )
         .expect_err("not a time");
         assert!(error.contains("HH:MM"), "{error}");
-        assert!(parse_schedule(Some(&json!({"kind": "daily"})), at("2026-01-01T10:00:00Z")).is_err());
+        assert!(
+            parse_schedule(Some(&json!({"kind": "daily"})), at("2026-01-01T10:00:00Z")).is_err()
+        );
         assert!(parse_schedule(
             Some(&json!({"kind": "weekly", "weekday": 9})),
             at("2026-01-01T10:00:00Z")
         )
         .is_err());
-        assert!(parse_schedule(Some(&json!({"kind": "hourly"})), at("2026-01-01T10:00:00Z")).is_err());
+        assert!(
+            parse_schedule(Some(&json!({"kind": "hourly"})), at("2026-01-01T10:00:00Z")).is_err()
+        );
     }
 
     /// A local job waits for a machine that is free and yields if it stops being free.
@@ -526,10 +540,18 @@ mod tests {
 
     #[test]
     fn a_schedule_reads_back_as_a_phrase() {
-        assert_eq!(describe(&JobSchedule::Once { at: None }), "once, as soon as it can");
-        assert_eq!(describe(&JobSchedule::Every { minutes: 30 }), "every 30 minutes");
         assert_eq!(
-            describe(&JobSchedule::Daily { at: "03:00".to_string() }),
+            describe(&JobSchedule::Once { at: None }),
+            "once, as soon as it can"
+        );
+        assert_eq!(
+            describe(&JobSchedule::Every { minutes: 30 }),
+            "every 30 minutes"
+        );
+        assert_eq!(
+            describe(&JobSchedule::Daily {
+                at: "03:00".to_string()
+            }),
             "every day at 03:00"
         );
         assert_eq!(

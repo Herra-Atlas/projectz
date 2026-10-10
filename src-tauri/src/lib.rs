@@ -1,6 +1,7 @@
 mod ai;
 mod commands;
 mod database;
+mod documents;
 mod jobs;
 mod observation;
 mod panel;
@@ -29,7 +30,11 @@ pub fn sync_jobs_toggle(app: &tauri::AppHandle, paused: bool) {
         return;
     };
     let _ = item.0.set_checked(!paused);
-    let _ = item.0.set_text(if paused { "Jobs paused" } else { "Jobs running" });
+    let _ = item.0.set_text(if paused {
+        "Jobs paused"
+    } else {
+        "Jobs running"
+    });
 }
 
 /// Brings the main window up and in front.
@@ -132,7 +137,10 @@ pub fn run() {
                         // The Jobs screen reads its state from the database, so it
                         // needs telling that the switch moved -- and this is the same
                         // event a run emits, which it already listens for.
-                        let _ = app.emit("job-event", serde_json::json!({ "status": "paused", "paused": pause }));
+                        let _ = app.emit(
+                            "job-event",
+                            serde_json::json!({ "status": "paused", "paused": pause }),
+                        );
                     }
                     "quit" => {
                         if let Some(runtime) = app.try_state::<ai::runtime::AiRuntime>() {
@@ -180,6 +188,7 @@ pub fn run() {
             commands::ai_cancel_chat,
             commands::ai_skip_local_reasoning,
             commands::ai_answer_approval,
+            commands::ai_answer_question,
             commands::ai_set_viewed_session,
             commands::ai_generate_title,
             commands::skills_list,
@@ -250,6 +259,8 @@ pub fn run() {
             commands::local_model_unload,
             panel::fs::panel_fs_list,
             panel::fs::panel_read_preview,
+            panel::fs::panel_read_bytes,
+            panel::fs::panel_sheet_grid,
             panel::fs::panel_write_file,
             panel::fs::panel_create_file,
             panel::fs::panel_create_folder,

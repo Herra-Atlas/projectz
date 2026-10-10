@@ -8,6 +8,31 @@ export const PREFERENCES_KEY = "app.preferences";
 /** Upper bound on the title-model chain. */
 export const MAX_TITLE_MODELS = 3;
 
+/** How aggressively old context is elided before a request is sent.
+ *
+ * Wire names match `Compaction` in Rust (`ai/compact.rs`). An unknown or absent
+ * value deserializes to `normal` there, which is the safe default: losing some
+ * old tool output is never as bad as a request the provider refuses for being
+ * too long. */
+export type Compaction = "off" | "normal" | "fast";
+
+/** Human labels for the compaction selector, in the order they are offered. */
+export const COMPACTION_LABELS: Record<Compaction, string> = {
+  off: "Off",
+  normal: "Normal",
+  fast: "Fast",
+};
+
+/** True when a value is a compaction level the backend accepts. */
+export function isCompaction(value: unknown): value is Compaction {
+  return value === "off" || value === "normal" || value === "fast";
+}
+
+/** Reads a stored compaction level, falling back to `normal`. */
+export function compactionOrDefault(value: unknown): Compaction {
+  return isCompaction(value) ? value : "normal";
+}
+
 export type Preferences = {
   /**
    * Models tried in order when naming a new conversation. The first entry is
@@ -28,9 +53,29 @@ export type Preferences = {
    * `{localModelId}` both fit and both resolve through the same backend path.
    */
   subagentModel: ModelSelection | null;
+  /**
+   * The model an image is shown to when `read_file` opens one.
+   *
+   * Same selection shape as the sub-agent model, and the same `null` meaning: no
+   * vision model, so reading an image is a clear refusal rather than a silent
+   * attempt at a model that cannot see.
+   */
+  visionModel: ModelSelection | null;
+  /**
+   * How aggressively old context is elided before a request is sent.
+   *
+   * Read by the backend at the start of each run; `normal` elides old tool
+   * output, `fast` also drops older turns.
+   */
+  compaction: Compaction;
 };
 
-const DEFAULT_PREFERENCES: Preferences = { sessionTitleModels: [], subagentModel: null };
+const DEFAULT_PREFERENCES: Preferences = {
+  sessionTitleModels: [],
+  subagentModel: null,
+  visionModel: null,
+  compaction: "normal",
+};
 
 /**
  * Loads `app.preferences` once per enabled run and exposes a setter that
@@ -55,6 +100,10 @@ export function usePreferences(enabled: boolean) {
           // Absent on a record written before sub-agents existed, which reads as
           // "same as the parent" rather than failing.
           subagentModel: saved?.subagentModel ?? null,
+          // Absent on a record written before either existed: no vision model
+          // (images refuse cleanly) and normal compaction.
+          visionModel: saved?.visionModel ?? null,
+          compaction: compactionOrDefault(saved?.compaction),
         });
       })
       .catch(() => undefined);

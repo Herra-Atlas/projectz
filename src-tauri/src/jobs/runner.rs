@@ -305,7 +305,8 @@ fn release_local_model(runtime: &AiRuntime) {
     let Some(loaded) = manager.status().loaded_model_id else {
         return;
     };
-    let soon = schedule::stamp(Utc::now() + chrono::Duration::seconds(KEEP_LOADED.as_secs() as i64));
+    let soon =
+        schedule::stamp(Utc::now() + chrono::Duration::seconds(KEEP_LOADED.as_secs() as i64));
     let followed = runtime
         .database()
         .list_jobs()
@@ -314,7 +315,10 @@ fn release_local_model(runtime: &AiRuntime) {
         .any(|job| {
             job.enabled
                 && matches!(&job.model, JobModel::Local { id } if *id == loaded)
-                && job.next_run_at.as_deref().is_some_and(|at| at <= soon.as_str())
+                && job
+                    .next_run_at
+                    .as_deref()
+                    .is_some_and(|at| at <= soon.as_str())
         });
     if followed {
         tracing::info!(model = %loaded, "keeping the local model: another job is next");

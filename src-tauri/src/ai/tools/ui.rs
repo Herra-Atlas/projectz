@@ -187,7 +187,7 @@ pub fn panel_snippet(result: &str, failed: bool) -> Option<String> {
 /// a search as "src" — the directory — and say nothing about the pattern, which
 /// is the actual question.
 fn detail_for(tool: &str, arguments: &Value) -> String {
-    if tool == "search_files" {
+    if matches!(tool, "grep" | "glob") {
         let pattern = string_at(arguments, "pattern").unwrap_or_default();
         // A search without a path covered the whole workspace, and that is worth
         // saying: it is the difference between "needle" and "needle in src".
@@ -195,6 +195,22 @@ fn detail_for(tool: &str, arguments: &Value) -> String {
             Some(path) => format!("{pattern} in {path}"),
             None => pattern,
         };
+    }
+    // A move is identified by both ends: one path alone does not say where the
+    // file went, which is the fact the row is about.
+    if tool == "move_file" {
+        return match (
+            string_at(arguments, "path"),
+            string_at(arguments, "destination"),
+        ) {
+            (Some(from), Some(to)) => format!("{from} → {to}"),
+            (Some(from), None) => from,
+            _ => String::new(),
+        };
+    }
+    // A background command is identified by the id the model was handed.
+    if matches!(tool, "terminal_output" | "terminal_kill") {
+        return string_at(arguments, "id").unwrap_or_default();
     }
     // A sub-agent is identified by the label the caller gave it, and only failing
     // that by the task itself. The instructions are the fallback because they are
@@ -236,20 +252,28 @@ fn label_for(tool: &str) -> &'static str {
     match tool {
         "read_file" => "Read file",
         "list_dir" => "List folder",
-        "search_files" => "Find files",
+        "grep" => "Search",
+        "glob" => "Find files",
         "write_file" => "Write file",
+        "write_document" => "Write document",
         "edit_file" => "Edit file",
         // Its own label rather than sharing `Edit file`: the two take different
         // arguments, and a panel where two rows say the same thing for edits by
         // text and edits by line is a row that cannot be told apart at a glance.
         "edit_lines" => "Edit lines",
+        "move_file" => "Move",
+        "delete_file" => "Delete",
         "run_terminal" => "Run command",
+        "terminal_output" => "Read output",
+        "terminal_kill" => "Stop command",
         "search_web" => "Search the web",
         "web_fetch" => "Open page",
         "skill_read" => "Read skill",
         "skill_manage" => "Save skill",
         "sub_agent" => "Run agent",
         "schedule_job" => "Schedule job",
+        "ask_user" => "Ask user",
+        "todo" => "Checklist",
         _ => "Tool call",
     }
 }
@@ -266,14 +290,23 @@ fn outcome_for(tool: &str, result: &str) -> Result<String, String> {
         "read_file" => Ok(plural(count_numbered_lines(result), "line")),
         // Read from the shape each search tool writes, so the panel and the model
         // are looking at the same figure rather than two independent counts.
-        "search_files" | "search_web" => Ok(search_outcome(tool, result)),
+        "grep" | "search_web" => Ok(search_outcome(tool, result)),
+        // A glob reports how many files it matched.
+        "glob" => Ok(glob_outcome(result)),
         // A workspace listing ends with how many entries it showed.
         "list_dir" => Ok(listing_outcome(result)),
         "run_terminal" => exit_outcome(result),
+        // A background command reports in its first line whether it is still
+        // running; a move and a delete say what they did in their first line.
+        "move_file" | "delete_file" | "terminal_output" | "terminal_kill" => {
+            Ok(first_line(result).to_string())
+        }
         // A write says what it did in words that read better than a figure, and
         // so does a line edit -- its own result opens with exactly that, so
         // there is nothing to count here.
-        "write_file" | "edit_file" | "edit_lines" => Ok(first_line(result).to_string()),
+        "write_file" | "write_document" | "edit_file" | "edit_lines" => {
+            Ok(first_line(result).to_string())
+        }
         _ => Ok(String::new()),
     }
 }
@@ -323,10 +356,10 @@ fn count_numbered_lines(result: &str) -> usize {
 /// How many results a search found, from the shape its own tool writes.
 ///
 /// Two formats, because there are two search tools with different output and
-/// neither has a count line: `search_files` appends a trailer saying how many
-/// lines matched, and `search_web` numbers its entries `[1]`, `[2]`. Reading the
-/// first is the number the model was given; counting the second is the only way
-/// to know it, since the context it returns is prose plus numbered entries.
+/// neither has a count line: `grep` appends a trailer saying how many lines
+/// matched, and `search_web` numbers its entries `[1]`, `[2]`. Reading the first
+/// is the number the model was given; counting the second is the only way to know
+/// it, since the context it returns is prose plus numbered entries.
 ///
 /// Anything unrecognised reports nothing rather than a guess. A wrong count is
 /// worse than none: it would be read as a fact about the search.
@@ -334,7 +367,7 @@ fn search_outcome(tool: &str, result: &str) -> String {
     if result.starts_with("No matches") {
         return "no matches".to_string();
     }
-    if tool == "search_files" {
+    if tool == "grep" {
         // The trailer reads "N matching lines in M files". The phrase "matching
         // lines" is the anchor and the count is the word before it, rather than
         // after it: the number and the noun it counts are separated by the
@@ -375,6 +408,25 @@ fn listing_outcome(result: &str) -> String {
         }
         if line.starts_with("The directory is empty") {
             return "empty".to_string();
+        }
+    }
+    String::new()
+}
+
+/// How many files a glob matched, from the trailer it appends.
+///
+/// The trailer reads "N of M files", so the count is the first word. An empty
+/// result is reported as none rather than left blank, because "found nothing" is
+/// exactly the fact a reader is scanning the row for.
+fn glob_outcome(result: &str) -> String {
+    for line in result.lines().rev().take(2) {
+        if let Some((count, _)) = line.trim().split_once(" of ") {
+            if let Ok(number) = count.parse::<usize>() {
+                return plural(number, "file");
+            }
+        }
+        if line.starts_with("No files match") {
+            return "no matches".to_string();
         }
     }
     String::new()
@@ -569,12 +621,12 @@ mod tests {
 
     #[test]
     fn a_search_names_its_pattern_and_where_it_looked() {
-        let root = summarize("search_files", &json!({ "pattern": "needle" }), "", true);
-        assert_eq!(root.label, "Find files");
+        let root = summarize("grep", &json!({ "pattern": "needle" }), "", true);
+        assert_eq!(root.label, "Search");
         assert_eq!(root.detail, "needle");
 
         let scoped = summarize(
-            "search_files",
+            "grep",
             &json!({ "pattern": "needle", "path": "src" }),
             "",
             true,
@@ -587,7 +639,7 @@ mod tests {
     #[test]
     fn a_search_reports_the_match_count_it_appended() {
         let summary = summarize(
-            "search_files",
+            "grep",
             &json!({ "pattern": "x" }),
             "a.rs:1: x\n\n100 matching lines in 40 files",
             true,
@@ -597,7 +649,7 @@ mod tests {
         // The singular case, because the tool writes it that way and a row
         // reading "1 results" would look like a counting bug.
         let one = summarize(
-            "search_files",
+            "grep",
             &json!({ "pattern": "x" }),
             "a.rs:1: x\n\n1 matching line in 1 files",
             true,
@@ -605,7 +657,7 @@ mod tests {
         assert_eq!(one.outcome, Ok("1 result".to_string()));
 
         let none = summarize(
-            "search_files",
+            "grep",
             &json!({ "pattern": "x" }),
             "No matches for `x` in 40 files.",
             true,

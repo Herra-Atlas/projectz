@@ -71,12 +71,33 @@ pub const WRITE_FILE: ToolSpec = ToolSpec {
     },
 };
 
-/// Replace one exact run of text in a file.
+/// Replace text in a file, one change or several.
+///
+/// # Why the match is lenient as well as exact
+///
+/// An exact-match editor is the right default: it cannot change the wrong line.
+/// But it fails on drift that is not a mistake -- a curly quote where the model
+/// typed a straight one, a tab where it typed spaces, a line it reproduced with
+/// the wrong indentation. Every such failure costs a round trip: the model
+/// re-reads the file and tries again. So a match that is not found exactly is
+/// looked for again with whitespace and look-alike punctuation folded, and only
+/// then refused. The exact pass runs first, so a lenient match can never override
+/// a precise one.
+///
+/// # Why several edits in one call
+///
+/// A change that spans a file is usually several changes, and issuing them one at
+/// a time makes each one's line numbers depend on whether the last one landed.
+/// A batch is applied in memory and written once, all-or-nothing: if any change
+/// cannot be made the file is left exactly as it was, rather than half-edited.
 pub const EDIT_FILE: ToolSpec = ToolSpec {
     name: "edit_file",
-    description: "Replace an exact piece of text in a file. The old text must appear exactly as given; \
-                  set replace_all to change every occurrence. Read the file first so the old text matches \
-                  exactly, including its whitespace. Prefer edit_lines when you know which lines to change.",
+    description: "Replace text in a file. Give a single change with `old_text`/`new_text`, or \
+                  several at once with `edits`. Each `old_text` must identify one place: include \
+                  enough surrounding text that it is unique, or set `replace_all`. The match is \
+                  tried exactly first, then leniently (ignoring indentation and straight/curly \
+                  quote differences), so minor whitespace drift does not fail the edit. Read the \
+                  file first. Prefer edit_lines when you know which lines to change.",
     parameters: r#"{
         "type": "object",
         "properties": {
@@ -86,18 +107,32 @@ pub const EDIT_FILE: ToolSpec = ToolSpec {
             },
             "old_text": {
                 "type": "string",
-                "description": "The exact text to replace, including indentation."
+                "description": "The text to replace, including its indentation. Use this for a single change."
             },
             "new_text": {
                 "type": "string",
-                "description": "The text to put in its place."
+                "description": "The text to put in its place, for a single change."
             },
             "replace_all": {
                 "type": "boolean",
-                "description": "Replace every occurrence instead of requiring exactly one."
+                "description": "For a single change: replace every occurrence instead of requiring exactly one."
+            },
+            "edits": {
+                "type": "array",
+                "description": "Several changes applied together, all or nothing. Use instead of old_text/new_text.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "old_text": { "type": "string", "description": "The text to replace." },
+                        "new_text": { "type": "string", "description": "The text to put in its place." },
+                        "replace_all": { "type": "boolean", "description": "Replace every occurrence of this piece." }
+                    },
+                    "required": ["old_text", "new_text"],
+                    "additionalProperties": false
+                }
             }
         },
-        "required": ["path", "old_text", "new_text"],
+        "required": ["path"],
         "additionalProperties": false
     }"#,
     effect: super::Effect::Write,
@@ -358,56 +393,228 @@ fn write(arguments: Value, root: PathBuf, context: &super::ToolContext) -> Resul
 
 fn edit(arguments: Value, root: PathBuf, context: &super::ToolContext) -> Result<String, String> {
     let path = required_path(&arguments)?;
-    let old_text = string_of(&arguments, "old_text")?;
-    let new_text = string_of(&arguments, "new_text")?;
+    let edits = changes_of(&arguments)?;
+
+    let resolved = super::file::resolve_within(&root, &path)?;
+    let original = std::fs::read_to_string(&resolved)
+        .map_err(|error| format!("Could not read {path}: {error}"))?;
+
+    // Every change is applied in memory against the running text, so a later edit
+    // sees the result of an earlier one, and the file is written once and only if
+    // all of them succeeded. A batch that fails halfway leaves the file untouched
+    // rather than half-edited.
+    let mut body = original.clone();
+    let mut lenient = 0usize;
+    for (index, change) in edits.iter().enumerate() {
+        let applied = apply(&body, change)
+            .map_err(|error| format!("Change {} of {}: {error}", index + 1, edits.len()))?;
+        if applied.lenient {
+            lenient += 1;
+        }
+        body = applied.body;
+    }
+
+    if body == original {
+        // Nothing changed. Reported rather than written, so an edit that did
+        // nothing does not move the file's modification time.
+        return Ok(format!("No change to {path}; the new text was identical."));
+    }
+
+    atomic_write(&resolved, body.as_bytes())?;
+    context.report_diff(super::diff::diff(&original, &body));
+
+    let noun = if edits.len() == 1 {
+        "change"
+    } else {
+        "changes"
+    };
+    let mut result = format!("Applied {} {noun} to {path}.", edits.len());
+    if lenient > 0 {
+        // Named because it is the one case worth a second look: the text given did
+        // not match byte for byte. Saying the rest of the file was left alone is
+        // the reassurance the model needs to not re-edit it.
+        result.push_str(&format!(
+            " {lenient} located after ignoring whitespace or punctuation differences; only the \
+             matched text was replaced."
+        ));
+    }
+    Ok(result)
+}
+
+/// One replacement, from either the single-change or the batch form.
+struct Change {
+    old_text: String,
+    new_text: String,
+    replace_all: bool,
+}
+
+/// The result of applying one change.
+struct Applied {
+    body: String,
+    /// The text was located by the lenient pass rather than exactly.
+    lenient: bool,
+}
+
+/// Reads the changes from whichever shape the caller used.
+///
+/// Both are accepted because the single-change shape is the one every model was
+/// trained on, and the batch is the improvement. Taking only the batch would make
+/// a one-line edit carry an array it does not need; taking both costs one branch
+/// and keeps the familiar call working exactly as before.
+fn changes_of(arguments: &Value) -> Result<Vec<Change>, String> {
+    let batch = arguments.get("edits");
+    let single = arguments.get("old_text").is_some() || arguments.get("new_text").is_some();
+    if batch.is_some() && single {
+        return Err(
+            "Pass either `edits` (a list of changes) or `old_text`/`new_text` (one change), not \
+             both."
+                .to_string(),
+        );
+    }
+    if let Some(batch) = batch {
+        let list = batch
+            .as_array()
+            .ok_or("`edits` must be an array of changes")?;
+        if list.is_empty() {
+            return Err("`edits` is empty; there is nothing to change.".to_string());
+        }
+        return list.iter().map(change_from).collect();
+    }
+    Ok(vec![change_from(arguments)?])
+}
+
+/// Validates one change object, wherever it came from.
+fn change_from(value: &Value) -> Result<Change, String> {
+    let old_text = value
+        .get("old_text")
+        .and_then(Value::as_str)
+        .ok_or("a change needs a string `old_text`")?
+        .to_string();
     // An empty needle would match at every position and the count would be the
     // file's length in bytes. Reported plainly rather than as a match count.
     if old_text.is_empty() {
-        return Err("`old_text` cannot be empty; there would be nothing to identify".into());
+        return Err("`old_text` cannot be empty; there would be nothing to identify".to_string());
     }
-    let replace_all = arguments
+    let new_text = value
+        .get("new_text")
+        .and_then(Value::as_str)
+        .ok_or("a change needs a string `new_text`")?
+        .to_string();
+    let replace_all = value
         .get("replace_all")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    Ok(Change {
+        old_text,
+        new_text,
+        replace_all,
+    })
+}
 
-    let resolved = super::file::resolve_within(&root, &path)?;
-    let body = std::fs::read_to_string(&resolved)
-        .map_err(|error| format!("Could not read {path}: {error}"))?;
-
-    let occurrences = body.matches(&old_text).count();
-    if occurrences == 0 {
+/// Applies one change: exactly first, then leniently.
+fn apply(body: &str, change: &Change) -> Result<Applied, String> {
+    let occurrences = body.matches(&change.old_text).count();
+    if occurrences > 1 && !change.replace_all {
+        // Ambiguity is refused rather than guessed. Picking the first of two
+        // matches is how a model silently edits the wrong function, and it is
+        // invisible in the diff it reports back.
         return Err(format!(
-            "`old_text` was not found in {path}. Read the file and copy the text exactly, \
-             including its indentation."
+            "`old_text` appears {occurrences} times. Include more surrounding text to identify \
+             one, or set replace_all to change all of them."
         ));
     }
-    // Ambiguity is refused rather than guessed. Picking the first of two matches
-    // is how a model silently edits the wrong function, and it is invisible in
-    // the diff it reports back.
-    if occurrences > 1 && !replace_all {
-        return Err(format!(
-            "`old_text` appears {occurrences} times in {path}. Include more surrounding text to \
-             identify one, or set replace_all to change all of them."
-        ));
-    }
-
-    let updated = if replace_all {
-        body.replace(&old_text, &new_text)
-    } else {
-        body.replacen(&old_text, &new_text, 1)
-    };
-    atomic_write(&resolved, updated.as_bytes())?;
-    context.report_diff(super::diff::diff(&body, &updated));
-
-    Ok(format!(
-        "Replaced {} occurrence{} in {path}.",
-        if replace_all { occurrences } else { 1 },
-        if replace_all && occurrences != 1 {
-            "s"
+    if occurrences > 0 {
+        let updated = if change.replace_all {
+            body.replace(&change.old_text, &change.new_text)
         } else {
-            ""
+            body.replacen(&change.old_text, &change.new_text, 1)
+        };
+        return Ok(Applied {
+            body: updated,
+            lenient: false,
+        });
+    }
+    // Nothing matched exactly. Look again with indentation, whitespace runs and
+    // look-alike punctuation folded away.
+    match lenient_range(body, &change.old_text) {
+        Some((start, end)) => {
+            let mut updated = String::with_capacity(body.len() + change.new_text.len());
+            updated.push_str(&body[..start]);
+            updated.push_str(&change.new_text);
+            updated.push_str(&body[end..]);
+            Ok(Applied {
+                body: updated,
+                lenient: true,
+            })
         }
-    ))
+        None => Err(
+            "`old_text` was not found. Read the file and copy the text exactly, or use edit_lines \
+             with the line numbers from a read."
+                .to_string(),
+        ),
+    }
+}
+
+/// Finds the byte range of `needle` in `body`, ignoring per-line whitespace and
+/// look-alike punctuation.
+///
+/// Line-based rather than character-based on purpose: the drift this exists to
+/// absorb -- a re-indented block, tabs where spaces were typed, a curly apostrophe
+/// -- is per-line, and comparing whole lines cannot slide past a boundary and
+/// match the wrong function the way a character window could.
+fn lenient_range(body: &str, needle: &str) -> Option<(usize, usize)> {
+    let wanted: Vec<String> = needle.lines().map(normalise).collect();
+    if wanted.is_empty() {
+        return None;
+    }
+    let spans = line_spans(body);
+    if spans.len() < wanted.len() {
+        return None;
+    }
+    for start in 0..=spans.len() - wanted.len() {
+        let matched = wanted
+            .iter()
+            .enumerate()
+            .all(|(offset, expected)| normalise(spans[start + offset].2) == *expected);
+        if matched {
+            return Some((spans[start].0, spans[start + wanted.len() - 1].1));
+        }
+    }
+    None
+}
+
+/// Each line of `body` as `(start byte, end byte, text)`, the range excluding the
+/// line's newline.
+fn line_spans(body: &str) -> Vec<(usize, usize, &str)> {
+    let mut spans = Vec::new();
+    let mut offset = 0;
+    for chunk in body.split_inclusive('\n') {
+        let text = chunk.strip_suffix('\n').unwrap_or(chunk);
+        let text = text.strip_suffix('\r').unwrap_or(text);
+        spans.push((offset, offset + text.len(), text));
+        offset += chunk.len();
+    }
+    spans
+}
+
+/// Folds whitespace and look-alike punctuation so two lines that read the same
+/// compare equal.
+///
+/// Only the look-alikes a model actually produces are folded -- curly quotes and
+/// dashes -- rather than a broad Unicode normalisation, because a fold that
+/// rewrote more could make two genuinely different lines compare equal and the
+/// lenient pass would then change the wrong one.
+fn normalise(line: &str) -> String {
+    let folded: String = line
+        .chars()
+        .map(|character| match character {
+            '\u{2018}' | '\u{2019}' | '\u{201b}' => '\'',
+            '\u{201c}' | '\u{201d}' | '\u{201f}' => '"',
+            '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}' => '-',
+            other => other,
+        })
+        .collect();
+    folded.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn required_path(arguments: &Value) -> Result<String, String> {
@@ -431,7 +638,10 @@ fn file_length(path: &Path) -> Result<u64, String> {
 /// The temporary file shares a directory with the target so the rename stays on
 /// one filesystem and is therefore atomic; a temporary file in the system temp
 /// directory could be a different volume, where rename silently copies instead.
-fn atomic_write(target: &Path, contents: &[u8]) -> Result<(), String> {
+///
+/// Shared with [`super::export`], which writes a document the same way: a partial
+/// `.docx` is a corrupt one, so it wants the same all-or-nothing guarantee.
+pub(crate) fn atomic_write(target: &Path, contents: &[u8]) -> Result<(), String> {
     let parent = target
         .parent()
         .ok_or_else(|| format!("{} has no parent directory", target.display()))?;
@@ -568,7 +778,7 @@ mod tests {
             &discarding(),
         )
         .expect("edit");
-        assert!(out.contains("3 occurrences"), "{out}");
+        assert!(out.contains("Applied 1 change"), "{out}");
         assert_eq!(body_of(&root, "a.rs"), "y\ny\ny\n");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -633,11 +843,98 @@ mod tests {
             &discarding(),
         )
         .expect("edit");
-        assert!(out.contains("1 occurrence"), "{out}");
+        assert!(out.contains("Applied 1 change"), "{out}");
         assert_eq!(
             body_of(&root, "a.rs"),
             "    let x = 1;\n        let x = 2;\n"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The lenient pass. A model that reproduced the text with different
+    /// indentation, or typed a straight quote for a curly one, still gets the edit
+    /// -- and is told it was lenient, because that is the case worth a second look.
+    #[test]
+    fn drifted_whitespace_or_punctuation_still_matches() {
+        let root = root();
+        // Tabs in the file, spaces in the needle, so the exact pass genuinely
+        // cannot match and the lenient pass is what has to catch it.
+        std::fs::write(root.join("a.rs"), "fn a() {\n\tlet x = 1;\n}\n").expect("seed");
+        std::fs::write(root.join("b.rs"), "let s = \u{201c}hi\u{201d};\n").expect("seed");
+
+        let out = edit(
+            json!({ "path": "a.rs", "old_text": "    let x = 1;", "new_text": "    let x = 2;" }),
+            root.clone(),
+            &discarding(),
+        )
+        .expect("lenient edit");
+        assert!(out.contains("ignoring whitespace"), "{out}");
+        assert_eq!(body_of(&root, "a.rs"), "fn a() {\n    let x = 2;\n}\n");
+
+        edit(
+            json!({ "path": "b.rs", "old_text": "let s = \"hi\";", "new_text": "let s = \"bye\";" }),
+            root.clone(),
+            &discarding(),
+        )
+        .expect("quote edit");
+        assert_eq!(body_of(&root, "b.rs"), "let s = \"bye\";\n");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A batch is applied together, so a change that spans a file is one write
+    /// rather than several whose line numbers keep moving.
+    #[test]
+    fn several_changes_are_applied_together() {
+        let root = root();
+        std::fs::write(root.join("a.rs"), "let a = 1;\nlet b = 2;\n").expect("seed");
+        let out = edit(
+            json!({ "path": "a.rs", "edits": [
+                { "old_text": "let a = 1;", "new_text": "let a = 10;" },
+                { "old_text": "let b = 2;", "new_text": "let b = 20;" }
+            ]}),
+            root.clone(),
+            &discarding(),
+        )
+        .expect("batch");
+        assert!(out.contains("Applied 2 changes"), "{out}");
+        assert_eq!(body_of(&root, "a.rs"), "let a = 10;\nlet b = 20;\n");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// All or nothing. If the second change cannot be made, the first is not left
+    /// applied -- which is the whole reason a batch is written once at the end.
+    #[test]
+    fn a_batch_that_fails_leaves_the_file_untouched() {
+        let root = root();
+        std::fs::write(root.join("a.rs"), "let a = 1;\nlet b = 2;\n").expect("seed");
+        let error = edit(
+            json!({ "path": "a.rs", "edits": [
+                { "old_text": "let a = 1;", "new_text": "let a = 10;" },
+                { "old_text": "not present here", "new_text": "x" }
+            ]}),
+            root.clone(),
+            &discarding(),
+        )
+        .expect_err("second change fails");
+        assert!(error.contains("Change 2 of 2"), "{error}");
+        assert_eq!(body_of(&root, "a.rs"), "let a = 1;\nlet b = 2;\n");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The two shapes are mutually exclusive, so a call that fills both cannot be
+    /// silently half-honoured.
+    #[test]
+    fn passing_both_change_shapes_is_refused() {
+        let root = root();
+        std::fs::write(root.join("a.rs"), "x").expect("seed");
+        let error = edit(
+            json!({ "path": "a.rs", "old_text": "x", "new_text": "y",
+                    "edits": [{ "old_text": "x", "new_text": "z" }] }),
+            root.clone(),
+            &discarding(),
+        )
+        .expect_err("both");
+        assert!(error.contains("not both"), "{error}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

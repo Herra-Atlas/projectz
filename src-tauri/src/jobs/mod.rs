@@ -167,7 +167,12 @@ impl Scheduler {
     /// moment, and the two-sample confirm exists to stop the app starting work
     /// nobody asked for, which is not what this is. The lane is still respected:
     /// starting here must not put two runs in one lane at once.
-    pub fn run_now(&self, app: &AppHandle, runtime: &AiRuntime, job_id: &str) -> Result<(), String> {
+    pub fn run_now(
+        &self,
+        app: &AppHandle,
+        runtime: &AiRuntime,
+        job_id: &str,
+    ) -> Result<(), String> {
         let job = runtime
             .database()
             .job(job_id)?
@@ -395,10 +400,9 @@ fn start(app: &AppHandle, runtime: &AiRuntime, state: &Arc<State>, job: Job) {
         // The next time comes from the schedule, so the interval is measured from
         // the end of the last attempt rather than from a time it may have missed.
         let next = schedule::next_run(&job.schedule, Utc::now());
-        if let Err(error) =
-            runtime
-                .database()
-                .touch_job(&job.id, outcome.status, next.as_deref())
+        if let Err(error) = runtime
+            .database()
+            .touch_job(&job.id, outcome.status, next.as_deref())
         {
             tracing::warn!(job = %job.id, %error, "could not record a job's next run");
         }

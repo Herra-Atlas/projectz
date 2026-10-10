@@ -225,7 +225,10 @@ mod tests {
             vram_percent: Some(5.0),
             idle_seconds: Some(600),
         };
-        assert_eq!(start_blocked_by(&state, &conditions(Some(60.0), Some(300))), None);
+        assert_eq!(
+            start_blocked_by(&state, &conditions(Some(60.0), Some(300))),
+            None
+        );
     }
 
     /// A figure we cannot read must not block a job: an unreadable GPU would

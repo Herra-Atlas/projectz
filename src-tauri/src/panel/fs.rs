@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
@@ -114,7 +114,10 @@ pub fn list_in(root: &Path, relative: &str) -> Result<Vec<TreeEntry>, String> {
 pub fn panel_fs_list(relative: String) -> Result<Vec<TreeEntry>, String> {
     eprintln!("[panel_fs_list] called with relative='{}'", relative);
     let result = list(&relative);
-    eprintln!("[panel_fs_list] returning {} entries", result.as_ref().map_or(0, |v| v.len()));
+    eprintln!(
+        "[panel_fs_list] returning {} entries",
+        result.as_ref().map_or(0, |v| v.len())
+    );
     result
 }
 
@@ -127,23 +130,67 @@ pub fn panel_fs_list(relative: String) -> Result<Vec<TreeEntry>, String> {
 #[tauri::command]
 pub fn panel_read_preview(relative: String) -> Result<String, String> {
     const MAX_PREVIEW_BYTES: u64 = 2 * 1024 * 1024;
+    let resolved = resolve_preview_file(&relative, MAX_PREVIEW_BYTES)?;
+    std::fs::read_to_string(&resolved)
+        .map_err(|error| format!("Could not read {}: {error}", resolved.display()))
+}
+
+/// Reading a file's bytes, for the previews that cannot be text.
+///
+/// A separate command rather than a flag on [`panel_read_preview`]: a `.docx` or
+/// a `.png` has no text to return, so a caller that wants bytes always wants
+/// bytes, and one that wants text always wants text. Merging them would mean a
+/// command whose return type depends on its argument.
+///
+/// Bytes rather than base64 through a string, because the frontend needs a Blob
+/// either way and base64 would inflate every document by a third on its way to
+/// being decoded again immediately.
+///
+/// The cap is larger than the text preview's -- a PDF or a photograph is
+/// legitimately megabytes, where a source file that large is not -- and it is
+/// still a *view*: the bytes are handed back to be drawn, not edited.
+#[tauri::command]
+pub fn panel_read_bytes(relative: String) -> Result<tauri::ipc::Response, String> {
+    const MAX_PREVIEW_BYTES: u64 = 25 * 1024 * 1024;
+    let resolved = resolve_preview_file(&relative, MAX_PREVIEW_BYTES)?;
+    let bytes = std::fs::read(&resolved)
+        .map_err(|error| format!("Could not read {}: {error}", resolved.display()))?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// A spreadsheet's sheets, for the panel's grid view.
+///
+/// Read in Rust rather than in the frontend because the parsing is already here:
+/// this is `documents::spreadsheet`, the same reader `read_file` uses on a sheet,
+/// so a model and the panel cannot disagree about what a `.xlsx` contains.
+#[tauri::command]
+pub fn panel_sheet_grid(relative: String) -> Result<Vec<crate::documents::SheetGrid>, String> {
+    const MAX_SHEET_BYTES: u64 = 25 * 1024 * 1024;
+    let resolved = resolve_preview_file(&relative, MAX_SHEET_BYTES)?;
+    crate::documents::spreadsheet(&resolved)
+}
+
+/// The file a preview command was asked for, checked and bounded.
+///
+/// Shared by all three preview reads so the containment rule, the folder check
+/// and the size message exist once: a command that skipped the check would be a
+/// way to read outside the workspace from the UI.
+fn resolve_preview_file(relative: &str, max_bytes: u64) -> Result<PathBuf, String> {
     let root = require_workspace()?;
-    let resolved = resolve_within(&root, if relative.is_empty() { "." } else { &relative })?;
+    let resolved = resolve_within(&root, if relative.is_empty() { "." } else { relative })?;
 
     let metadata = std::fs::metadata(&resolved)
         .map_err(|error| format!("Could not open {}: {error}", resolved.display()))?;
     if !metadata.is_file() {
-        return Err(format!("{} is a folder", relative));
+        return Err(format!("{relative} is a folder"));
     }
-    if metadata.len() > MAX_PREVIEW_BYTES {
+    if metadata.len() > max_bytes {
         return Err(format!(
-            "{} is larger than 2 MB, so it cannot be previewed here",
-            relative
+            "{relative} is larger than {} MB, so it cannot be previewed here",
+            max_bytes / (1024 * 1024)
         ));
     }
-
-    std::fs::read_to_string(&resolved)
-        .map_err(|error| format!("Could not read {}: {error}", resolved.display()))
+    Ok(resolved)
 }
 
 /// Overwriting a file from the panel's editor.
@@ -360,19 +407,26 @@ fn delete_in(root: &Path, relative: &str) -> Result<(), String> {
 
     if target_resolved.is_dir() {
         std::fs::remove_dir_all(&target_resolved).map_err(|error| {
-            format!("Could not delete directory {}: {error}", target_resolved.display())
+            format!(
+                "Could not delete directory {}: {error}",
+                target_resolved.display()
+            )
         })
     } else {
-        std::fs::remove_file(&target_resolved)
-            .map_err(|error| format!("Could not delete file {}: {error}", target_resolved.display()))
+        std::fs::remove_file(&target_resolved).map_err(|error| {
+            format!(
+                "Could not delete file {}: {error}",
+                target_resolved.display()
+            )
+        })
     }
 }
 
 /// Folders that are never worth listing.
 ///
-/// Shared with `tools::search`, which skips the same set when grepping. Two
-/// copies would drift, and the drift would show up as a directory that the agent
-/// can search but the user cannot open.
+/// Shared with `tools::walk`, which skips the same set when grepping or
+/// globbing. Two copies would drift, and the drift would show up as a directory
+/// that the agent can search but the user cannot open.
 const SKIPPED: [&str; 7] = [
     "node_modules",
     "target",
@@ -625,7 +679,10 @@ mod tests {
         // Check the old directory is gone and the new directory exists with contents
         assert!(!root.join("old_dir").exists(), "old directory still exists");
         assert!(root.join("new_dir").exists(), "new directory not created");
-        assert!(root.join("new_dir/file.txt").exists(), "file not found in renamed directory");
+        assert!(
+            root.join("new_dir/file.txt").exists(),
+            "file not found in renamed directory"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -653,7 +710,10 @@ mod tests {
         delete_in(&root, "to_delete.txt").expect("delete failed");
 
         // Check the file is gone
-        assert!(!root.join("to_delete.txt").exists(), "file still exists after delete");
+        assert!(
+            !root.join("to_delete.txt").exists(),
+            "file still exists after delete"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -668,7 +728,10 @@ mod tests {
         delete_in(&root, "to_delete_dir").expect("delete failed");
 
         // Check the directory and its contents are gone
-        assert!(!root.join("to_delete_dir").exists(), "directory still exists after delete");
+        assert!(
+            !root.join("to_delete_dir").exists(),
+            "directory still exists after delete"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -708,8 +771,14 @@ mod tests {
 
         create_in(&root, "src", "components", true).expect("create");
 
-        assert!(root.join("src/components").is_dir(), "the folder was not created");
-        assert!(!root.join("components").exists(), "the folder landed at the root");
+        assert!(
+            root.join("src/components").is_dir(),
+            "the folder was not created"
+        );
+        assert!(
+            !root.join("components").exists(),
+            "the folder landed at the root"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -721,7 +790,10 @@ mod tests {
         write(&root, "ok.txt");
 
         let error = create_in(&root, "", "sub/file.txt", false).expect_err("refused");
-        assert!(error.contains("not a valid name"), "unexpected error: {error}");
+        assert!(
+            error.contains("not a valid name"),
+            "unexpected error: {error}"
+        );
         assert!(!root.join("sub").exists(), "a folder was created anyway");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -734,8 +806,14 @@ mod tests {
         write(&root, "a.txt");
 
         let error = create_in(&root, "", "a.txt", false).expect_err("refused");
-        assert!(error.contains("already exists"), "unexpected error: {error}");
-        assert_eq!(std::fs::read_to_string(root.join("a.txt")).expect("read"), "x");
+        assert!(
+            error.contains("already exists"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).expect("read"),
+            "x"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -744,7 +822,10 @@ mod tests {
     fn an_empty_name_is_refused() {
         let root = temp_dir("panel-create-empty");
         let error = create_in(&root, "", "   ", true).expect_err("refused");
-        assert!(error.contains("name is required"), "unexpected error: {error}");
+        assert!(
+            error.contains("name is required"),
+            "unexpected error: {error}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -758,8 +839,14 @@ mod tests {
 
         move_in(&root, "note.txt", "docs").expect("move");
 
-        assert!(!root.join("note.txt").exists(), "the source was left behind");
-        assert!(root.join("docs/note.txt").is_file(), "the file did not arrive");
+        assert!(
+            !root.join("note.txt").exists(),
+            "the source was left behind"
+        );
+        assert!(
+            root.join("docs/note.txt").is_file(),
+            "the file did not arrive"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -797,7 +884,10 @@ mod tests {
         write(&root, "docs/note.txt");
 
         let error = move_in(&root, "note.txt", "docs").expect_err("refused");
-        assert!(error.contains("already exists"), "unexpected error: {error}");
+        assert!(
+            error.contains("already exists"),
+            "unexpected error: {error}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

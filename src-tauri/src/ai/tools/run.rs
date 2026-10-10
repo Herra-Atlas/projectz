@@ -17,7 +17,7 @@ use std::sync::Arc;
 use crate::ai::remote::types::Endpoint;
 use crate::ai::types::{ChatEvent, ReasoningEffort};
 
-use super::{ApprovalGate, ToolMode};
+use super::ApprovalGate;
 
 /// The run a tool call belongs to.
 ///
@@ -40,9 +40,6 @@ pub struct RunHandle {
     /// Whether web search is on for this conversation, so a sub-agent can be
     /// given the same tools its parent has.
     pub web_search_enabled: bool,
-    /// The tool set the parent is running with. A sub-agent runs in Agent mode
-    /// regardless, because it exists to *do* things.
-    pub mode: ToolMode,
     /// Passed straight through to the sub-agent's requests, matching whatever
     /// the parent sent (true only for a local model).
     pub enable_reasoning_control: bool,
@@ -71,6 +68,20 @@ pub struct RunHandle {
     /// so a local selection has already been turned into a live endpoint here
     /// and the tool never has to reach for the model registry itself.
     pub subagent_default: Option<(Endpoint, String)>,
+    /// The model `read_file` shows an image to.
+    ///
+    /// Resolved by the runtime from the `app.preferences` vision model, for the
+    /// same reason as `subagent_default`: a tool cannot turn a stored selection
+    /// into a live endpoint, and the run can. `None` when the user has chosen no
+    /// vision model, which is the case that makes reading an image a clean
+    /// refusal rather than a silent attempt at a model that cannot see.
+    pub vision_model: Option<(Endpoint, String)>,
+    /// How aggressively this run elides old context.
+    ///
+    /// Carried on the run so a sub-agent compacts the way its parent did: a
+    /// delegated conversation can grow just as long, and it should not fall back
+    /// to a default that disagrees with the setting the user chose.
+    pub compaction: crate::ai::compact::Compaction,
     /// How many jobs this run has scheduled.
     ///
     /// Per run rather than per conversation, so the ceiling is on what one reply may

@@ -2,16 +2,27 @@ import { useEffect, useRef, useState } from "react";
 import { ChevronRight, Eye, FileText } from "lucide-react";
 import type { TreeEntry } from "../../../features/rightPanel/useFileTree";
 import { useFileEditor } from "../../../features/rightPanel/useFileEditor";
-import { previewKindFor } from "./preview/previewKind";
+import { isRenderedOnly, previewKindFor } from "./preview/previewKind";
 import MarkdownPreview from "./preview/MarkdownPreview";
+import ImagePreview from "./preview/ImagePreview";
+import PdfPreview from "./preview/PdfPreview";
+import DocxPreview from "./preview/DocxPreview";
+import SheetPreview from "./preview/SheetPreview";
 
 /**
  * One open file: back control, name, and its source or preview.
  *
  * Extracted from `FilesTab`, which held tree, search, request handling *and*
  * this. The header owns the Preview toggle: shown only when `previewKindFor`
- * names a kind, right-aligned past the filename so source stays the default.
- * The source is a plain editor with autosave through `useFileEditor`.
+ * names a kind and the file has source at all, right-aligned past the filename so
+ * source stays the default. The source is a plain editor with autosave through
+ * `useFileEditor`.
+ *
+ * **Two families of file.** Text is edited, and its preview is a second view of
+ * the same bytes -- that is the toggle, and Markdown and HTML are what it is for.
+ * A picture, a PDF, a Word document and a spreadsheet are *drawn*: there is no
+ * text to edit, so the editor is not engaged, no Source toggle is offered, and the
+ * renderer has the whole panel. See [`isRenderedOnly`].
  */
 
 type FilePreviewProps = {
@@ -25,15 +36,10 @@ type FilePreviewProps = {
   onNotify?: (tone: "success" | "error", message: string) => void;
 };
 
-/**
- * Turns a workspace-relative path into a `file://` URL for the browser.
- *
- * Forward slashes throughout (the tree already speaks them on every platform),
- * encoded per segment so a space or `#` in a folder name survives the trip.
- * The backend re-checks containment, so this is addressing, not trust.
- */
 export default function FilePreview({ entry, workspace, onBack, onPreviewInBrowser, onNotify }: FilePreviewProps) {
-  const { text, state, error, set, retry, saveNow } = useFileEditor(entry.path);
+  const kind = previewKindFor(entry.path);
+  const renderedOnly = kind !== null && isRenderedOnly(kind);
+  const { text, state, error, set, retry, saveNow } = useFileEditor(entry.path, !renderedOnly);
   const notifyRef = useRef(onNotify);
   notifyRef.current = onNotify;
   const lastErrorRef = useRef<string | null>(null);
@@ -41,7 +47,6 @@ export default function FilePreview({ entry, workspace, onBack, onPreviewInBrows
   // Source first, preview on request -- a toggle rather than a default, because
   // the tree is a code reader first and a renderer second.
   const [showingPreview, setShowingPreview] = useState(false);
-  const kind = previewKindFor(entry.path);
 
   useEffect(() => {
     setShowingPreview(false);
@@ -82,6 +87,14 @@ export default function FilePreview({ entry, workspace, onBack, onPreviewInBrows
   };
 
   const body = () => {
+    // Each renderer reads what it needs and reports its own failures, so this is
+    // a dispatch rather than a shared load: a document is a document, a picture
+    // is a picture, and only the spreadsheet is parsed in Rust.
+    if (kind === "image") return <ImagePreview path={entry.path} />;
+    if (kind === "pdf") return <PdfPreview path={entry.path} />;
+    if (kind === "docx") return <DocxPreview path={entry.path} />;
+    if (kind === "xlsx") return <SheetPreview path={entry.path} />;
+
     if (text === undefined) {
       if (error) return <p className="px-3 py-2 text-xs text-[var(--danger)]">{error}</p>;
       return <p className="px-3 py-2 text-xs text-[var(--quiet)]">Reading…</p>;
@@ -129,7 +142,10 @@ export default function FilePreview({ entry, workspace, onBack, onPreviewInBrows
         </button>
         <FileText size={13} className="shrink-0 text-[var(--quiet)]" />
         <span className="min-w-0 flex-1 truncate text-xs text-[var(--muted)]">{entry.path}</span>
-        {state === "error" ? (
+        {/* No save state for a drawn file: nothing here is being edited, and a
+            "Saved" label on a picture would be reporting a save that cannot
+            happen. */}
+        {!renderedOnly && (state === "error" ? (
           <button
             type="button"
             onClick={retry}
@@ -145,8 +161,8 @@ export default function FilePreview({ entry, workspace, onBack, onPreviewInBrows
           >
             {saveLabel}
           </span>
-        )}
-        {kind && (
+        ))}
+        {kind && !renderedOnly && (
           <button
             type="button"
             onClick={handlePreview}

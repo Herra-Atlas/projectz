@@ -103,11 +103,20 @@ enum Capability {
 /// that may already read.
 fn capability(tool_name: &str) -> Capability {
     match tool_name {
-        "write_file" | "edit_file" | "edit_lines" | "skill_manage" => Capability::Write,
-        "run_terminal" => Capability::Terminal,
+        "write_file" | "edit_file" | "edit_lines" | "skill_manage" | "move_file"
+        | "delete_file" | "write_document" => Capability::Write,
+        // The whole terminal group, so a run without the terminal cannot read or
+        // stop what another run left running either.
+        "run_terminal" | "terminal_output" | "terminal_kill" => Capability::Terminal,
         "search_web" | "web_fetch" => Capability::Web,
         "sub_agent" => Capability::Subagents,
         "schedule_job" => Capability::Jobs,
+        // Asking the user reads their intent; it changes nothing, so it belongs
+        // with the reads even though it is not cacheable.
+        "ask_user" => Capability::Read,
+        // Recording the agent's own checklist is likewise not a change to the
+        // world; it is a note to itself.
+        "todo" => Capability::Read,
         _ => Capability::Read,
     }
 }
@@ -127,7 +136,10 @@ mod tests {
             "sub_agent",
             "schedule_job",
         ] {
-            assert!(access.is_allowed(tool), "{tool} should be allowed by default");
+            assert!(
+                access.is_allowed(tool),
+                "{tool} should be allowed by default"
+            );
         }
     }
 

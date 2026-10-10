@@ -33,14 +33,22 @@ const MAX_RUNTIME_SECS: u64 = 120;
 const MAX_CAPTURED_BYTES: usize = 2 * 1024 * 1024;
 
 /// Run a shell command in the workspace and return its output.
+///
+/// One tool for both a command that finishes and one that does not: with
+/// `background` unset it waits, and with it set it returns an id immediately for
+/// `terminal_output` and `terminal_kill` to act on. Two tools would make the model
+/// choose before it knows which it needs, which it cannot -- a build that takes
+/// five minutes and a dev server look identical until one of them returns.
 pub const RUN_TERMINAL: ToolSpec = ToolSpec {
     name: "run_terminal",
     description: "Run a shell command in the workspace and return its combined output and exit code. \
                   On Windows the shell is Windows PowerShell 5.1; chain commands with `;`, not `&&`. \
-                  Use this for builds, tests, git and other command-line work. Prefer read_file and \
-                  search_files over shell commands for reading and finding things, because they are \
+                  Use this for builds, tests, git and other command-line work. Prefer read_file, grep \
+                  and glob over shell commands for reading and finding things, because they are \
                   faster and their output is already formatted. Commands run one at a time and are \
-                  killed after two minutes.",
+                  killed after two minutes. Set `background` for a command that does not finish on \
+                  its own -- a dev server, a watcher -- then read it with `terminal_output` and stop \
+                  it with `terminal_kill`.",
     parameters: r#"{
         "type": "object",
         "properties": {
@@ -51,6 +59,10 @@ pub const RUN_TERMINAL: ToolSpec = ToolSpec {
             "timeout_seconds": {
                 "type": "integer",
                 "description": "Override the two minute limit. Values above the limit are clamped to it."
+            },
+            "background": {
+                "type": "boolean",
+                "description": "Start the command and return at once with an id, instead of waiting for it. Use for a long-running process."
             }
         },
         "required": ["command"],
@@ -63,11 +75,86 @@ pub const RUN_TERMINAL: ToolSpec = ToolSpec {
     execute: |arguments, context| {
         Box::pin(async move {
             let command = required_string(&arguments, "command")?;
+            let background = arguments
+                .get("background")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if background {
+                let root = super::file::require_workspace()?;
+                return start_background(&command, &root);
+            }
             let timeout = timeout_of(&arguments)?;
             run(command, timeout, context).await
         })
     },
 };
+
+/// Read what a background command has printed and whether it is still running.
+pub const TERMINAL_OUTPUT: ToolSpec = ToolSpec {
+    name: "terminal_output",
+    description: "Read the output a background command has printed since the last check, and \
+                  whether it has finished. Call this after `run_terminal` with `background` set. \
+                  Each call returns only what is new, so poll it in a loop rather than expecting \
+                  the whole log each time.",
+    parameters: r#"{
+        "type": "object",
+        "properties": {
+            "id": {
+                "type": "string",
+                "description": "The id `run_terminal` returned when the command was started."
+            }
+        },
+        "required": ["id"],
+        "additionalProperties": false
+    }"#,
+    effect: super::Effect::Read,
+    command_argument: None,
+    execute: |arguments, context| {
+        let _ = &context;
+        Box::pin(std::future::ready(
+            required_string(&arguments, "id").and_then(|id| super::background::read_output(&id)),
+        ))
+    },
+};
+
+/// Stop a background command.
+pub const TERMINAL_KILL: ToolSpec = ToolSpec {
+    name: "terminal_kill",
+    description: "Stop a command started with `run_terminal` in the background. Use this when you \
+                  are done with a long-running process so it does not keep running.",
+    parameters: r#"{
+        "type": "object",
+        "properties": {
+            "id": {
+                "type": "string",
+                "description": "The id `run_terminal` returned when the command was started."
+            }
+        },
+        "required": ["id"],
+        "additionalProperties": false
+    }"#,
+    effect: super::Effect::Write,
+    command_argument: None,
+    execute: |arguments, context| {
+        let _ = &context;
+        Box::pin(std::future::ready(
+            required_string(&arguments, "id").and_then(|id| super::background::kill(&id)),
+        ))
+    },
+};
+
+/// Starts a command in the background and reports its id.
+///
+/// The acknowledgement says the command is *not* watched, because a model that
+/// treats this like a normal call will assume the command succeeded and never read
+/// its output. Naming the two follow-up tools is what makes the next step obvious.
+fn start_background(command: &str, root: &std::path::Path) -> Result<String, String> {
+    let id = super::background::spawn(command, root)?;
+    Ok(format!(
+        "Started `{command}` in the background as `{id}`. It is not waited on. Read what it prints \
+         with `terminal_output` (id `{id}`) and stop it with `terminal_kill` when you are done."
+    ))
+}
 
 fn required_string(arguments: &Value, field: &str) -> Result<String, String> {
     arguments
@@ -97,7 +184,11 @@ fn timeout_of(arguments: &Value) -> Result<u64, String> {
 /// Windows PowerShell resolves PATH commands including `cargo`, `npm`, and `git`
 /// shims. The wrapper returns the last native command's exit code to the caller.
 /// Unix gets `sh -c`, which is what makes pipes and `&&` mean anything there.
-fn platform_command(command: &str) -> Command {
+///
+/// Shared with [`super::background`] so a backgrounded command is launched by the
+/// same shell the waiting path uses: a model must not find that `cargo` works
+/// normally and not in the background, or the other way round.
+pub(crate) fn platform_command(command: &str) -> Command {
     let mut process = if cfg!(windows) {
         let mut process = Command::new("powershell.exe");
         process

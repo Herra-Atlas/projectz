@@ -6,6 +6,7 @@ import {
   collectFileChanges,
   fileName,
   hasChanges,
+  isWriteTool,
   signedCount,
   totalChanges,
   type FileChange,
@@ -54,7 +55,7 @@ export default function FileChanges({ steps, live, onOpenFile }: FileChangesProp
   // A write still in flight carries no diff yet, so it contributes nothing here
   // and the row simply appears once the result lands. The spinner is the panel's
   // own convention for "this is happening", reused rather than invented.
-  const writing = live && steps.some((step) => step.kind === "tool" && step.running && step.diff === undefined && isWrite(step.tool));
+  const writing = live && steps.some((step) => step.kind === "tool" && step.running && step.diff === undefined && isWriteTool(step.tool));
 
   return (
     <div className="mt-2 max-w-2xl text-[12px] leading-6 text-[var(--muted)]">
@@ -134,8 +135,4 @@ function FileChangeRow({ change, onOpenFile }: { change: FileChange; onOpenFile?
       </button>
     </li>
   );
-}
-
-function isWrite(tool: string): boolean {
-  return tool === "write_file" || tool === "edit_file" || tool === "edit_lines";
 }

@@ -43,8 +43,10 @@ export const PERMISSION_LABELS: Record<PermissionMode, string> = {
 /** One line explaining which tools a level approves automatically. */
 export const PERMISSION_HINTS: Record<PermissionMode, string> = {
   ask: "Ask you before every tool call.",
-  auto_safe: "Auto-approve list_dir, read_file, search_files, and skill_read. Ask before every other tool.",
-  auto_writes: "Also auto-approve write_file, edit_file, edit_lines, skill_manage, and sub_agent. Ask before every other tool.",
+  auto_safe:
+    "Auto-approve reads — list_dir, read_file, grep, glob, skill_read, search_web, web_fetch and terminal_output. Ask before every other tool.",
+  auto_writes:
+    "Also auto-approve the writes — write_file, write_document, edit_file, edit_lines, move_file, delete_file, skill_manage and sub_agent. Ask before running a command or scheduling a job.",
   full: "Auto-approve every tool call.",
 };
 

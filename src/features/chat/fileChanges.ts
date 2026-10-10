@@ -43,7 +43,29 @@ export type FileChange = {
   created: boolean;
 };
 
-const WRITE_TOOLS = new Set(["write_file", "edit_file", "edit_lines"]);
+/**
+ * The tools that produce a line diff, so a reply's writes are the ones counted.
+ *
+ * `write_document` is here for its text formats (`md`, `txt`, `csv`), which
+ * report a diff; a `.docx`/`.xlsx`/`.pdf` reports none, so the `step.diff` guard
+ * below excludes it rather than this list having to know which format ran.
+ * `delete_file` reports the removed lines. `move_file` is listed because it is a
+ * write, but a rename changes no lines and so carries no diff -- it appears in
+ * the activity panel, not in this line-count summary.
+ */
+const WRITE_TOOLS = new Set([
+  "write_file",
+  "edit_file",
+  "edit_lines",
+  "write_document",
+  "delete_file",
+  "move_file",
+]);
+
+/** Whether a tool name is one this module counts. */
+export function isWriteTool(tool: string): boolean {
+  return WRITE_TOOLS.has(tool);
+}
 
 /**
  * Every file this reply wrote, in the order they were written.
@@ -63,7 +85,7 @@ export function collectFileChanges(steps: ActivityStep[]): FileChange[] {
     // backend cannot know what a command did, and a summary that guessed would
     // be worse than one that says nothing.
     if (!step.diff || step.failed) continue;
-    if (!WRITE_TOOLS.has(step.tool)) continue;
+    if (!isWriteTool(step.tool)) continue;
 
     const path = step.detail;
     if (!path) continue;
