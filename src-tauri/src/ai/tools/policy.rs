@@ -265,7 +265,7 @@ mod tests {
             .names()
             .into_iter()
             .filter(|name| registry.get(name).expect("registered").effect == Effect::Write)
-            .filter(|name| !AUTO_WRITE_TOOLS.contains(name))
+            .filter(|name| !AUTO_WRITE_TOOLS.contains(&name.as_str()))
             .collect::<Vec<_>>();
         assert!(
             unlisted.is_empty(),
@@ -282,7 +282,7 @@ mod tests {
             .names()
             .into_iter()
             .filter(|name| registry.get(name).expect("registered").effect == Effect::Read)
-            .filter(|name| !AUTO_READ_TOOLS.contains(name))
+            .filter(|name| !AUTO_READ_TOOLS.contains(&name.as_str()))
             .collect::<Vec<_>>();
         assert!(
             unlisted.is_empty(),

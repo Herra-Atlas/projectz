@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openFile } from "@tauri-apps/plugin-dialog";
-import { ArrowLeft, BookMarked, ChevronDown, ChevronRight, CircleHelp, Cpu, GripVertical, LoaderCircle, MoveRight, Palette, Pencil, Plus, Search, Server, Settings2, SlidersHorizontal, Sparkles, Trash2, X, Zap } from "lucide-react";
+import { ArrowLeft, BookMarked, ChevronDown, ChevronRight, CircleHelp, Cpu, GripVertical, LoaderCircle, MoveRight, Palette, Pencil, Plug, Plus, Search, Server, Settings2, SlidersHorizontal, Sparkles, Trash2, X, Zap } from "lucide-react";
 import { resolveTheme, type Appearance } from "../features/appearance/appearance";
 import AccentPicker from "./appearance/AccentPicker";
 import ThemePicker from "./appearance/ThemePicker";
@@ -11,6 +11,7 @@ import EnginesSettingsPage from "./EnginesSettingsPage";
 import { engineLabel } from "./EnginePicker";
 import RuntimeSettingsPage, { type LocalRuntimeSettings } from "./RuntimeSettingsPage";
 import SkillsPage from "./SkillsPage";
+import McpSettingsPage from "./McpSettingsPage";
 import SkillFormPage from "./skills/SkillFormPage";
 import TitleModelPicker from "./TitleModelPicker";
 import SingleModelPicker from "./ModelSelectionPicker";
@@ -62,6 +63,8 @@ function pageTitle(page: SettingsPage): string {
       return "Preferences";
     case "skills":
       return "Skills";
+    case "mcp":
+      return "MCP servers";
     case "local":
       return "Local models";
     case "engines":
@@ -73,7 +76,7 @@ function pageTitle(page: SettingsPage): string {
 
 type EndpointDraft = { id: string; name: string; base_url: string; api_key: string; models: string[]; enabled: boolean };
 type SettingsModalProps = { open: boolean; onClose: () => void; onEndpointsChanged: () => void; onClearSessions: () => Promise<number>; preferences: Preferences; onPreferencesChange: (preferences: Preferences) => void; appearance: Appearance; onAppearanceChange: (appearance: Appearance) => void; notify: Notify };
-type SettingsPage = { view: "providers" } | { view: "local" } | { view: "engines" } | { view: "general" } | { view: "appearance" } | { view: "preferences" } | { view: "skills" } | { view: "skill"; skill: Skill | null } | { view: "model"; model: LocalModel } | { view: "form"; endpoint: Endpoint | null };
+type SettingsPage = { view: "providers" } | { view: "local" } | { view: "engines" } | { view: "general" } | { view: "appearance" } | { view: "preferences" } | { view: "skills" } | { view: "mcp" } | { view: "skill"; skill: Skill | null } | { view: "model"; model: LocalModel } | { view: "form"; endpoint: Endpoint | null };
 
 type GeneralSettings = {
   instructions: string;
@@ -625,6 +628,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
             <button type="button" onClick={() => setPage({ view: "appearance" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "appearance" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Palette size={16} />Appearance</button>
             <button type="button" onClick={() => setPage({ view: "preferences" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "preferences" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Sparkles size={16} />Preferences</button>
             <button type="button" onClick={() => setPage({ view: "skills" })} className={`mt-1 flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "skills" || page.view === "skill" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><BookMarked size={16} />Skills</button>
+            <button type="button" onClick={() => setPage({ view: "mcp" })} className={`mt-1 flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "mcp" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Plug size={16} />MCP</button>
             <p className="hidden px-2.5 pb-1.5 pt-5 text-[11px] font-medium text-[var(--quiet)] sm:block">Models</p>
             <button type="button" onClick={() => setPage({ view: "providers" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "providers" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Server size={16} />Providers</button>
             <button type="button" onClick={() => setPage({ view: "local" })} className={`mt-1 flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "local" || page.view === "model" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Cpu size={16} />Local</button>
@@ -963,7 +967,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                     }
                   />
                 </SettingsSection>
-              </> : page.view === "skills" ? <SkillsPage notify={notify} onOpenForm={(skill) => setPage({ view: "skill", skill })} /> : page.view === "skill" ? <SkillFormPage key={page.skill?.id ?? "new"} skill={page.skill} onSaved={() => setPage({ view: "skills" })} onCancel={() => setPage({ view: "skills" })} notify={notify} /> : <>
+              </> : page.view === "skills" ? <SkillsPage notify={notify} onOpenForm={(skill) => setPage({ view: "skill", skill })} /> : page.view === "mcp" ? <McpSettingsPage notify={notify} /> : page.view === "skill" ? <SkillFormPage key={page.skill?.id ?? "new"} skill={page.skill} onSaved={() => setPage({ view: "skills" })} onCancel={() => setPage({ view: "skills" })} notify={notify} /> : <>
                 <div className="mb-6 border-b border-[var(--line)] pb-5"><h2 className="text-[17px] font-semibold tracking-tight">{page.endpoint ? "Edit provider" : "Add provider"}</h2></div>
                 <form onSubmit={(event) => void saveEndpoint(event)} className="max-w-xl space-y-4">
                   <label className="block text-sm text-[var(--muted)]">Provider name<input ref={nameRef} required value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} className="mt-1.5 h-10 w-full rounded-md border border-[var(--line)] bg-[var(--rail)] px-3 text-[13px] text-[var(--text)] outline-none placeholder:text-[var(--quiet)] focus:border-[var(--accent)]" placeholder="e.g. Local Ollama" /></label>

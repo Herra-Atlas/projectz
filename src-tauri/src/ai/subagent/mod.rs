@@ -138,7 +138,8 @@ pub async fn spawn(arguments: Value, context: ToolContext) -> Result<String, Str
     Ok(format!(
         "Agent `{display_label}` is working in the background (id `{agent_id}`). It cannot see this \
 conversation and cannot ask you questions. Its report will arrive as its own message when it \
-finishes -- do not wait for it; carry on with anything else, or finish your answer."
+finishes -- and a run that fails reports the failure, with its reason, instead. Either way, do \
+not wait for it; carry on with anything else, or finish your answer."
     ))
 }
 
@@ -314,12 +315,17 @@ async fn run_agent(task: AgentTask) {
         },
     ));
 
-    // The report, as its own message in the parent conversation. A run that
-    // produced nothing worth sending (a failure, an empty answer) is left to the
-    // panel, which already shows it.
-    let report = match &result {
-        Ok((content, _)) if !content.trim().is_empty() => content.clone(),
-        _ => return,
+    // The report, as its own message in the parent conversation.
+    //
+    // **A failure is sent too, and that is the point of this branch.** The parent
+    // was told the report would arrive as its own message and was told explicitly
+    // not to wait for it, so a run that dies without one leaves the conversation
+    // believing an answer is still coming that never will. Naming the failure lets
+    // the model retry, route around it, or tell the user -- which is the whole
+    // reason the report exists. [`report_for`] holds the rule; this only delivers
+    // what it returns.
+    let Some((report, failed)) = report_for(&result, &display_label) else {
+        return;
     };
     let session_id = run.session_id.clone();
     Arc::clone(&run.emit)(ChatEvent {
@@ -333,8 +339,31 @@ async fn run_agent(task: AgentTask) {
             "agent_id": agent_id,
             "label": display_label,
             "session_id": session_id,
+            // Lets the chat draw the `sub_agent` row as failed -- and say so to the
+            // user -- rather than showing the report as if the work had succeeded.
+            "failed": failed,
         })),
     });
+}
+
+/// The message a finished sub-agent hands to its parent, and whether it failed.
+///
+/// `None` means there is nothing worth sending: a run that succeeded but wrote
+/// only whitespace, which the panel already shows as an empty reply.
+///
+/// A failure is always `Some`, because the parent is owed a word either way --
+/// silence is indistinguishable from an agent still at work, and the parent was
+/// told not to wait. Extracted from the emit above so the rule can be tested on
+/// its own, without a live provider.
+fn report_for(result: &Result<(String, Value), String>, label: &str) -> Option<(String, bool)> {
+    match result {
+        Ok((content, _)) if !content.trim().is_empty() => Some((content.clone(), false)),
+        Ok(_) => None,
+        Err(error) => Some((
+            format!("The sub-agent `{label}` did not finish: {error}"),
+            true,
+        )),
+    }
 }
 
 /// The endpoint and model a sub-agent should run on.
@@ -397,6 +426,41 @@ mod tests {
             compaction: crate::ai::compact::Compaction::Normal,
             jobs_created: std::sync::atomic::AtomicUsize::new(0),
         })
+    }
+
+    /// A failed sub-agent reports to its parent rather than going silent. This is
+    /// the bug the branch exists to fix: the parent was told a report would arrive
+    /// and not to wait, so a run that died without one left the conversation
+    /// waiting for a message that never came.
+    #[test]
+    fn a_failed_sub_agent_reports_its_failure_to_its_parent() {
+        let (text, failed) = report_for(
+            &Err("HTTP 400: The stealth model could not complete the request.".to_string()),
+            "car research",
+        )
+        .expect("a failure is always reported");
+        assert!(failed);
+        assert!(text.contains("car research"), "{text}");
+        assert!(text.contains("HTTP 400"), "{text}");
+    }
+
+    /// A successful answer is delivered as the report, and is not marked failed.
+    #[test]
+    fn an_answered_sub_agent_reports_its_answer() {
+        let (text, failed) = report_for(
+            &Ok(("Found three cars.".to_string(), Value::Null)),
+            "car research",
+        )
+        .expect("an answer is reported");
+        assert!(!failed);
+        assert_eq!(text, "Found three cars.");
+    }
+
+    /// An empty success sends nothing: there is no failure to name and no answer to
+    /// deliver, so the panel is left to show the run.
+    #[test]
+    fn an_empty_success_sends_nothing() {
+        assert!(report_for(&Ok(("   ".to_string(), Value::Null)), "x").is_none());
     }
 
     /// With nothing configured, a sub-agent runs on the model its parent did.

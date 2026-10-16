@@ -13,6 +13,8 @@
 //! again. Registration order is an implementation detail and must never leak
 //! into the request.
 
+use std::sync::Arc;
+
 use serde_json::Value;
 
 use super::output;
@@ -52,6 +54,29 @@ pub struct ToolSpec {
     /// The returned future receives the run's cancellation flag so a long tool
     /// can abandon its work when the user stops the reply.
     pub execute: fn(Value, ToolContext) -> ToolFuture,
+}
+
+/// A tool whose name and schema are not known until the app is running.
+///
+/// MCP tools are the only kind. They arrive from a server when it is connected,
+/// so they cannot be a [`ToolSpec`], whose fields are `&'static str` and whose
+/// executor is a plain function pointer. Everything else about them is the same,
+/// and from [`ToolRegistry::specs`] onward the registry treats the two alike.
+///
+/// Not a second registry: one list the model reads, one place a call is resolved.
+/// Two registries would be two answers to "is this tool available", and the
+/// access set, the policy and the cache all ask that question.
+#[derive(Clone)]
+pub struct DynamicTool {
+    pub name: String,
+    pub description: String,
+    /// The argument schema exactly as the server sent it.
+    pub parameters: Value,
+    pub effect: Effect,
+    /// The same contract as [`ToolSpec::execute`], but a closure rather than a
+    /// function pointer: a dynamic tool has to carry which server and which remote
+    /// name it speaks for, and a `fn` has nowhere to put them.
+    pub execute: Arc<dyn Fn(Value, ToolContext) -> ToolFuture + Send + Sync>,
 }
 
 /// What a tool is given when it runs.
@@ -206,6 +231,9 @@ pub enum Effect {
 #[derive(Default)]
 pub struct ToolRegistry {
     tools: Vec<ToolSpec>,
+    /// Tools that arrive at runtime. Empty on every run with no MCP server
+    /// configured, which is most of them.
+    dynamic: Vec<DynamicTool>,
 }
 
 impl ToolRegistry {
@@ -217,6 +245,16 @@ impl ToolRegistry {
         self.tools.push(tool);
     }
 
+    /// Registers one more runtime tool.
+    ///
+    /// Kept apart from [`ToolRegistry::add`] only because the two carry different
+    /// data; from `specs` onward they are one list. A dynamic tool may shadow a
+    /// static one by name -- nothing does, and the alternative is a name check on
+    /// every registration for a collision that cannot happen with a prefix.
+    pub fn add_dynamic(&mut self, tool: DynamicTool) {
+        self.dynamic.push(tool);
+    }
+
     /// Drops every tool the predicate rejects.
     ///
     /// The one way a run's access set narrows what is advertised: a tool removed
@@ -224,6 +262,7 @@ impl ToolRegistry {
     /// untouched, so the cache-stable sort still holds.
     pub fn retain(&mut self, keep: impl Fn(&str) -> bool) {
         self.tools.retain(|tool| keep(tool.name));
+        self.dynamic.retain(|tool| keep(&tool.name));
     }
 
     /// Builds a registry from a fixed tool set.
@@ -288,7 +327,10 @@ impl ToolRegistry {
         // Sorted by name so the request bytes are identical on every turn. See
         // the cache note on `ToolSpec`.
         tools.sort_by_key(|tool| tool.name);
-        Self { tools }
+        Self {
+            tools,
+            dynamic: Vec::new(),
+        }
     }
 
     /// The `tools` array for a chat-completions request, in stable order.
@@ -301,15 +343,19 @@ impl ToolRegistry {
     /// for every way a registry can be built, including a struct literal in a
     /// test.
     pub fn specs(&self) -> Option<Value> {
-        if self.tools.is_empty() {
+        if self.tools.is_empty() && self.dynamic.is_empty() {
             return None;
         }
-        let mut tools = self.tools.iter().collect::<Vec<_>>();
-        tools.sort_by_key(|tool| tool.name);
-        Some(Value::Array(
-            tools
-                .into_iter()
-                .map(|tool| {
+        // Built as (name, spec) and sorted by name, because a dynamic tool's name
+        // is a `String` and the sort has to cover both lists as one. Sorting the
+        // pairs rather than the finished values is what keeps the two from being
+        // concatenated in two separately-sorted halves.
+        let mut entries: Vec<(String, Value)> = self
+            .tools
+            .iter()
+            .map(|tool| {
+                (
+                    tool.name.to_string(),
                     serde_json::json!({
                         "type": "function",
                         "function": {
@@ -317,21 +363,46 @@ impl ToolRegistry {
                             "description": tool.description,
                             "parameters": tool.schema(),
                         }
-                    })
-                })
-                .collect(),
+                    }),
+                )
+            })
+            .chain(self.dynamic.iter().map(|tool| {
+                (
+                    tool.name.clone(),
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.parameters,
+                        }
+                    }),
+                )
+            }))
+            .collect();
+        entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+        Some(Value::Array(
+            entries.into_iter().map(|(_, spec)| spec).collect(),
         ))
     }
 
     /// Names of the registered tools, for tests.
     ///
     /// Test-only: nothing in the app needs the bare names, since it reads
-    /// [`ToolRegistry::specs`] or looks a tool up by name.
+    /// [`ToolRegistry::specs`] or looks a tool up by name. Owned rather than
+    /// borrowed, because a dynamic tool's name is a `String` the registry holds
+    /// and a caller asking a temporary registry for its names must not be left
+    /// holding references into something already dropped.
     #[cfg(test)]
-    pub fn names(&self) -> Vec<&'static str> {
-        let mut tools = self.tools.iter().collect::<Vec<_>>();
-        tools.sort_by_key(|tool| tool.name);
-        tools.into_iter().map(|tool| tool.name).collect()
+    pub fn names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .tools
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .chain(self.dynamic.iter().map(|tool| tool.name.clone()))
+            .collect();
+        names.sort_unstable();
+        names
     }
 
     /// The command line this call would run, or empty for a tool that runs none.
@@ -354,7 +425,11 @@ impl ToolRegistry {
     /// sends `path` and `directory` when only `path` exists has made a mistake
     /// worth surfacing instead of silently resolving to a default.
     pub fn parse_arguments(&self, name: &str, raw: &str) -> Result<Value, String> {
-        let Some(tool) = self.tools.iter().find(|tool| tool.name == name) else {
+        let schema = if let Some(tool) = self.tools.iter().find(|tool| tool.name == name) {
+            tool.schema()
+        } else if let Some(tool) = self.dynamic.iter().find(|tool| tool.name == name) {
+            tool.parameters.clone()
+        } else {
             return Err(format!("Unknown tool: {name}"));
         };
         let value: Value = serde_json::from_str(raw)
@@ -362,10 +437,10 @@ impl ToolRegistry {
         if !value.is_object() {
             return Err(format!("Tool {name} expects an object of named arguments"));
         }
-        if let Some(unknown) = unknown_field(&value, &tool.schema()) {
+        if let Some(unknown) = unknown_field(&value, &schema) {
             return Err(format!(
                 "Tool {name} has no argument named {unknown}. Available: {}",
-                field_names(&tool.schema()).join(", ")
+                field_names(&schema).join(", ")
             ));
         }
         Ok(value)
@@ -374,6 +449,22 @@ impl ToolRegistry {
     /// Looks up a registered tool by name.
     pub fn get(&self, name: &str) -> Option<&ToolSpec> {
         self.tools.iter().find(|tool| tool.name == name)
+    }
+
+    /// What a registered tool does to the system, whichever kind it is.
+    ///
+    /// Both lists, because this is what decides caching and invalidation, and a
+    /// dynamic tool read as a `Read` would be answered from the cache and would
+    /// leave a file it changed looking current. The registry's own `get` cannot
+    /// serve this: a `DynamicTool` has no `ToolSpec` to return.
+    pub fn effect_of(&self, name: &str) -> Option<Effect> {
+        if let Some(tool) = self.tools.iter().find(|tool| tool.name == name) {
+            return Some(tool.effect);
+        }
+        self.dynamic
+            .iter()
+            .find(|tool| tool.name == name)
+            .map(|tool| tool.effect)
     }
 
     /// Runs a tool and returns text for the model's next turn.
@@ -393,10 +484,17 @@ impl ToolRegistry {
         arguments: Value,
         context: ToolContext,
     ) -> Result<String, String> {
-        let tool = self
-            .get(name)
-            .ok_or_else(|| format!("Unknown tool: {name}"))?;
-        match (tool.execute)(arguments, context).await {
+        // A dynamic tool's closure is cloned out before the await, so the borrow
+        // of `self` does not have to be held across it.
+        let outcome = if let Some(tool) = self.tools.iter().find(|tool| tool.name == name) {
+            (tool.execute)(arguments, context).await
+        } else if let Some(tool) = self.dynamic.iter().find(|tool| tool.name == name) {
+            let execute = Arc::clone(&tool.execute);
+            execute(arguments, context).await
+        } else {
+            return Err(format!("Unknown tool: {name}"));
+        };
+        match outcome {
             Ok(text) => Ok(output::truncate(text)),
             Err(error) => Err(output::truncate(format!("{name} failed: {error}"))),
         }
@@ -447,6 +545,7 @@ mod tests {
     fn registry() -> ToolRegistry {
         ToolRegistry {
             tools: vec![spec()],
+            dynamic: Vec::new(),
         }
     }
 
@@ -502,10 +601,92 @@ mod tests {
                 execute: |_, _| Box::pin(std::future::ready(Err("no such file".into()))),
                 ..spec()
             }],
+            dynamic: Vec::new(),
         };
         let error = blocking_run(&registry, "read_file");
         assert!(error.contains("no such file"), "{error}");
         assert!(error.starts_with("read_file failed"), "{error}");
+    }
+
+    /// Names as owned strings, for comparing against `names()`.
+    fn listed(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    /// A runtime tool, of the shape an MCP server's tools have.
+    fn dynamic(name: &'static str) -> DynamicTool {
+        DynamicTool {
+            name: name.to_string(),
+            description: "a runtime tool".into(),
+            parameters: json!({ "type": "object" }),
+            effect: Effect::Write,
+            execute: Arc::new(|_, _| Box::pin(std::future::ready(Ok("done".into())))),
+        }
+    }
+
+    /// A dynamic tool is advertised, checked and run like any other: it is the
+    /// same list the model reads and the same lookup a call resolves through.
+    #[test]
+    fn a_dynamic_tool_is_advertised_parsed_and_run() {
+        let mut registry = ToolRegistry {
+            tools: Vec::new(),
+            dynamic: vec![DynamicTool {
+                parameters: json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "additionalProperties": false
+                }),
+                ..dynamic("mcp__files__read")
+            }],
+        };
+        registry.add_dynamic(dynamic("unused"));
+
+        let specs = registry.specs().expect("specs");
+        assert_eq!(specs[0]["function"]["name"], "mcp__files__read");
+        assert_eq!(
+            registry.effect_of("mcp__files__read"),
+            Some(Effect::Write),
+            "a dynamic tool's effect must be readable, or a write is cached as a read"
+        );
+
+        // Its own schema is what arguments are validated against.
+        let error = registry
+            .parse_arguments("mcp__files__read", r#"{"other":1}"#)
+            .expect_err("unknown argument");
+        assert!(error.contains("path"), "{error}");
+
+        assert_eq!(blocking_run(&registry, "mcp__files__read"), "done");
+    }
+
+    /// The cache invariant holds across both kinds: one list, sorted by name.
+    #[test]
+    fn dynamic_tools_sort_in_one_list_with_static_ones() {
+        let mut registry = ToolRegistry {
+            tools: vec![ToolSpec {
+                name: "mmm",
+                ..spec()
+            }],
+            dynamic: Vec::new(),
+        };
+        registry.add_dynamic(dynamic("zzz"));
+        registry.add_dynamic(dynamic("aaa"));
+        assert_eq!(registry.names(), listed(&["aaa", "mmm", "zzz"]));
+    }
+
+    /// The access set narrows a run by removing tools, and it has to remove the
+    /// runtime ones too: they are advertised from `specs`, which is what the
+    /// request body is built from.
+    #[test]
+    fn retaining_applies_to_dynamic_tools_too() {
+        let mut registry = ToolRegistry {
+            tools: vec![ToolSpec {
+                name: "mmm",
+                ..spec()
+            }],
+            dynamic: vec![dynamic("aaa"), dynamic("zzz")],
+        };
+        registry.retain(|name| name == "mmm" || name == "zzz");
+        assert_eq!(registry.names(), listed(&["mmm", "zzz"]));
     }
 
     /// Runs a tool to completion from a synchronous test.
@@ -537,12 +718,14 @@ mod tests {
         let named = |name: &'static str| ToolSpec { name, ..spec() };
         let forward = ToolRegistry {
             tools: vec![named("aaa"), named("zzz"), named("mmm")],
+            dynamic: Vec::new(),
         };
         let reversed = ToolRegistry {
             tools: vec![named("zzz"), named("mmm"), named("aaa")],
+            dynamic: Vec::new(),
         };
         assert_eq!(forward.specs(), reversed.specs());
-        assert_eq!(forward.names(), vec!["aaa", "mmm", "zzz"]);
+        assert_eq!(forward.names(), listed(&["aaa", "mmm", "zzz"]));
     }
 
     /// Chat mode registers no tools, and an empty `tools` array is not

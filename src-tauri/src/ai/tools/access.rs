@@ -119,6 +119,13 @@ fn capability(tool_name: &str) -> Capability {
         // Recording the agent's own checklist is likewise not a change to the
         // world; it is a note to itself.
         "todo" => Capability::Read,
+        // A tool from an MCP server is grouped with the writes whatever it says
+        // it does. The protocol does not report whether a tool changes anything,
+        // and the two mistakes are not the same size: calling a read tool a write
+        // costs a run its cache, while calling a write tool a read tells the model
+        // a stale file is current. So a run narrowed to reads cannot reach one at
+        // all, which is the safe direction to be wrong in.
+        name if name.starts_with(crate::mcp::tools::TOOL_PREFIX) => Capability::Write,
         _ => Capability::Read,
     }
 }
@@ -181,6 +188,27 @@ mod tests {
         // And the rest of the run is untouched by that narrowing.
         assert!(access.is_allowed("write_file"));
         assert!(access.is_allowed("sub_agent"));
+    }
+
+    /// An MCP tool follows the *write* switch rather than the read one. The
+    /// protocol does not report whether a tool changes anything, so a run allowed
+    /// only to read does not get to find out.
+    #[test]
+    fn mcp_tools_follow_the_write_switch() {
+        let access = AccessSet {
+            write: false,
+            ..AccessSet::ALL
+        };
+        assert!(!access.is_allowed("mcp__files__read_file"));
+        assert!(access.is_allowed("read_file"));
+        // And the read switch is not what governs them: a run that may read but
+        // not write still cannot reach one.
+        let reader = AccessSet {
+            write: false,
+            read: true,
+            ..AccessSet::ALL
+        };
+        assert!(!reader.is_allowed("mcp__files__list_directory"));
     }
 
     /// A name nobody knows is treated as a read, so it is denied by a run that

@@ -318,6 +318,68 @@ pub fn workspace_close(
     runtime.close_workspace(&path)
 }
 
+/// Every configured MCP server, with what each said last time it answered.
+///
+/// Reads the last result rather than connecting, so the page paints immediately
+/// and a server that hangs cannot hold up the settings window. [`mcp_refresh`] is
+/// what goes and asks.
+#[tauri::command]
+pub fn mcp_servers(runtime: State<'_, AiRuntime>) -> Vec<crate::mcp::McpServerView> {
+    crate::mcp::manager::views(&runtime.database())
+}
+
+/// Connects to every enabled server and returns the refreshed rows.
+#[tauri::command]
+pub async fn mcp_refresh(
+    runtime: State<'_, AiRuntime>,
+) -> Result<Vec<crate::mcp::McpServerView>, String> {
+    let database = runtime.database();
+    Ok(crate::mcp::manager::refresh(&database).await)
+}
+
+/// Adds a server, or replaces one by id, then reaches it.
+///
+/// The refresh is part of the write rather than something the caller remembers to
+/// do after: a row saved and not reached would show no tools and no error, which
+/// reads as a server that works and offers nothing.
+#[tauri::command]
+pub async fn mcp_save(
+    runtime: State<'_, AiRuntime>,
+    server: crate::mcp::McpServer,
+) -> Result<Vec<crate::mcp::McpServerView>, String> {
+    let database = runtime.database();
+    let mut servers = crate::mcp::load(&database);
+    let mut saved = server;
+    if saved.id.trim().is_empty() {
+        saved.id = crate::mcp::new_id();
+    }
+    match servers.iter_mut().find(|existing| existing.id == saved.id) {
+        Some(existing) => *existing = saved.clone(),
+        None => servers.push(saved.clone()),
+    }
+    crate::mcp::save(&database, &servers)?;
+    // A saved server may have a new command, so whatever was connected is gone
+    // and the refresh below starts it again.
+    crate::mcp::manager::forget(&saved.id).await;
+    Ok(crate::mcp::manager::refresh(&database).await)
+}
+
+/// Removes a server and stops it if it was running.
+#[tauri::command]
+pub async fn mcp_delete(
+    runtime: State<'_, AiRuntime>,
+    id: String,
+) -> Result<Vec<crate::mcp::McpServerView>, String> {
+    let database = runtime.database();
+    let servers = crate::mcp::load(&database)
+        .into_iter()
+        .filter(|server| server.id != id)
+        .collect::<Vec<_>>();
+    crate::mcp::save(&database, &servers)?;
+    crate::mcp::manager::forget(&id).await;
+    Ok(crate::mcp::manager::refresh(&database).await)
+}
+
 /// Every skill, enabled or not. For the management screen.
 #[tauri::command]
 pub fn skills_list(
@@ -619,17 +681,23 @@ pub fn read_chat_attachment(path: String) -> Result<crate::ai::types::ChatAttach
     })
 }
 
-fn provider_icon_domain(base_url: &str) -> Result<String, String> {
-    let url = reqwest::Url::parse(base_url).map_err(|_| "Invalid provider URL".to_string())?;
+/// The host an icon is looked for on, for a URL.
+///
+/// Only the parse and the refusals live here: *which* host actually holds the
+/// icon is [`icon_hosts`]'s question, and it answers it the same way for both
+/// lists. This used to strip an `api.` prefix, which worked for the provider list
+/// by coincidence and not at all for an MCP server reached at `mcp.…` — a rule
+/// that named one prefix rather than describing the shape the two share.
+fn icon_host(url: &str) -> Result<String, String> {
+    let url = reqwest::Url::parse(url).map_err(|_| "Invalid URL".to_string())?;
     if url.scheme() != "https" {
-        return Err("Provider icons require an HTTPS provider URL".to_string());
+        return Err("Icons require an HTTPS URL".to_string());
     }
-    let raw_host = url
+    let host = url
         .host_str()
-        .ok_or_else(|| "Provider URL has no hostname".to_string())?;
-    let host = raw_host.strip_prefix("api.").unwrap_or(raw_host);
+        .ok_or_else(|| "URL has no hostname".to_string())?;
     if host.parse::<IpAddr>().is_ok() || host.is_empty() {
-        return Err("Provider icons require a public hostname".to_string());
+        return Err("Icons require a public hostname".to_string());
     }
     Ok(host.to_ascii_lowercase())
 }
@@ -665,6 +733,10 @@ fn is_public_ip(address: IpAddr) -> bool {
     }
 }
 
+/// The most an icon may weigh, so a settings page cannot be made to download
+/// something enormous by a URL typed into it.
+const MAX_ICON_BYTES: usize = 256 * 1024;
+
 fn favicon_data_url(bytes: &[u8], mime: &str) -> String {
     format!(
         "data:{mime};base64,{}",
@@ -692,9 +764,34 @@ fn favicon_mime(bytes: &[u8]) -> Option<&'static str> {
 
 #[tauri::command]
 pub async fn provider_favicon(app: AppHandle, base_url: String) -> Result<Option<String>, String> {
-    const MAX_ICON_BYTES: usize = 256 * 1024;
+    let host = icon_host(&base_url)?;
+    icon_for_host(&app, &host).await
+}
 
-    let host = provider_icon_domain(&base_url)?;
+/// The icon an MCP server's command line points at, when it names a URL.
+///
+/// The same store as the provider icons -- one cache directory, one fetch, one
+/// set of rules for what counts as an image -- because an icon is the same thing
+/// in both lists. A server that is a program has nothing to fetch, which is most
+/// of them, so no URL is `None` rather than an error: the row falls back to a
+/// glyph, and that is the ordinary case rather than a failure.
+#[tauri::command]
+pub async fn mcp_favicon(app: AppHandle, command: String) -> Result<Option<String>, String> {
+    let Some(url) = crate::mcp::url_in(&command) else {
+        return Ok(None);
+    };
+    let host = icon_host(url)?;
+    icon_for_host(&app, &host).await
+}
+
+/// Fetches and caches the icon for a host, climbing to the site it belongs to.
+///
+/// Read from disk when it is already there, so a second look at a list costs
+/// nothing, and written through a temporary file that is renamed into place, so
+/// a half-written icon is never read back as a whole one. What is written is
+/// stored under the host that was **asked** for, not the one it was found on, so
+/// the climb costs one round of requests rather than one per render.
+async fn icon_for_host(app: &AppHandle, host: &str) -> Result<Option<String>, String> {
     let cache_dir = app
         .path()
         .app_data_dir()
@@ -713,20 +810,69 @@ pub async fn provider_favicon(app: AppHandle, base_url: String) -> Result<Option
         }
     }
 
-    let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 443))
+    for candidate in icon_hosts(host) {
+        let Some(bytes) = fetch_icon(&candidate).await? else {
+            continue;
+        };
+        let Some(mime) = favicon_mime(&bytes) else {
+            continue;
+        };
+        write_icon(&cache_path, &bytes)?;
+        return Ok(Some(favicon_data_url(&bytes, mime)));
+    }
+    Ok(None)
+}
+
+/// The hosts to try for one icon, most specific first.
+///
+/// **A service is often reached at a subdomain that serves nothing.** The MCP
+/// endpoint is `mcp.deepwiki.com` and the site, with the icon, is `deepwiki.com`;
+/// a provider's API is `api.openai.com` and its brand is `openai.com`. Those are
+/// the same fact, so this is the same rule: climb one label at a time and stop
+/// while a domain is still left, because one more step would ask about a TLD.
+/// That is why there is no list of known prefixes here to grow stale -- and why
+/// the provider list and the MCP list behave identically, since this is the only
+/// place either of them looks.
+fn icon_hosts(host: &str) -> Vec<String> {
+    let mut hosts = vec![host.to_string()];
+    let mut current = host.to_string();
+    while current.split('.').count() > 2 {
+        let Some((_, parent)) = current.split_once('.') else {
+            break;
+        };
+        if parent.is_empty() {
+            break;
+        }
+        hosts.push(parent.to_string());
+        current = parent.to_string();
+    }
+    hosts
+}
+
+/// Downloads one `/favicon.ico` and returns what came back, if anything did.
+///
+/// The address is resolved here and pinned to that answer, and a host that is not
+/// publicly routable is refused without a request: a settings page has no business
+/// being able to probe the local network by being typed into.
+async fn fetch_icon(host: &str) -> Result<Option<Vec<u8>>, String> {
+    let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host, 443))
         .await
-        .map_err(|_| "Provider hostname could not be resolved".to_string())?
+        .map_err(|_| "The hostname could not be resolved".to_string())?
         .collect();
     if addresses.is_empty() || addresses.iter().any(|address| !is_public_ip(address.ip())) {
         return Ok(None);
     }
 
-    let pinned_addresses: Vec<SocketAddr> = addresses;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
-        .resolve_to_addrs(&host, &pinned_addresses)
+        // `reqwest` sends no `User-Agent` unless told to, and some hosts answer a
+        // request without one by refusing it -- which reads here as "no icon" and
+        // is impossible to tell apart from a host that genuinely has none. Naming
+        // the app is also the honest thing to do when asking someone's server.
+        .user_agent(concat!("projectz/", env!("CARGO_PKG_VERSION")))
+        .resolve_to_addrs(host, &addresses)
         .build()
         .map_err(|error| error.to_string())?;
     let response = client
@@ -753,25 +899,21 @@ pub async fn provider_favicon(app: AppHandle, base_url: String) -> Result<Option
         }
         bytes.extend_from_slice(&chunk);
     }
-    let Some(mime) = favicon_mime(&bytes) else {
-        return Ok(None);
-    };
+    Ok(Some(bytes))
+}
 
+/// Writes an icon through a temporary file that is renamed into place.
+fn write_icon(cache_path: &Path, bytes: &[u8]) -> Result<(), String> {
     let temporary_path = cache_path.with_extension(format!(
         "{}.{}.tmp",
         std::process::id(),
         uuid::Uuid::new_v4()
     ));
-    fs::write(&temporary_path, &bytes).map_err(|error| error.to_string())?;
+    fs::write(&temporary_path, bytes).map_err(|error| error.to_string())?;
     if cache_path.exists() {
-        fs::remove_file(&cache_path).map_err(|error| error.to_string())?;
+        fs::remove_file(cache_path).map_err(|error| error.to_string())?;
     }
-    fs::rename(&temporary_path, &cache_path).map_err(|error| error.to_string())?;
-
-    Ok(Some(format!(
-        "data:{mime};base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    )))
+    fs::rename(&temporary_path, cache_path).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1201,4 +1343,50 @@ pub fn local_model_load(
 #[tauri::command]
 pub fn local_model_unload(runtime: State<'_, AiRuntime>) {
     runtime.local_models().unload();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The case this whole walk exists for: an endpoint on a subdomain, whose
+    /// icon is on the site underneath it.
+    #[test]
+    fn the_climb_reaches_the_site_under_a_subdomain() {
+        assert_eq!(
+            icon_hosts("mcp.deepwiki.com"),
+            vec!["mcp.deepwiki.com", "deepwiki.com"]
+        );
+        // The provider case, which used to need its own rule for `api.`.
+        assert_eq!(
+            icon_hosts("api.openai.com"),
+            vec!["api.openai.com", "openai.com"]
+        );
+    }
+
+    #[test]
+    fn a_deeper_subdomain_climbs_one_label_at_a_time() {
+        assert_eq!(
+            icon_hosts("a.b.example.com"),
+            vec!["a.b.example.com", "b.example.com", "example.com"]
+        );
+    }
+
+    /// One more step would ask about a TLD, which is never where an icon is.
+    #[test]
+    fn the_climb_stops_at_a_domain() {
+        assert_eq!(icon_hosts("example.com"), vec!["example.com"]);
+        assert_eq!(icon_hosts("localhost"), vec!["localhost"]);
+    }
+
+    #[test]
+    fn a_host_is_read_from_a_url_and_only_an_https_one() {
+        assert_eq!(
+            icon_host("https://mcp.deepwiki.com/mcp").expect("host"),
+            "mcp.deepwiki.com"
+        );
+        assert!(icon_host("http://mcp.deepwiki.com/mcp").is_err());
+        assert!(icon_host("https://127.0.0.1:8931/mcp").is_err());
+        assert!(icon_host("not a url").is_err());
+    }
 }

@@ -18,9 +18,20 @@ use crate::ai::types::{ChatAttachment, ChatEvent, ChatMessage, ReasoningEffort};
 
 #[cfg(test)]
 mod tests {
-    use super::{accumulate_usage, budget_notice, merge_round_usage, BUDGET_FINAL_REMAINING};
+    use super::{
+        accumulate_usage, budget_notice, merge_round_usage, BUDGET_FINAL_REMAINING,
+        REQUEST_ATTEMPTS,
+    };
     use crate::ai::types::ReasoningEffort;
     use serde_json::{json, Value};
+
+    /// The retry is exactly one, so a real failure is reported rather than retried
+    /// indefinitely. The requirement is "try again once, then say it failed", and
+    /// this number is the whole of that promise.
+    #[test]
+    fn a_request_is_retried_exactly_once() {
+        assert_eq!(REQUEST_ATTEMPTS, 2);
+    }
 
     /// The budget is stated, and the last one is an instruction to answer.
     ///
@@ -627,11 +638,10 @@ impl<'a> CallRunner<'a> {
             }
         };
 
-        let effect = self
-            .registry
-            .get(&call.name)
-            .map(|tool| tool.effect)
-            .unwrap_or(Effect::Read);
+        // Both kinds of tool, because this decides caching and invalidation. The
+        // fallback is only reached for a name that was not in the registry, which
+        // the parse step above has already refused.
+        let effect = self.registry.effect_of(&call.name).unwrap_or(Effect::Read);
 
         // A repeat of a call already made in this conversation is answered from
         // the cache when nothing has been written since. Emitted rather than
@@ -983,6 +993,66 @@ fn tool_status(name: &str) -> &'static str {
     }
 }
 
+/// How many times one request to the provider is attempted before its failure is
+/// final.
+///
+/// One retry, and no more. The second attempt covers a transient fault -- a
+/// gateway that dropped the connection, a provider that answered 502 to a request
+/// it would have taken a moment later -- and past that a repeated failure is a
+/// real one, so whoever is waiting is told rather than being made to sit through a
+/// third and fourth try. The retry is applied to the *request*, never to the run:
+/// a request that failed produced no tokens and changed nothing, so re-sending it
+/// cannot duplicate output or replay a tool.
+const REQUEST_ATTEMPTS: u32 = 2;
+
+/// How long to wait before the retry, so a moment's fault has a chance to clear.
+const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Sends one chat request, retrying once before a failure is final.
+///
+/// **Only the request is retried, never a stream that has already begun.** This
+/// returns the moment a response is accepted, so a failure here means no token was
+/// emitted and nothing on the provider's side was changed beyond the attempt
+/// itself -- re-sending is therefore safe. A stream that dies mid-flight is a
+/// different situation: half an answer has already reached the conversation, so
+/// [`stream_completion`], which owns that case, does not replay it.
+///
+/// The error is the same one [`explain_failure`] would have produced for the final
+/// attempt, so what the user finally reads is unchanged by the retry being here.
+/// Both the streaming path and the plain completion go through this, which is what
+/// makes one retry apply to a reply, a scheduled job and a sub-agent alike.
+async fn send_request(
+    client: &reqwest::Client,
+    endpoint: &Endpoint,
+    body: &Value,
+) -> Result<reqwest::Response, String> {
+    let url = crate::ai::remote::types::chat_url(&endpoint.base_url);
+    let mut last_error = String::new();
+    for attempt in 1..=REQUEST_ATTEMPTS {
+        let mut request = client.post(&url).json(body);
+        if !endpoint.api_key.trim().is_empty() {
+            request = request.bearer_auth(&endpoint.api_key);
+        }
+        match request.send().await {
+            Ok(response) if response.status().is_success() => return Ok(response),
+            Ok(response) => {
+                let status = response.status();
+                let response_body = response.text().await.unwrap_or_default();
+                last_error = explain_failure(status, &response_body);
+                warn!(endpoint = %endpoint.name, attempt, %status, "provider rejected the request");
+            }
+            Err(error) => {
+                last_error = format!("Request failed: {error}");
+                warn!(endpoint = %endpoint.name, attempt, %error, "chat request failed");
+            }
+        }
+        if attempt < REQUEST_ATTEMPTS {
+            tokio::time::sleep(RETRY_DELAY).await;
+        }
+    }
+    Err(last_error)
+}
+
 async fn stream_completion(
     client: &reqwest::Client,
     endpoint: &Endpoint,
@@ -1009,22 +1079,11 @@ async fn stream_completion(
         body["tools"] = tools.clone();
         body["tool_choice"] = Value::String("auto".into());
     }
-    let url = crate::ai::remote::types::chat_url(&endpoint.base_url);
     info!(run_id, endpoint = %endpoint.name, model, messages = messages.len(), "remote stream start");
-    let mut request = client.post(&url).json(&body);
-    if !endpoint.api_key.trim().is_empty() {
-        request = request.bearer_auth(&endpoint.api_key);
-    }
-    let response = request
-        .send()
-        .await
-        .map_err(|error| format!("Request failed: {error}"))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let response_body = response.text().await.unwrap_or_default();
-        warn!(run_id, %status, "remote rejected");
-        return Err(explain_failure(status, &response_body));
-    }
+    // The one retry lives in here, so a transient provider fault on any round of
+    // any run -- a reply, a job, a sub-agent -- is absorbed before it becomes a
+    // failure someone has to hear about.
+    let response = send_request(client, endpoint, &body).await?;
 
     let mut bytes = response.bytes_stream();
     let mut byte_buffer = Vec::new();
@@ -1282,21 +1341,9 @@ pub async fn complete_once(
         "stream": false,
         "max_tokens": max_tokens,
     });
-    let url = crate::ai::remote::types::chat_url(&endpoint.base_url);
-    let mut request = client.post(&url).json(&body);
-    if !endpoint.api_key.trim().is_empty() {
-        request = request.bearer_auth(&endpoint.api_key);
-    }
-    let response = request
-        .send()
-        .await
-        .map_err(|error| format!("Request failed: {error}"))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let response_body = response.text().await.unwrap_or_default();
-        warn!(endpoint = %endpoint.name, model, %status, "completion rejected");
-        return Err(explain_failure(status, &response_body));
-    }
+    // Same single retry as the streaming path: a short internal completion can
+    // meet a transient provider fault just as a reply can.
+    let response = send_request(&client, endpoint, &body).await?;
     let payload: Value = response
         .json()
         .await

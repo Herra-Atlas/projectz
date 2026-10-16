@@ -734,6 +734,17 @@ impl AiRuntime {
                         error: None,
                     };
                 }
+                // A reply the user is not watching must not die in silence. This is
+                // where chat *and* scheduled runs land -- a job runs through here
+                // too -- so one notification covers both, and the frontend's own
+                // error bubble covers the conversation that is on screen.
+                if !self.is_viewed(session_id.as_deref()) {
+                    crate::observation::notification::notify_run_failed(
+                        app,
+                        session_title.as_deref(),
+                        &err,
+                    );
+                }
                 emit("failed", Some(err.clone()));
                 ChatResult {
                     run_id,

@@ -174,7 +174,8 @@ mod tests {
         assert!(
             !super::super::registry_for(super::super::ToolMode::Agent, false)
                 .names()
-                .contains(&"web_fetch")
+                .iter()
+                .any(|name| name == "web_fetch")
         );
     }
 

@@ -94,15 +94,15 @@ mod tests {
     /// It is advertised in Agent mode and withheld from a sub-agent of its own.
     #[test]
     fn the_tool_is_agent_only_and_never_nests() {
-        assert!(registry_for_with(ToolMode::Agent, false, true)
-            .names()
-            .contains(&"sub_agent"));
-        assert!(!registry_for_with(ToolMode::Agent, false, false)
-            .names()
-            .contains(&"sub_agent"));
-        assert!(!registry_for_with(ToolMode::Chat, true, true)
-            .names()
-            .contains(&"sub_agent"));
+        let advertised = |mode, search, spawn| {
+            registry_for_with(mode, search, spawn)
+                .names()
+                .iter()
+                .any(|name| name == "sub_agent")
+        };
+        assert!(advertised(ToolMode::Agent, false, true));
+        assert!(!advertised(ToolMode::Agent, false, false));
+        assert!(!advertised(ToolMode::Chat, true, true));
     }
 
     /// The description has to steer the model away from the one use that breaks:

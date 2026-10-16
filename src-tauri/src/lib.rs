@@ -3,6 +3,7 @@ mod commands;
 mod database;
 mod documents;
 mod jobs;
+mod mcp;
 mod observation;
 mod panel;
 mod websearch;
@@ -91,6 +92,16 @@ pub fn run() {
             let scheduler = jobs::Scheduler::start(app.handle().clone(), runtime.clone());
             app.manage(runtime);
             app.manage(scheduler);
+            // Reaches the configured MCP servers once, in the background. Not
+            // awaited: a server is a process that takes a moment to answer, and
+            // the window should not open a second late for a tool list nobody has
+            // asked to see yet.
+            {
+                let database = std::sync::Arc::clone(&database);
+                tauri::async_runtime::spawn(async move {
+                    mcp::manager::refresh(&database).await;
+                });
+            }
             // The panel browser's history, installed before anything can ask for
             // a browser so the first `panel_browser_open` finds live state rather
             // than reporting a page it then forgets.
@@ -227,10 +238,15 @@ pub fn run() {
             commands::workspace_open,
             commands::workspace_select,
             commands::workspace_close,
+            commands::mcp_servers,
+            commands::mcp_refresh,
+            commands::mcp_save,
+            commands::mcp_delete,
             commands::read_chat_attachment,
             commands::extract_pdf_attachment,
             commands::ai_list_endpoints,
             commands::provider_favicon,
+            commands::mcp_favicon,
             commands::ai_add_endpoint,
             commands::ai_update_endpoint,
             commands::ai_test_endpoint,

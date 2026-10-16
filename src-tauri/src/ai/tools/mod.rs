@@ -40,7 +40,7 @@ pub use access::AccessSet;
 pub use approval::{Approval, ApprovalGate, ApprovalRequest, QuestionRequest};
 pub use cache::ToolCache;
 pub use policy::{Decision, PermissionMode};
-pub use registry::{Effect, Sink, ToolContext, ToolRegistry, ToolSpec};
+pub use registry::{DynamicTool, Effect, Sink, ToolContext, ToolRegistry, ToolSpec};
 pub use run::{RunHandle, SubAgentNotice};
 pub use ui::ToolSummary;
 
@@ -139,12 +139,36 @@ pub fn registry_for_with(
         // advertising it on its own invites a model to guess URLs.
         registry.add(fetch::spec());
     }
+    // The MCP servers the user has switched on, in Agent mode only for the same
+    // reason the web tools are: a Chat conversation has no business reaching a
+    // program on the machine. The list is a snapshot taken at the last connect or
+    // refresh, so building a request never waits on a server -- see
+    // [`crate::mcp::manager`].
+    if mode == ToolMode::Agent {
+        for tool in crate::mcp::manager::snapshot().iter() {
+            registry.add_dynamic(tool.clone());
+        }
+    }
     registry
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Tool names as owned strings, matching what `names()` returns.
+    fn listed(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    /// Whether a name is in a tool list.
+    ///
+    /// A helper rather than `Vec::contains`, because a name is a `String` now
+    /// that the list spans compile-time and runtime tools, and
+    /// `contains(&"read_file")` does not typecheck against one.
+    fn has(names: &[String], tool: &str) -> bool {
+        names.iter().any(|name| name == tool)
+    }
 
     #[test]
     fn chat_mode_advertises_nothing_whatever_the_flag_says() {
@@ -162,31 +186,34 @@ mod tests {
         let names = |mode: ToolMode, search: bool| registry_for(mode, search).names();
         // Off, so the workspace tools are there and neither web tool is.
         let off = names(ToolMode::Agent, false);
-        assert!(!off.contains(&"search_web"), "{off:?}");
-        assert!(!off.contains(&"web_fetch"), "{off:?}");
+        assert!(!has(&off, "search_web"), "{off:?}");
+        assert!(!has(&off, "web_fetch"), "{off:?}");
         // On, and both arrive together -- see the fetch test below for why.
         let on = names(ToolMode::Agent, true);
-        assert!(on.contains(&"search_web"), "{on:?}");
-        assert!(on.contains(&"web_fetch"), "{on:?}");
+        assert!(has(&on, "search_web"), "{on:?}");
+        assert!(has(&on, "web_fetch"), "{on:?}");
     }
 
     #[test]
     fn page_fetching_arrives_with_search_and_not_on_its_own() {
         // A model reaches for `web_fetch` after a search hands it a link.
         // Advertised on its own it would invite guessed URLs.
-        assert!(!registry_for(ToolMode::Agent, false)
-            .names()
-            .contains(&"web_fetch"));
-        assert!(registry_for(ToolMode::Agent, true)
-            .names()
-            .contains(&"web_fetch"));
+        assert!(!has(
+            &registry_for(ToolMode::Agent, false).names(),
+            "web_fetch"
+        ));
+        assert!(has(
+            &registry_for(ToolMode::Agent, true).names(),
+            "web_fetch"
+        ));
     }
 
     #[test]
     fn agent_mode_carries_read_file() {
-        assert!(registry_for(ToolMode::Agent, false)
-            .names()
-            .contains(&"read_file"));
+        assert!(has(
+            &registry_for(ToolMode::Agent, false).names(),
+            "read_file"
+        ));
     }
 
     /// The composer sends a checked skill's body inline, so the tools are for the
@@ -196,12 +223,12 @@ mod tests {
     fn the_skill_tools_are_agent_only() {
         for mode in [ToolMode::Chat] {
             let names = registry_for(mode, true).names();
-            assert!(!names.contains(&"skill_read"), "{names:?}");
-            assert!(!names.contains(&"skill_manage"), "{names:?}");
+            assert!(!has(&names, "skill_read"), "{names:?}");
+            assert!(!has(&names, "skill_manage"), "{names:?}");
         }
         let names = registry_for(ToolMode::Agent, false).names();
-        assert!(names.contains(&"skill_read"), "{names:?}");
-        assert!(names.contains(&"skill_manage"), "{names:?}");
+        assert!(has(&names, "skill_read"), "{names:?}");
+        assert!(has(&names, "skill_manage"), "{names:?}");
     }
 
     /// Reading and managing skills have the expected effects for cache behavior;
@@ -218,7 +245,7 @@ mod tests {
     fn search_is_added_alongside_the_agent_tools_rather_than_replacing_them() {
         assert_eq!(
             registry_for(ToolMode::Agent, true).names(),
-            vec![
+            listed(&[
                 "ask_user",
                 "delete_file",
                 "edit_file",
@@ -241,7 +268,7 @@ mod tests {
                 "web_fetch",
                 "write_document",
                 "write_file"
-            ]
+            ])
         );
     }
 
@@ -251,10 +278,10 @@ mod tests {
     #[test]
     fn a_sub_agent_cannot_spawn_another_sub_agent() {
         let names = registry_for_with(ToolMode::Agent, true, false).names();
-        assert!(!names.contains(&"sub_agent"), "{names:?}");
+        assert!(!has(&names, "sub_agent"), "{names:?}");
         // Everything else it needs to do work is still there.
         for tool in ["read_file", "write_file", "run_terminal", "search_web"] {
-            assert!(names.contains(&tool), "{tool} missing: {names:?}");
+            assert!(has(&names, tool), "{tool} missing: {names:?}");
         }
     }
 
@@ -268,7 +295,7 @@ mod tests {
             .into_iter()
             .filter(|name| !child.contains(name))
             .collect::<Vec<_>>();
-        assert_eq!(difference, vec!["sub_agent"]);
+        assert_eq!(difference, listed(&["sub_agent"]));
     }
 
     #[test]
@@ -278,7 +305,7 @@ mod tests {
         let names = |mode: ToolMode, search: bool| registry_for(mode, search).names();
         assert_eq!(
             names(ToolMode::Agent, true),
-            vec![
+            listed(&[
                 "ask_user",
                 "delete_file",
                 "edit_file",
@@ -301,11 +328,11 @@ mod tests {
                 "web_fetch",
                 "write_document",
                 "write_file"
-            ]
+            ])
         );
         assert_eq!(
             names(ToolMode::Agent, false),
-            vec![
+            listed(&[
                 "ask_user",
                 "delete_file",
                 "edit_file",
@@ -326,7 +353,7 @@ mod tests {
                 "todo",
                 "write_document",
                 "write_file"
-            ]
+            ])
         );
     }
 }

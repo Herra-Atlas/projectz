@@ -593,13 +593,16 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       // in the live run's activity while the reply is still going and in a stored
       // assistant message once it has ended, so both are patched -- and the live one
       // matters because its activity is what gets persisted when the reply ends.
-      const attachSubagentReport = (sessionId: string, report: string) => {
+      const attachSubagentReport = (sessionId: string, report: string, failed: boolean) => {
         const fill = (steps: ActivityStep[]): boolean => {
           for (let index = steps.length - 1; index >= 0; index--) {
             const step = steps[index];
             if (step.kind === "tool" && step.tool === "sub_agent" && step.output === undefined) {
               step.output = report;
-              step.outcome = "finished";
+              step.outcome = failed ? "failed" : "finished";
+              // The delegated work failed, so the row reads as a failed step rather
+              // than a successful call that happens to carry a sad paragraph.
+              step.failed = failed;
               return true;
             }
           }
@@ -632,22 +635,32 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       if (payload.kind === "subagent_result") {
         const reportSession = payload.metrics?.session_id;
         const report = payload.text;
-        if (reportSession && report && reportSession === sessionIdRef.current) {
-          const label = payload.metrics?.label ?? "agent";
-          // The report goes on the `sub_agent` row inside "Worked for ...", not into
-          // the transcript as the user's own message; the model still receives it, as
-          // a hidden turn (below).
-          attachSubagentReport(reportSession, report);
-          const content = `Sub-agent \`${label}\` finished and reported:\n\n${report}`;
-          if (sessionRunIdsRef.current.has(reportSession)) {
-            // Still answering: deliver it the moment this reply ends.
-            queuedMessagesRef.current.push({ sessionId: reportSession, text: content, attachments: [], hidden: true });
-            setQueuedCount(queuedMessagesRef.current.length);
-          } else {
-            // The turn is over, so the report starts its own. `clearDraft` is false
-            // because this is not the user's message -- it must not wipe a draft.
-            void dispatchRef.current(content, [], messagesRef.current, reportSession, false, true);
-          }
+        if (!reportSession || !report) return;
+        const label = payload.metrics?.label ?? "agent";
+        const failed = payload.metrics?.failed === true;
+        // Only the conversation on screen can take the hidden turn and patch the
+        // live row. A report for any other conversation still has to reach someone,
+        // so a failure goes to the stack rather than being dropped silently.
+        if (reportSession !== sessionIdRef.current) {
+          if (failed) onNotify("error", `Sub-agent "${label}" failed.`);
+          return;
+        }
+        // The report goes on the `sub_agent` row inside "Worked for ...", not into
+        // the transcript as the user's own message; the model still receives it, as
+        // a hidden turn (below).
+        attachSubagentReport(reportSession, report, failed);
+        if (failed) onNotify("error", `Sub-agent "${label}" failed.`);
+        const content = failed
+          ? `Sub-agent \`${label}\` failed and did not finish. Its report:\n\n${report}`
+          : `Sub-agent \`${label}\` finished and reported:\n\n${report}`;
+        if (sessionRunIdsRef.current.has(reportSession)) {
+          // Still answering: deliver it the moment this reply ends.
+          queuedMessagesRef.current.push({ sessionId: reportSession, text: content, attachments: [], hidden: true });
+          setQueuedCount(queuedMessagesRef.current.length);
+        } else {
+          // The turn is over, so the report starts its own. `clearDraft` is false
+          // because this is not the user's message -- it must not wipe a draft.
+          void dispatchRef.current(content, [], messagesRef.current, reportSession, false, true);
         }
         return;
       }
