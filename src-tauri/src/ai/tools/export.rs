@@ -470,20 +470,18 @@ fn escape_pdf_text(text: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    // The shared helper, not a local copy of it. This file used to define its own
+    // `root()` with the same directory name and a *second* counter starting at
+    // zero, so it handed out directories like `projectz-export-<pid>-0` that the
+    // docx tests' own `temp_root()` had already handed to someone else -- and both
+    // begin by deleting the directory. Two tests then shared one folder and
+    // removed each other's fixtures, which surfaced as "the workspace root is
+    // unreadable" or a missing `small.png` in whichever test lost the race. One
+    // counter means one unique directory per test.
+    use super::test_support::temp_root as root;
 
     fn discarding() -> super::super::ToolContext {
         super::super::ToolContext::default()
-    }
-
-    fn root() -> PathBuf {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir =
-            std::env::temp_dir().join(format!("projectz-export-{}-{unique}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        dir
     }
 
     /// The arguments that shape the output have to reach the writers: a document

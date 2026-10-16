@@ -12,19 +12,21 @@
 //! code -- `fn main(` -- which is not a valid pattern. Refusing that would cost a
 //! turn for a mistake the tool can absorb, so a pattern that will not compile is
 //! searched for literally instead. The two behaviours are indistinguishable for a
-//! simple word and the fallback only ever turns a dead end into a result.
+//! simple word and the fallback only ever turns a dead end into a result -- but it
+//! is *said* in the result, because a literal match on something that looks like a
+//! regex is a claim the caller has no way to check otherwise.
 //!
 //! A literal search is also *worse* than a regex search for the case that made the
 //! old `search_files` frustrating: `name` found `Filename` and could not be told
 //! to stop. Now `\bname\b` does.
 
 use std::ops::ControlFlow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use super::walk::{walk_files, FoundFile, MAX_WALK_SECS};
+use super::walk::{relative_slash, walk_files, FoundFile, MAX_WALK_SECS};
 use super::ToolSpec;
 
 /// Search the workspace for a pattern.
@@ -45,7 +47,7 @@ pub const GREP: ToolSpec = ToolSpec {
             },
             "path": {
                 "type": "string",
-                "description": "Directory to search, relative to the workspace root. Defaults to the whole workspace."
+                "description": "A folder inside the workspace to search, or a single file to search. Defaults to the whole workspace."
             },
             "glob": {
                 "type": "string",
@@ -125,6 +127,11 @@ impl Matcher {
             Matcher::Literal(needle) => line.to_lowercase().contains(needle),
         }
     }
+
+    /// Whether this is the fallback rather than the pattern the caller wrote.
+    fn is_literal(&self) -> bool {
+        matches!(self, Matcher::Literal(_))
+    }
 }
 
 fn grep(arguments: Value, root: PathBuf) -> Result<String, String> {
@@ -165,20 +172,34 @@ fn grep(arguments: Value, root: PathBuf) -> Result<String, String> {
         mode,
         context,
         matcher: &matcher,
+        pattern,
+        case_insensitive,
         matches: Vec::new(),
         emitted: 0,
         scanned: 0,
+        skipped: 0,
         hit_limit: false,
     };
-    let completed = walk_files(&root, &directory, deadline, &mut |file| {
-        if filter
-            .as_ref()
-            .is_some_and(|filter| !filter.allows(&file.relative))
-        {
-            return ControlFlow::Continue(());
-        }
-        report.visit(file)
-    });
+    let completed = if directory.is_file() {
+        // A `path` that names a file searches **that file**. Walking it as a
+        // directory read nothing at all -- `read_dir` fails on a file -- and the
+        // result said "No matches in 0 files", which is the worst kind of answer:
+        // it looks like a search that worked and found nothing, so the pattern is
+        // reported as absent from a file it was never looked at in. Naming a file
+        // is what a caller does when it already knows where to look.
+        report.visit_relative(&root, &directory, filter.as_ref());
+        true
+    } else {
+        walk_files(&root, &directory, deadline, &mut |file| {
+            if filter
+                .as_ref()
+                .is_some_and(|filter| !filter.allows(&file.relative))
+            {
+                return ControlFlow::Continue(());
+            }
+            report.visit(file)
+        })
+    };
 
     Ok(report.render(completed))
 }
@@ -187,8 +208,10 @@ fn grep(arguments: Value, root: PathBuf) -> Result<String, String> {
 ///
 /// The fallback is the whole reason a model can pass real code as a pattern. A
 /// failed compile is not reported as an error because a literal search is nearly
-/// always what was meant -- `Vec<String>` is a common thing to look for and a
-/// valid thing to search for, and it is not a valid pattern.
+/// always what was meant: `fn main(` is an unclosed group and a perfectly normal
+/// thing to search for, and refusing it would cost a turn for a mistake the tool
+/// can absorb. The caller is told which search actually ran, because a literal
+/// match on a pattern that *looks* like a regex is a result that needs explaining.
 fn build_matcher(pattern: &str, case_insensitive: bool) -> Matcher {
     let mut builder = regex::RegexBuilder::new(pattern);
     builder.case_insensitive(case_insensitive);
@@ -269,6 +292,9 @@ struct Report<'a> {
     mode: OutputMode,
     context: usize,
     matcher: &'a Matcher,
+    /// The pattern exactly as the caller wrote it, so a notice can name it.
+    pattern: &'a str,
+    case_insensitive: bool,
     /// Rendered blocks, one per file that matched.
     matches: Vec<String>,
     /// Result units counted toward the limit: matching lines in `content` mode,
@@ -277,6 +303,12 @@ struct Report<'a> {
     emitted: usize,
     /// Files whose contents were read, so "no matches" can say how much was seen.
     scanned: usize,
+    /// Files that were looked at but not read: too large, or not UTF-8 text.
+    ///
+    /// Counted so an empty result can admit that part of the tree was never
+    /// searched. These used to be dropped in silence, which meant a file that was
+    /// skipped was indistinguishable from one that was searched and did not match.
+    skipped: usize,
     /// The limit was reached and results were dropped.
     hit_limit: bool,
 }
@@ -288,9 +320,11 @@ impl Report<'_> {
             return ControlFlow::Break(());
         }
         if file.bytes > MAX_FILE_BYTES {
+            self.skipped += 1;
             return ControlFlow::Continue(());
         }
         let Ok(body) = std::fs::read_to_string(file.absolute) else {
+            self.skipped += 1;
             return ControlFlow::Continue(());
         };
         self.scanned += 1;
@@ -341,15 +375,93 @@ impl Report<'_> {
         ControlFlow::Continue(())
     }
 
+    /// Visits one file named directly by `path`, as the walk would have.
+    ///
+    /// The `glob` filter still applies, so naming a file does not become a way to
+    /// read one the filter excluded.
+    fn visit_relative(&mut self, root: &Path, path: &Path, filter: Option<&Pattern>) {
+        let relative = relative_slash(root, path);
+        if filter.is_some_and(|filter| !filter.allows(&relative)) {
+            return;
+        }
+        let Ok(meta) = std::fs::metadata(path) else {
+            return;
+        };
+        // One file and nothing to walk, so a break has nothing to break out of.
+        // Ignored rather than turned into an error: reaching the result limit on
+        // the only file is a normal outcome, and the report already says so.
+        let _ = self.visit(FoundFile {
+            absolute: path,
+            relative,
+            bytes: meta.len(),
+        });
+    }
+
+    /// What the result has to say when the pattern was not usable as a regex.
+    ///
+    /// Reported on a *successful* search as well as an empty one, because it is
+    /// most dangerous with matches: a caller who wrote an alternation and had it
+    /// searched literally is looking at a handful of substring hits and has no
+    /// reason to doubt them.
+    fn literal_note(&self) -> Option<String> {
+        self.matcher.is_literal().then(|| {
+            format!(
+                "`{}` is not valid regex, so it was searched for literally -- a literal `|` \
+                 matches a pipe character, not an alternation.",
+                self.pattern
+            )
+        })
+    }
+
+    /// What an empty result has to admit about how it was run.
+    ///
+    /// Each entry is a reason the pattern might be there even though nothing was
+    /// returned, ordered by how likely it is to be the cause. Without them an
+    /// empty result is indistinguishable from "the code is not there", which is
+    /// the one conclusion it must not be read as.
+    fn empty_notes(&self) -> Vec<String> {
+        let mut notes = Vec::new();
+        if self.scanned == 0 {
+            notes.push(
+                "No files were read there -- check that `path` names a folder inside the \
+                 workspace."
+                    .to_string(),
+            );
+        }
+        if !self.case_insensitive {
+            notes.push(
+                "Matching is case-sensitive; set `case_insensitive` to ignore case.".to_string(),
+            );
+        }
+        if self.skipped > 0 {
+            notes.push(format!(
+                "{} file{} was skipped as too large or not UTF-8 text.",
+                self.skipped,
+                if self.skipped == 1 { "" } else { "s" }
+            ));
+        }
+        notes
+    }
+
     fn render(self, completed: bool) -> String {
         if self.matches.is_empty() {
-            return if completed {
+            let mut out = if completed {
                 format!("No matches in {} files.", self.scanned)
             } else {
                 "No matches in the part of the workspace searched before the time limit. \
                  Narrow the search with `path` or `glob`."
                     .to_string()
             };
+            let notes = self
+                .literal_note()
+                .into_iter()
+                .chain(self.empty_notes())
+                .collect::<Vec<_>>();
+            if !notes.is_empty() {
+                out.push(' ');
+                out.push_str(&notes.join(" "));
+            }
+            return out;
         }
 
         let mut out = self.matches.join("\n");
@@ -368,6 +480,10 @@ impl Report<'_> {
             out.push_str(" (more exist; narrow the search with `path` or `glob`)");
         } else if !completed {
             out.push_str(" (search stopped at the time limit; narrow it with `path` or `glob`)");
+        }
+        if let Some(note) = self.literal_note() {
+            out.push_str("\n\n");
+            out.push_str(&note);
         }
         out
     }
@@ -441,13 +557,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The fallback that lets a model pass real code: `Vec<String>` is not a valid
-    /// pattern, and refusing it would cost a turn for a mistake the tool can absorb.
+    /// The fallback that lets a model pass real code as a pattern.
+    ///
+    /// The pattern here has to be one that genuinely fails to compile, or the
+    /// test proves nothing: a fragment of code is not automatically an invalid
+    /// pattern. `fn main(` is an unclosed group, which the regex crate refuses;
+    /// `Vec<String>` is *not*, because the angle brackets are literals to it.
     #[test]
     fn an_invalid_regex_falls_back_to_a_literal_search() {
-        let root = root_with(&[("a.rs", "let v: Vec<String> = Vec::new();")]);
-        let out = grep(json!({ "pattern": "Vec<String>" }), root.clone()).expect("grep");
+        let root = root_with(&[(
+            "a.rs",
+            "fn main() {\n    let v: Vec<String> = Vec::new();\n}",
+        )]);
+        let out = grep(json!({ "pattern": "fn main(" }), root.clone()).expect("grep");
         assert!(out.contains("a.rs:1:"), "{out}");
+
+        // And a pattern that merely looks like code and happens to compile is
+        // matched by the regex engine, which gives the same answer here.
+        let angle = grep(json!({ "pattern": "Vec<String>" }), root.clone()).expect("grep");
+        assert!(angle.contains("a.rs:2:"), "{angle}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -578,6 +706,99 @@ mod tests {
         let out = grep(json!({ "pattern": "needle" }), root.clone()).expect("grep");
         assert!(out.contains("src/a.rs"), "{out}");
         assert!(!out.contains("target"), "{out}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A `path` naming a file searches **that file**.
+    ///
+    /// This is the false negative that made the tool untrustworthy: the path was
+    /// walked as a directory, `read_dir` failed on a file, and the result was "No
+    /// matches in 0 files" -- a search that never looked, reported as a search
+    /// that looked and found nothing. The caller's only recourse was to shell out
+    /// to `Select-String` through the terminal.
+    #[test]
+    fn a_path_naming_a_file_searches_that_file() {
+        let root = root_with(&[("web/main.js", "const accentColor = 1;\nother\n")]);
+        let out = grep(
+            json!({ "pattern": "accentColor", "path": "web/main.js" }),
+            root.clone(),
+        )
+        .expect("grep");
+        assert!(out.contains("web/main.js:1:"), "{out}");
+        assert!(!out.contains("No matches"), "{out}");
+
+        // And an alternation, the shape that started this, works by regex.
+        let alternation = grep(
+            json!({ "pattern": "accentColor|fmtLatLon", "path": "web/main.js" }),
+            root.clone(),
+        )
+        .expect("grep");
+        assert!(alternation.contains("web/main.js:1:"), "{alternation}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An empty result says why it might be empty.
+    ///
+    /// A bare "No matches" is read as "the code is not there", and every one of
+    /// these is a reason it could be there and still not come back.
+    #[test]
+    fn an_empty_result_admits_what_it_could_not_see() {
+        let root = root_with(&[("a.rs", "Nothing")]);
+        let out = grep(json!({ "pattern": "absent" }), root.clone()).expect("grep");
+        assert!(out.contains("case-sensitive"), "{out}");
+
+        // A path with nothing under it says so rather than reporting a search of
+        // zero files as though it had been a real one.
+        let empty = grep(
+            json!({ "pattern": "absent", "path": "no/such/dir" }),
+            root.clone(),
+        )
+        .expect("grep");
+        assert!(empty.contains("No files were read"), "{empty}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The literal fallback is reported rather than silent.
+    ///
+    /// With a pattern containing `|` — which is exactly what a caller writes to
+    /// look for several names at once — the fallback searches for the pipe
+    /// character itself and finds nothing. Saying so is what turns a dead end
+    /// into one corrected call.
+    #[test]
+    fn a_literal_fallback_is_reported_in_the_result() {
+        // A real fragment of code rather than a word: `fn main(` is an unclosed
+        // group and does not compile as a pattern, which is the case the fallback
+        // exists for. (`Vec<String>`, used as the example elsewhere, compiles fine
+        // -- the angle brackets are literals -- so it would not test this.)
+        let root = root_with(&[("a.rs", "fn main() {\n}\n")]);
+        let out = grep(json!({ "pattern": "fn main(" }), root.clone()).expect("grep");
+        assert!(out.contains("a.rs:1:"), "{out}");
+        assert!(out.contains("searched for literally"), "{out}");
+
+        // A pattern that compiles is not reported, so the note means something.
+        let compiled = grep(json!({ "pattern": "fn main" }), root.clone()).expect("grep");
+        assert!(!compiled.contains("searched for literally"), "{compiled}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A file skipped for its encoding is counted, not silently dropped.
+    ///
+    /// A UTF-16 file makes `read_to_string` fail, and it used to disappear
+    /// without a trace -- so a pattern plainly present in it came back as absent.
+    #[test]
+    fn a_file_that_could_not_be_read_is_admitted() {
+        let root = root_with(&[("ok.rs", "nothing here")]);
+        // A UTF-16LE file with its byte-order mark. The mark matters: the content
+        // bytes alone are a run of NULs, which is *valid* UTF-8, so the read would
+        // succeed and this test would pass for the wrong reason. `FF FE` is not
+        // valid UTF-8, which is what makes the file unreadable as text.
+        let mut utf16: Vec<u8> = vec![0xFF, 0xFE];
+        utf16.extend("needle".encode_utf16().flat_map(|unit| unit.to_le_bytes()));
+        std::fs::write(root.join("utf16.rs"), utf16).expect("write");
+
+        let out = grep(json!({ "pattern": "needle" }), root.clone()).expect("grep");
+        assert!(out.contains("No matches"), "{out}");
+        assert!(out.contains("not UTF-8"), "{out}");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

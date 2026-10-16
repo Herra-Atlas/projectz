@@ -11,6 +11,11 @@ export type SessionStats = {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /** Every request's input, added up. Counts a reply's tool rounds, so it is the
+      conversation's real spend and is never smaller than [`promptTokens`]. */
+  usedPromptTokens: number;
+  usedCompletionTokens: number;
+  usedTotalTokens: number;
   /** Summed time spent generating, across measured replies. */
   generationSeconds: number;
   promptSeconds: number;
@@ -64,6 +69,9 @@ const emptyStats = (session: ChatSession): SessionStats => ({
   promptTokens: 0,
   completionTokens: 0,
   totalTokens: 0,
+  usedPromptTokens: 0,
+  usedCompletionTokens: 0,
+  usedTotalTokens: 0,
   generationSeconds: 0,
   promptSeconds: 0,
   aggregateTokensPerSecond: 0,
@@ -123,6 +131,12 @@ export function computeSessionStats(session: ChatSession): SessionStats {
       stats.peakContextTokens = Math.max(stats.peakContextTokens, metrics.prompt_tokens);
     }
     if (metrics.completion_tokens != null) stats.completionTokens += metrics.completion_tokens;
+    // What the reply spent across every round it made, which is larger than the
+    // last-round `prompt_tokens` above whenever a tool ran. Falls back to those
+    // last-round figures for a reply saved before the rounds were totalled -- exact
+    // for a reply that made a single request, an undercount only for an old one.
+    stats.usedPromptTokens += metrics.used_prompt_tokens ?? metrics.prompt_tokens ?? 0;
+    stats.usedCompletionTokens += metrics.used_completion_tokens ?? metrics.completion_tokens ?? 0;
     stats.generationSeconds += metrics.generation_seconds;
     stats.promptSeconds += metrics.prompt_seconds;
     if (metrics.generation_rate_estimated) stats.hasEstimatedRates = true;
@@ -161,6 +175,7 @@ export function computeSessionStats(session: ChatSession): SessionStats {
   }
 
   stats.totalTokens = stats.promptTokens + stats.completionTokens;
+  stats.usedTotalTokens = stats.usedPromptTokens + stats.usedCompletionTokens;
   stats.aggregateTokensPerSecond = stats.generationSeconds > 0
     ? stats.completionTokens / stats.generationSeconds
     : 0;

@@ -81,7 +81,11 @@ pub enum Approval {
 /// cancelled run is dropped when the run's gate is dropped.
 #[derive(Clone)]
 pub struct ApprovalGate {
-    /// Shared rather than copied, so [`ApprovalGate::with_mode`] can re-point it.
+    /// The level this gate decides at.
+    ///
+    /// Its own `Arc` per gate: [`ApprovalGate::with_mode`] hands a run a gate
+    /// carrying *its* level rather than writing one the whole process shares. See
+    /// the note there for the bug that came from sharing it.
     mode: Arc<std::sync::Mutex<PermissionMode>>,
     pending: Arc<std::sync::Mutex<std::collections::HashMap<String, oneshot::Sender<Approval>>>>,
     /// Outstanding questions, keyed by the id the frontend answers with.
@@ -107,10 +111,13 @@ impl ApprovalGate {
     /// This gate with a different access set, **sharing the mode and the pending
     /// map**.
     ///
-    /// A fresh `Arc` rather than a mutation in place, unlike `with_mode`: two jobs
-    /// may run at once and each must keep its own capabilities, while both still
-    /// need the one pending map the answer command reaches. It is also what a
-    /// sub-agent inherits, since it is handed its parent's gate.
+    /// A fresh `Arc` for the access set rather than a mutation in place, unlike
+    /// `with_mode`: two jobs may run at once and each must keep its own
+    /// capabilities, while both still need the one pending map the answer command
+    /// reaches. It is also what a sub-agent inherits, since it is handed its
+    /// parent's gate -- and the mode is shared here on purpose, because a
+    /// sub-agent is *the same run* narrowed to reading and must not be handed a
+    /// level of its own to get wrong.
     pub fn with_access(&self, access: AccessSet) -> Self {
         Self {
             mode: Arc::clone(&self.mode),
@@ -125,19 +132,28 @@ impl ApprovalGate {
         *self.access
     }
 
-    /// This gate with a different mode, **sharing the same pending map**.
+    /// This gate running at `mode`, **sharing the pending map and nothing else**.
     ///
-    /// The sharing is the whole point. A caller that needs the current mode at
-    /// send time cannot build a second gate, because the answer to a prompt
-    /// arrives through a separate command holding only an id -- and a second
-    /// instance would have an empty map, so the answer would find nothing and the
-    /// run would park forever on a prompt the user had already answered. Re-
-    /// pointing the mode in place is why this exists.
+    /// The map is shared because the answer to a prompt arrives through a
+    /// separate command holding only an id: a second instance would have an empty
+    /// map, so the answer would find nothing and the run would park forever on a
+    /// prompt the user had already answered.
+    ///
+    /// The mode is deliberately **not** shared, and that is a fix rather than a
+    /// detail. It used to be one `Arc` mutated in place, which made the access
+    /// level a process-wide setting that every live run read at each tool call.
+    /// One `AiRuntime` serves the whole app, so a second reply starting in
+    /// another conversation, a queued send, or a job row stored at `ask` silently
+    /// lowered the level of a run the user had set to `full` -- and the next call
+    /// raised a dialog the screen said was not coming. A level belongs to the run
+    /// it was chosen for, so it gets its own lock.
     pub fn with_mode(&self, mode: PermissionMode) -> Self {
-        if let Ok(mut current) = self.mode.lock() {
-            *current = mode;
+        Self {
+            mode: Arc::new(std::sync::Mutex::new(mode)),
+            pending: Arc::clone(&self.pending),
+            questions: Arc::clone(&self.questions),
+            access: Arc::clone(&self.access),
         }
-        self.clone()
     }
 
     /// The mode currently in force.
@@ -463,13 +479,64 @@ mod tests {
     /// Re-pointing the mode must not disconnect the pending map.
     #[test]
     fn re_pointing_the_mode_keeps_the_prompt_map_connected() {
-        let gate = ApprovalGate::new(PermissionMode::Ask);
-        let re_pointed = gate.with_mode(PermissionMode::Full);
+        let runtime_gate = ApprovalGate::new(PermissionMode::Ask);
+        // What a run at `ask` is handed: its own level, the shared map.
+        let run_gate = runtime_gate.with_mode(PermissionMode::Ask);
 
-        assert_eq!(re_pointed.mode(), PermissionMode::Full);
-        // The mode is shared, not copied: changing it on one is visible on the
-        // other, which is what makes a single answer path work at all.
-        assert_eq!(gate.mode(), PermissionMode::Full);
+        assert_eq!(run_gate.mode(), PermissionMode::Ask);
+        // The map is what is shared, not the level: answering through the runtime's
+        // handle must release a prompt raised by the run's. Pinned because a version
+        // of this that cloned the map instead would park every run forever -- the
+        // answer would arrive at an empty map and the reply would hang with nothing
+        // on screen but a stop button.
+        let (sender, receiver) = std::sync::mpsc::channel::<String>();
+        let waiter = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(
+                    run_gate.settle("r1", request(), &cancelled(), move |_, id| {
+                        sender.send(id.to_string()).expect("send id");
+                    }),
+                )
+        });
+        let approval_id = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the run should have asked for approval");
+        assert!(runtime_gate.answer(&approval_id, Approval::Allow));
+        assert_eq!(
+            waiter.join().expect("thread").expect("settled"),
+            Decision::Allow
+        );
+    }
+
+    /// A second run starting elsewhere in the app must not change this run's level.
+    ///
+    /// The bug this pins: the level was one `Arc` mutated in place on a gate the
+    /// whole process shared, so a reply starting in another conversation at a
+    /// lower level silently raised prompts for a run the screen said was at
+    /// `full`. Each run now carries its own.
+    #[test]
+    fn a_second_run_does_not_lower_this_runs_level() {
+        let runtime_gate = ApprovalGate::new(PermissionMode::Ask);
+        let full_run = runtime_gate.with_mode(PermissionMode::Full);
+        // Another send begins: the runtime re-points its own gate and the new run
+        // starts at `ask`.
+        let ask_run = runtime_gate.with_mode(PermissionMode::Ask);
+
+        assert_eq!(full_run.mode(), PermissionMode::Full);
+        assert_eq!(ask_run.mode(), PermissionMode::Ask);
+        assert_eq!(runtime_gate.mode(), PermissionMode::Ask);
+
+        // And the level is what settles the call: the `full` run is not prompted
+        // for a terminal command, the `ask` run is.
+        let mut prompted = false;
+        let decision = runtime()
+            .block_on(full_run.settle("r1", request(), &cancelled(), |_, _| prompted = true))
+            .expect("settled");
+        assert_eq!(decision, Decision::Allow);
+        assert!(!prompted, "a run at full should not be prompted");
     }
 
     /// A permission dialog names the command it is about, so a user approving

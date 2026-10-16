@@ -35,7 +35,8 @@ export default function ToolIcon({ tool, size = 12 }: { tool: string; size?: num
   if (tool === "grep") return <Search {...props} />;
   if (tool === "glob") return <FileSearch {...props} />;
   if (tool === "search_web" || tool === "web_fetch") return <Globe {...props} />;
-  if (tool === "run_terminal" || tool === "terminal_output") return <Terminal {...props} />;
+  if (tool === "run_terminal" || tool === "terminal_output" || tool === "terminal_status")
+    return <Terminal {...props} />;
   if (tool === "terminal_kill") return <Square {...props} />;
   if (tool === "write_file" || tool === "edit_file" || tool === "edit_lines") return <Pencil {...props} />;
   if (tool === "write_document") return <FileOutput {...props} />;

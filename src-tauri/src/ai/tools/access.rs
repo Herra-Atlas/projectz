@@ -107,7 +107,9 @@ fn capability(tool_name: &str) -> Capability {
         | "delete_file" | "write_document" => Capability::Write,
         // The whole terminal group, so a run without the terminal cannot read or
         // stop what another run left running either.
-        "run_terminal" | "terminal_output" | "terminal_kill" => Capability::Terminal,
+        "run_terminal" | "terminal_output" | "terminal_kill" | "terminal_status" => {
+            Capability::Terminal
+        }
         "search_web" | "web_fetch" => Capability::Web,
         "sub_agent" => Capability::Subagents,
         "schedule_job" => Capability::Jobs,

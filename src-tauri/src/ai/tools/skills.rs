@@ -34,10 +34,10 @@ use super::ToolSpec;
 /// is relevant.
 pub const SKILL_READ: ToolSpec = ToolSpec {
     name: "skill_read",
-    description: "Read a saved skill's full instructions. Call this before your first tool call \
-                  or edit whenever the task matches a skill listed in your system prompt — \
-                  writing, editing, reviewing, researching or drafting. Returns the instructions \
-                  to follow.",
+    description: "Read a saved skill's full instructions. Call this when the task matches a skill \
+                  listed in your system prompt — writing, editing, reviewing, debugging, testing, \
+                  researching or drafting prose — and follow what it returns rather than working \
+                  the approach out from scratch. Returns the instructions to follow.",
     parameters: r#"{
         "type": "object",
         "properties": {
@@ -106,11 +106,12 @@ pub fn index(database: Option<&crate::database::Database>) -> Option<String> {
         .join("\n");
     Some(format!(
         "You have skills: saved sets of instructions for how this user wants particular kinds of \
-work done, listed below one per line as `name [type] — when to use it`. Read this list before \
-your first action on every task. When a skill's name, type or description matches what you are \
-about to do, call `skill_read` with its exact name and follow what it returns. Do this before you \
-write or edit code, review, research or draft prose, and do not skip it because the task looks \
-simple. When more than one applies, read each. If none apply, ignore this list.\n\n{listed}"
+work done, listed below one per line as `name [type] — when to use it`. Before you start, check \
+this list and call `skill_read` with the exact name of the skill whose name, type or description \
+matches what you are about to do -- writing or editing code, reviewing, debugging, testing, \
+researching, drafting prose -- then follow what it returns. Read the closest match: one skill is \
+usually the right number, and each further one costs a round trip. If none apply, ignore this \
+list and get on with the task.\n\n{listed}"
     ))
 }
 

@@ -95,7 +95,44 @@ pub const TERMINAL_OUTPUT: ToolSpec = ToolSpec {
     description: "Read the output a background command has printed since the last check, and \
                   whether it has finished. Call this after `run_terminal` with `background` set. \
                   Each call returns only what is new, so poll it in a loop rather than expecting \
-                  the whole log each time.",
+                  the whole log each time. Pass `tail` to re-read the most recent output instead \
+                  -- for example after you have already consumed it and need to look back.",
+    parameters: r#"{
+        "type": "object",
+        "properties": {
+            "id": {
+                "type": "string",
+                "description": "The id `run_terminal` returned when the command was started."
+            },
+            "tail": {
+                "type": "integer",
+                "description": "Return the most recent N bytes instead of only what is new. Does not advance the read position, so it can be asked for more than once."
+            }
+        },
+        "required": ["id"],
+        "additionalProperties": false
+    }"#,
+    effect: super::Effect::Read,
+    command_argument: None,
+    execute: |arguments, context| {
+        let _ = &context;
+        let tail = arguments
+            .get("tail")
+            .and_then(Value::as_u64)
+            .map(|bytes| bytes as usize);
+        Box::pin(std::future::ready(
+            required_string(&arguments, "id")
+                .and_then(|id| super::background::read_output(&id, tail)),
+        ))
+    },
+};
+
+/// Report whether a background command is alive, and how it exited.
+pub const TERMINAL_STATUS: ToolSpec = ToolSpec {
+    name: "terminal_status",
+    description: "Report a background command's liveness, its process id, and its exit code once \
+                  it has finished, plus how much output is buffered. Use this to ask whether a \
+                  server is still up instead of guessing by probing a port.",
     parameters: r#"{
         "type": "object",
         "properties": {
@@ -112,7 +149,7 @@ pub const TERMINAL_OUTPUT: ToolSpec = ToolSpec {
     execute: |arguments, context| {
         let _ = &context;
         Box::pin(std::future::ready(
-            required_string(&arguments, "id").and_then(|id| super::background::read_output(&id)),
+            required_string(&arguments, "id").and_then(|id| super::background::status(&id)),
         ))
     },
 };
@@ -359,5 +396,18 @@ mod tests {
         // no command and every shell call would run unclassified.
         assert_eq!(RUN_TERMINAL.command_argument, Some("command"));
         assert_eq!(RUN_TERMINAL.effect, super::super::Effect::Write);
+    }
+
+    /// The two follow-up tools carry no command and observe only. `terminal_kill`
+    /// is a write because stopping a process is the consequential half; reading
+    /// output and asking after a process change nothing.
+    #[test]
+    fn the_follow_up_tools_are_observed_without_a_command() {
+        assert_eq!(TERMINAL_OUTPUT.effect, super::super::Effect::Read);
+        assert_eq!(TERMINAL_STATUS.effect, super::super::Effect::Read);
+        assert_eq!(TERMINAL_KILL.effect, super::super::Effect::Write);
+        for tool in [TERMINAL_OUTPUT, TERMINAL_STATUS, TERMINAL_KILL] {
+            assert_eq!(tool.command_argument, None);
+        }
     }
 }

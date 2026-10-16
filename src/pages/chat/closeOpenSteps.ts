@@ -47,6 +47,9 @@ export const MIN_THOUGHT_CHARS = 24;
 export function closeOpenSteps(activity: ActivityStep[]): ActivityStep[] {
   const closedAt = Date.now();
   return activity.filter((step) => {
+    // A note carries no clock -- it is prose the run moved out of the answer, and
+    // it is complete the moment it is recorded -- so there is nothing to close.
+    if (step.kind === "note") return true;
     if (!step.running) return true;
     step.running = false;
     if (step.startedAt !== undefined) {
@@ -58,4 +61,38 @@ export function closeOpenSteps(activity: ActivityStep[]): ActivityStep[] {
     }
     return step.kind !== "thought" || step.text.length >= MIN_THOUGHT_CHARS;
   });
+}
+
+/**
+ * Closes the trailing thought the moment something else begins, in place.
+ *
+ * The same rule as [`closeOpenSteps`], applied while the run is still going. The
+ * backend can only report a thought as finished when a tool call or the final
+ * answer proves it ended, and only when it is long enough to be worth a row -- so
+ * a thought that stopped as the model moved on was left marked `running`, with the
+ * panel counting seconds from a timestamp nothing would ever advance. A row that
+ * says "Thought for 1m 20s" while the model has spent that time on a tool is not a
+ * slow thought; it is a clock that nobody stopped.
+ *
+ * Called from the two places that prove a thought is over -- a tool call starting,
+ * and the answer beginning to stream -- rather than from a timer, because those
+ * are the moments the fact changes.
+ *
+ * Only the *last* step is considered: a thought that is still running is by
+ * definition the most recent thing that happened, since `reasoning_delta` appends
+ * to it and anything else would have pushed a step after it.
+ *
+ * A thought too short for a row is dropped, exactly as it would be at the end of
+ * a run, so a stray fragment never becomes a row that says nothing.
+ */
+export function closeRunningThought(activity: ActivityStep[]): ActivityStep[] {
+  const last = activity[activity.length - 1];
+  if (last?.kind !== "thought" || !last.running) return activity;
+  last.running = false;
+  if (last.startedAt !== undefined) {
+    last.seconds = Math.max(0, (Date.now() - last.startedAt) / 1000);
+    delete last.startedAt;
+  }
+  if (last.text.length < MIN_THOUGHT_CHARS) activity.pop();
+  return activity;
 }

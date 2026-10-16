@@ -54,6 +54,9 @@ const AUTO_READ_TOOLS: &[&str] = &[
     // Observing a background command. Stopping one is a write and rides in the
     // other list, so a run trusted to look is not thereby trusted to kill.
     "terminal_output",
+    // Asking after a background process -- is it alive, its id, its exit code --
+    // observes the same way reading its output does.
+    "terminal_status",
 ];
 /// Write tools, approved without asking only from `auto_writes` upward.
 ///
@@ -72,6 +75,12 @@ const AUTO_WRITE_TOOLS: &[&str] = &[
     "write_document",
     "sub_agent",
     "schedule_job",
+    // Running a command is `Effect::Write` -- it can change anything the tool
+    // set can change -- so it belongs here with the other writes. It was left out
+    // of this list while its own sibling `terminal_kill` was in it, which made
+    // "auto-approve writes" still prompt for every command, the one thing a user
+    // picking that level is trying to stop.
+    "run_terminal",
     // Stopping a process is the consequential half of the terminal group; the
     // read half is `terminal_output`, above.
     "terminal_kill",
@@ -154,6 +163,9 @@ mod access_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The two invariants below are driven off the registry's own classification
+    // rather than a second copy of it.
+    use crate::ai::tools::{registry_for, Effect, ToolMode};
 
     #[test]
     fn permission_modes_use_the_frontend_wire_names() {
@@ -229,13 +241,53 @@ mod tests {
             "delete_file",
             "write_document",
             "sub_agent",
+            "run_terminal",
             "terminal_kill",
         ] {
             assert_eq!(decide(PermissionMode::AutoWrites, tool), Decision::Allow);
         }
-        for tool in ["run_terminal", "unknown_tool"] {
+        for tool in ["unknown_tool"] {
             assert_eq!(decide(PermissionMode::AutoWrites, tool), Decision::Ask);
         }
+    }
+
+    /// Every tool that can change anything is auto-approved at `auto_writes`.
+    ///
+    /// Driven off the registry's own `Effect` rather than a copy of the list, so
+    /// a tool added later -- or one reclassified from `Read` to `Write` -- cannot
+    /// end up silently prompting at a level that promises it will not. That is
+    /// exactly how `run_terminal` came to ask at `auto_writes` while its sibling
+    /// `terminal_kill` did not.
+    #[test]
+    fn every_write_tool_is_auto_approved_at_auto_writes() {
+        let registry = registry_for(ToolMode::Agent, true);
+        let unlisted = registry
+            .names()
+            .into_iter()
+            .filter(|name| registry.get(name).expect("registered").effect == Effect::Write)
+            .filter(|name| !AUTO_WRITE_TOOLS.contains(name))
+            .collect::<Vec<_>>();
+        assert!(
+            unlisted.is_empty(),
+            "these write tools would prompt at auto_writes: {unlisted:?}"
+        );
+    }
+
+    /// The read half of the same invariant: every observing tool runs unprompted
+    /// from `auto_safe` up, so a new read tool cannot be added and then prompt.
+    #[test]
+    fn every_read_tool_is_auto_approved_at_auto_safe() {
+        let registry = registry_for(ToolMode::Agent, true);
+        let unlisted = registry
+            .names()
+            .into_iter()
+            .filter(|name| registry.get(name).expect("registered").effect == Effect::Read)
+            .filter(|name| !AUTO_READ_TOOLS.contains(name))
+            .collect::<Vec<_>>();
+        assert!(
+            unlisted.is_empty(),
+            "these read tools would prompt at auto_safe: {unlisted:?}"
+        );
     }
 
     /// Asking the user is never gated: the prompt is the interaction, so a dialog

@@ -35,6 +35,16 @@ export type AiEvent = {
     arguments?: Record<string, unknown>;
     prompt_tokens?: number;
     completion_tokens?: number;
+    /**
+     * Every request's input and output for the reply, added up.
+     *
+     * Separate from `prompt_tokens` / `completion_tokens`, which report only the
+     * reply's final round. A reply that ran a tool sends the whole conversation
+     * again for its answer, so both rounds are billed and only the sum is what
+     * the reply actually spent. Absent when the provider never reported usage.
+     */
+    used_prompt_tokens?: number;
+    used_completion_tokens?: number;
     cached_tokens?: number;
     prompt_eval_tokens_per_second?: number;
     generation_tokens_per_second?: number;
@@ -145,6 +155,16 @@ export type BackgroundRun = {
    */
   requestStartedAt: number;
   generationStartedAt: number;
+  /**
+   * The prompt size the provider last reported for a round of this run.
+   *
+   * On the run rather than only in state because a run keeps going while the user
+   * reads another conversation: coming back to it has to restore the context
+   * figure the ring was showing, not fall back to the previous reply's size.
+   * Undefined until a round reports usage, which is the case for a provider that
+   * sends none.
+   */
+  promptTokens?: number;
   completionId?: string;
   localModel: boolean;
   isReasoning: boolean;

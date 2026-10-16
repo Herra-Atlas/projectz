@@ -24,6 +24,7 @@ mod grep;
 mod output;
 mod paths;
 mod policy;
+mod process;
 mod registry;
 mod run;
 mod schedule;
@@ -87,9 +88,10 @@ pub enum ToolMode {
 
 /// Builds the registry for one run.
 ///
-/// Three independent switches rather than an enum per combination: web search and
-/// page fetching are per-conversation toggles, Agent mode is a mode the user
-/// picks, and a user may want any of them without the others.
+/// Three independent switches rather than an enum per combination: Agent mode is a
+/// mode the user picks, web search is the Agent run's own reach for the network,
+/// and sub-agent spawning is withheld for a spawned agent. A user may want any of
+/// them without the others.
 ///
 /// The result is sorted by name inside `ToolRegistry`, so the order tools are
 /// added here cannot affect the cached request prefix.
@@ -126,7 +128,11 @@ pub fn registry_for_with(
     if mode == ToolMode::Agent {
         registry.add(schedule::SCHEDULE_JOB);
     }
-    if web_search_enabled {
+    // Agent-only, whatever the flag says. A Chat conversation is a conversation:
+    // it has no tools, and reaching the network on the user's behalf is not the
+    // exception that proves otherwise. The flag still narrows an Agent run -- a
+    // job may hold `web: false` -- but it can never widen a Chat one.
+    if mode == ToolMode::Agent && web_search_enabled {
         registry.add(websearch::spec());
         // Fetching a specific URL only makes sense once searching is on: a model
         // reaches for `web_fetch` after `search_web` has given it a link, and
@@ -141,27 +147,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn chat_mode_without_search_advertises_nothing() {
+    fn chat_mode_advertises_nothing_whatever_the_flag_says() {
         // The common case must send no `tools` key at all. An empty array is not
-        // equivalent: some providers reject the request outright.
+        // equivalent: some providers reject the request outright. The flag cannot
+        // undo it either -- a Chat run has no network reach to be handed by a
+        // request field, which is the whole point of deriving it from the mode
+        // rather than trusting whoever built the request.
         assert!(registry_for(ToolMode::Chat, false).specs().is_none());
+        assert!(registry_for(ToolMode::Chat, true).specs().is_none());
     }
 
     #[test]
-    fn web_search_alone_still_advertises_exactly_one_tool() {
-        let registry = registry_for(ToolMode::Chat, true);
-        // Search plus the fetch that follows from it, and nothing else.
-        assert_eq!(registry.names(), vec!["search_web", "web_fetch"]);
+    fn web_search_is_the_agent_runs_and_the_flag_narrows_it() {
+        let names = |mode: ToolMode, search: bool| registry_for(mode, search).names();
+        // Off, so the workspace tools are there and neither web tool is.
+        let off = names(ToolMode::Agent, false);
+        assert!(!off.contains(&"search_web"), "{off:?}");
+        assert!(!off.contains(&"web_fetch"), "{off:?}");
+        // On, and both arrive together -- see the fetch test below for why.
+        let on = names(ToolMode::Agent, true);
+        assert!(on.contains(&"search_web"), "{on:?}");
+        assert!(on.contains(&"web_fetch"), "{on:?}");
     }
 
     #[test]
     fn page_fetching_arrives_with_search_and_not_on_its_own() {
         // A model reaches for `web_fetch` after a search hands it a link.
         // Advertised on its own it would invite guessed URLs.
-        assert!(!registry_for(ToolMode::Chat, false)
+        assert!(!registry_for(ToolMode::Agent, false)
             .names()
             .contains(&"web_fetch"));
-        assert!(!registry_for(ToolMode::Agent, false)
+        assert!(registry_for(ToolMode::Agent, true)
             .names()
             .contains(&"web_fetch"));
     }
@@ -220,6 +236,7 @@ mod tests {
                 "sub_agent",
                 "terminal_kill",
                 "terminal_output",
+                "terminal_status",
                 "todo",
                 "web_fetch",
                 "write_document",
@@ -279,6 +296,7 @@ mod tests {
                 "sub_agent",
                 "terminal_kill",
                 "terminal_output",
+                "terminal_status",
                 "todo",
                 "web_fetch",
                 "write_document",
@@ -304,6 +322,7 @@ mod tests {
                 "sub_agent",
                 "terminal_kill",
                 "terminal_output",
+                "terminal_status",
                 "todo",
                 "write_document",
                 "write_file"

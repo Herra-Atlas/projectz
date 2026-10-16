@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Brain, ChevronRight, LoaderCircle } from "lucide-react";
 import ToolIcon from "../../components/ToolIcon";
-import type { ActivityStep, DiffLine, ThoughtStep, ToolDiff, ToolStep } from "../../features/chat/types";
+import type { ActivityStep, DiffLine, NoteStep, ThoughtStep, ToolDiff, ToolStep } from "../../features/chat/types";
 
 /**
  * One row of the panel: either a single call, or a run of them folded together.
@@ -13,7 +13,8 @@ import type { ActivityStep, DiffLine, ThoughtStep, ToolDiff, ToolStep } from "..
  */
 type Row =
   | { kind: "tool"; steps: ToolStep[] }
-  | { kind: "thought"; step: ThoughtStep };
+  | { kind: "thought"; step: ThoughtStep }
+  | { kind: "note"; step: NoteStep };
 
 type ActivityPanelProps = {
   steps: ActivityStep[];
@@ -100,6 +101,8 @@ export default function ActivityPanel({ steps, live, renderMarkdown, totalSecond
           {rows.map((row, index) =>
             row.kind === "thought" ? (
               <ThoughtRow key={`thought-${index}`} step={row.step} live={live} renderMarkdown={renderMarkdown} />
+            ) : row.kind === "note" ? (
+              <NoteRow key={`note-${index}`} step={row.step} renderMarkdown={renderMarkdown} />
             ) : (
               <ToolRow key={`tool-${index}`} steps={row.steps} live={live} />
             ),
@@ -179,6 +182,32 @@ function ThoughtRow({
         // above it when it starts where that row's text starts.
         <div className="markdown-content pb-1 pl-[26px] pt-0.5">{renderMarkdown(step.text)}</div>
       )}
+    </li>
+  );
+}
+
+/**
+ * Prose the model wrote in the middle of the work.
+ *
+ * Rendered as markdown, like the answer and a thought, because it is the model's
+ * own writing and it is full of the same code fences and lists. Sized and coloured
+ * like the answer rather than like a row label, because it *is* text to read -- it
+ * is only here rather than in the answer's bubble because the reply went on
+ * working afterwards, and the stored answer keeps the final round alone.
+ *
+ * No duration, no caret, no spinner: a note is complete the moment it is moved
+ * here, so there is nothing behind it to open and no clock to show.
+ */
+function NoteRow({
+  step,
+  renderMarkdown,
+}: {
+  step: NoteStep;
+  renderMarkdown: (text: string) => React.ReactNode;
+}) {
+  return (
+    <li className="markdown-content py-0.5 text-[13px] leading-6 text-[var(--muted)]">
+      {renderMarkdown(step.text)}
     </li>
   );
 }
@@ -464,7 +493,9 @@ function buildRows(steps: ActivityStep[]): Row[] {
       previous.steps.push(step);
       continue;
     }
-    rows.push(step.kind === "thought" ? { kind: "thought", step } : { kind: "tool", steps: [step] });
+    if (step.kind === "thought") rows.push({ kind: "thought", step });
+    else if (step.kind === "note") rows.push({ kind: "note", step });
+    else rows.push({ kind: "tool", steps: [step] });
   }
   return rows;
 }
@@ -511,14 +542,21 @@ function groupOutcome(steps: ToolStep[]): { text: string; failed: boolean } {
  *
  * Two fallbacks, in order of how much they can be trusted:
  *
- * - **Live, no measured figure yet.** Count up from the earliest running step,
- *   so a run in progress still moves. Undercounts the wait before the first
- *   step, which is the honest direction to err in: a panel that counts up from
- *   the first thing that happened cannot overstate it.
+ * - **Live, no measured figure yet.** The wall clock from the earliest step that
+ *   began, so a run in progress still moves. Undercounts the wait before the first
+ *   step, which is the honest direction to err in: a panel that counts up from the
+ *   first thing that happened cannot overstate it.
  * - **Nothing to sum.** A reply whose every step is closed and which has no
  *   measured total falls back to the step sum rather than reporting nothing,
  *   because a header reading "Worked for" with no figure is worse than a rough
  *   one.
+ *
+ * **Running steps are deliberately not summed.** They used to be, each counting
+ * from its own start, and because those windows overlap the total was their sum
+ * rather than their span -- a long run with a dozen rows left open reported
+ * "Worked for 85m" for work that took minutes. A step that is still running
+ * contributes nothing to the sum; the wall clock is what covers it, and it is a
+ * span by construction.
  *
  * The step count covers tool uses only, because that is the figure a reader is
  * scanning for: two thoughts and one read is one step, not three.
@@ -530,11 +568,13 @@ function usePanelTotals(
 ): { seconds: number; toolCount: number } {
   const now = useTick(live, steps);
   let toolCount = 0;
+  let summed = 0;
   for (const step of steps) {
     if (step.kind === "tool") toolCount += 1;
+    // A step that is still running adds nothing here: the wall clock below covers
+    // its time, and adding it again is what double-counted it.
+    if (step.kind !== "note" && !step.running) summed += step.seconds ?? 0;
   }
-
-  const summed = steps.reduce((total, step) => total + stepSeconds(step, now, live), 0);
 
   if (totalSeconds !== undefined) return { seconds: totalSeconds, toolCount };
   if (!live) return { seconds: summed, toolCount };
@@ -542,8 +582,10 @@ function usePanelTotals(
   // Running, so nothing is measured yet. Count from the first step that has
   // begun rather than from zero: a panel showing "0s" for a run that has been
   // going for eight seconds looks broken, whereas starting at the first step
-  // only undercounts the untimed moment before it.
+  // only undercounts the untimed moment before it. A note is skipped because it
+  // never had a start -- it is text, not work.
   const started = steps
+    .filter((step) => step.kind !== "note")
     .map((step) => step.startedAt)
     .filter((value): value is number => value !== undefined);
   const elapsed = started.length > 0 ? Math.max(0, (now - Math.min(...started)) / 1000) : 0;
@@ -552,6 +594,8 @@ function usePanelTotals(
 
 /** Seconds for one step, ticking while it runs. */
 function stepSeconds(step: ActivityStep, now: number, live: boolean): number {
+  // A note has no duration: it is prose, not work that took time.
+  if (step.kind === "note") return 0;
   if (!step.running) return step.seconds ?? 0;
   if (!live || step.startedAt === undefined) return step.seconds ?? 0;
   // Clamped at zero because the clock is read after the step began, and a

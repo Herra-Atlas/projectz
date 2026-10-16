@@ -102,9 +102,12 @@ pub const TODO: ToolSpec = ToolSpec {
         "required": [],
         "additionalProperties": false
     }"#,
-    // A write for caching: the list changes as work progresses, so a cached read
-    // would hand back a stale plan.
-    effect: super::Effect::Write,
+    // Never cached: the list changes as work progresses, so a cached read would
+    // hand back a stale plan. `Volatile` rather than `Write` because a checklist
+    // is a note the agent writes to itself -- it cannot make a file it read go
+    // stale, and pretending otherwise evicted the conversation's cache on every
+    // tick, which is most of a long run's reads re-done for nothing.
+    effect: super::Effect::Volatile,
     command_argument: None,
     execute: |arguments, context| Box::pin(std::future::ready(run(arguments, &context))),
 };

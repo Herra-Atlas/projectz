@@ -35,6 +35,14 @@ use tokio::process::Child;
 /// holding gigabytes for a command the user has forgotten about.
 const MAX_BUFFER_BYTES: usize = 256 * 1024;
 
+/// Most finished commands kept in the table before the oldest are dropped.
+///
+/// The registry is process-global and lives for the whole app run, so without a
+/// bound every command a session ever ran would be held -- and with it up to
+/// [`MAX_BUFFER_BYTES`] of output each. Both bounds together are what keep it
+/// finite. See [`reap_finished`].
+const MAX_TRACKED: usize = 64;
+
 /// Every background command this app has started and not yet reaped.
 fn registry() -> &'static Mutex<HashMap<String, Process>> {
     static REGISTRY: OnceLock<Mutex<HashMap<String, Process>>> = OnceLock::new();
@@ -62,14 +70,21 @@ struct Process {
 
 /// Starts a command in the background and returns its id.
 pub fn spawn(command: &str, root: &Path) -> Result<String, String> {
-    let mut child = super::terminal::platform_command(command)
+    let mut command_line = super::terminal::platform_command(command);
+    command_line
         .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         // Reaped if the app exits with the process still tracked, so a dev server
         // started here is not left orphaned by a crash.
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    // On Unix, give the child its own process group so `kill_tree` can signal the
+    // whole tree with a single negative pid. Windows reaches the tree through
+    // `taskkill /T` instead and needs no setup here.
+    #[cfg(unix)]
+    command_line.process_group(0);
+    let mut child = command_line
         .spawn()
         .map_err(|error| format!("Could not start the command: {error}"))?;
 
@@ -89,6 +104,10 @@ pub fn spawn(command: &str, root: &Path) -> Result<String, String> {
         &uuid::Uuid::new_v4().to_string().replace('-', "")[..8]
     );
     let mut processes = registry().lock().map_err(|error| error.to_string())?;
+    // Finished, fully-read commands are dropped here rather than never, so a
+    // session that runs many commands does not hold every buffer for the life of
+    // the app. See [`reap_finished`].
+    reap_finished(&mut processes);
     processes.insert(
         id.clone(),
         Process {
@@ -103,28 +122,43 @@ pub fn spawn(command: &str, root: &Path) -> Result<String, String> {
 }
 
 /// Output printed since the last read, and whether the command has finished.
-pub fn read_output(id: &str) -> Result<String, String> {
+///
+/// With `tail` set this instead returns the most recent `tail` bytes without
+/// moving the read cursor, so output already consumed can be looked at again --
+/// the same buffer, read two ways. Without it the read is incremental and the
+/// cursor advances, which is what keeps a poll cheap for a chatty server.
+pub fn read_output(id: &str, tail: Option<usize>) -> Result<String, String> {
     let mut processes = registry().lock().map_err(|error| error.to_string())?;
     let process = processes.get_mut(id).ok_or_else(|| unknown(id))?;
+    refresh_status(process);
 
-    // Polled rather than awaited, so the handle stays usable by `kill` at the same
-    // time. `try_wait` also reaps the child, so an exited command is not a zombie.
-    if process.status.is_none() {
-        if let Ok(Some(status)) = process.child.try_wait() {
-            process.status = Some(describe(status));
-        }
-    }
-
-    let (chunk, truncated) = {
+    let (chunk, truncated, advanced) = {
         let buffer = process.buffer.lock().map_err(|error| error.to_string())?;
-        let cursor = process.cursor.min(buffer.bytes.len());
-        (buffer.bytes[cursor..].to_vec(), buffer.truncated)
+        match tail {
+            Some(count) => {
+                let start = buffer.bytes.len().saturating_sub(count);
+                (buffer.bytes[start..].to_vec(), buffer.truncated, 0)
+            }
+            None => {
+                let cursor = process.cursor.min(buffer.bytes.len());
+                let chunk = buffer.bytes[cursor..].to_vec();
+                let advanced = chunk.len();
+                (chunk, buffer.truncated, advanced)
+            }
+        }
     };
-    process.cursor += chunk.len();
+    // Advanced after the buffer lock is dropped: the cursor and the bytes live in
+    // different locks, so moving one while the other is held would borrow `process`
+    // twice.
+    process.cursor += advanced;
 
-    let header = match &process.status {
-        Some(status) => format!("`{id}` ({}) has finished: {status}.", process.command),
-        None => format!("`{id}` ({}) is still running.", process.command),
+    let header = match (&process.status, tail) {
+        (Some(status), _) => format!("`{id}` ({}) has finished: {status}.", process.command),
+        (None, Some(_)) => format!(
+            "`{id}` ({}) is still running; showing the most recent output.",
+            process.command
+        ),
+        (None, None) => format!("`{id}` ({}) is still running.", process.command),
     };
     let body = String::from_utf8_lossy(&chunk);
     let mut out = header;
@@ -142,22 +176,120 @@ pub fn read_output(id: &str) -> Result<String, String> {
     Ok(out)
 }
 
-/// Stops a running command.
+/// Whether a background command is alive, its id, and its exit code once finished.
+///
+/// The deliberate alternative to inferring liveness by probing a port. Reads the
+/// same `status` a poll fills in; it changes nothing.
+pub fn status(id: &str) -> Result<String, String> {
+    let mut processes = registry().lock().map_err(|error| error.to_string())?;
+    let process = processes.get_mut(id).ok_or_else(|| unknown(id))?;
+    refresh_status(process);
+
+    let buffered = process
+        .buffer
+        .lock()
+        .map(|buffer| buffer.bytes.len())
+        .unwrap_or(0);
+    let unread = buffered.saturating_sub(process.cursor);
+    let pid = process
+        .child
+        .id()
+        .map(|pid| format!(" pid {pid}."))
+        .unwrap_or_default();
+    let state = match &process.status {
+        Some(status) => format!("has finished: {status}"),
+        None => "is running".to_string(),
+    };
+    Ok(format!(
+        "`{id}` ({}) {state}.{pid}\n{buffered} bytes of output buffered, {unread} unread.",
+        process.command
+    ))
+}
+
+/// Stops a running command and its descendants.
 pub fn kill(id: &str) -> Result<String, String> {
     let mut processes = registry().lock().map_err(|error| error.to_string())?;
     let process = processes.get_mut(id).ok_or_else(|| unknown(id))?;
 
-    if let Ok(Some(status)) = process.child.try_wait() {
-        process.status = Some(describe(status));
-    }
+    refresh_status(process);
     if let Some(status) = &process.status {
         return Ok(format!("`{id}` had already finished: {status}."));
     }
-    process
+
+    let pid = process
         .child
-        .start_kill()
-        .map_err(|error| format!("Could not stop `{id}`: {error}"))?;
-    Ok(format!("Stopped `{id}`."))
+        .id()
+        .ok_or_else(|| format!("`{id}` has no process id to stop."))?;
+    // Signals the shell *and* its children. Killing the handle alone is what left
+    // a `python.exe` running while this tool reported success.
+    super::process::kill_tree(pid)?;
+
+    // `taskkill /T /F` and `kill -KILL` return once the signal is delivered, so
+    // give the OS a moment to reap the shell before believing it is gone. A kill
+    // that reports success while the process still lives is worse than one that
+    // admits it could not confirm.
+    match confirm_exit(&mut process.child) {
+        Some(status) => {
+            process.status = Some(status.clone());
+            Ok(format!("Stopped `{id}` ({status})."))
+        }
+        None => Err(format!(
+            "`{id}` is still running after the kill (pid {pid}). It may be detached from the \
+             shell this tool started; stop it yourself if it should be gone."
+        )),
+    }
+}
+
+/// Polls a command's status into its record, without blocking.
+///
+/// `try_wait` also reaps the child, so an exited command is not a zombie, and the
+/// handle stays usable by [`kill`] at the same time.
+fn refresh_status(process: &mut Process) {
+    if process.status.is_none() {
+        if let Ok(Some(status)) = process.child.try_wait() {
+            process.status = Some(describe(status));
+        }
+    }
+}
+
+/// Waits briefly for a killed child to be reaped, returning how it exited.
+///
+/// Bounded so a kill never hangs: a shell that is genuinely gone reports within
+/// milliseconds, and one that is not is reported rather than waited on forever.
+fn confirm_exit(child: &mut Child) -> Option<String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Some(describe(status));
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+}
+
+/// Drops finished commands whose output has been fully read.
+///
+/// Nothing will ask for those again: the bytes were handed over and the process is
+/// gone. A finished command with *unread* output is kept, so a `terminal_output`
+/// after the fact still finds what it missed. A hard cap stops the table growing
+/// without bound when a command is finished but never read back.
+fn reap_finished(processes: &mut HashMap<String, Process>) {
+    processes.retain(|_, process| {
+        if process.status.is_none() {
+            return true;
+        }
+        let fully_read = process
+            .buffer
+            .lock()
+            .map(|buffer| process.cursor >= buffer.bytes.len())
+            .unwrap_or(false);
+        !fully_read
+    });
+    if processes.len() > MAX_TRACKED {
+        processes.retain(|_, process| process.status.is_none());
+    }
 }
 
 /// The message for an id nobody knows, naming the likely cause.
@@ -229,7 +361,7 @@ mod tests {
             // command that will still be alive when we stop it.
             let id = spawn("ping 127.0.0.1 -n 30", &root()).expect("spawn");
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            let output = read_output(&id).expect("read");
+            let output = read_output(&id, None).expect("read");
             assert!(
                 output.contains("still running") || output.contains("finished"),
                 "{output}"
@@ -241,17 +373,60 @@ mod tests {
             );
             // A second read now reports an exit rather than inventing output.
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            let after = read_output(&id).expect("read");
+            let after = read_output(&id, None).expect("read");
             assert!(after.contains("finished"), "{after}");
+        });
+    }
+
+    /// A `tail` read re-serves bytes the incremental read has already consumed, so
+    /// output that was polled past can still be looked at again.
+    #[test]
+    fn a_tail_read_re_serves_output_without_consuming_it() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let id = spawn("ping 127.0.0.1 -n 30", &root()).expect("spawn");
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            // Drain what is there, then confirm the tail still finds it.
+            let _ = read_output(&id, None).expect("read");
+            let tail = read_output(&id, Some(64)).expect("tail");
+            assert!(tail.contains("most recent output"), "{tail}");
+            // And an incremental read is still empty, so the tail moved no cursor.
+            let incremental = read_output(&id, None).expect("read");
+            assert!(incremental.contains("No new output"), "{incremental}");
+            let _ = kill(&id).expect("kill");
+        });
+    }
+
+    /// A status read says whether the command is alive, which is the fact the
+    /// model used to have to infer by probing a port.
+    #[test]
+    fn status_reports_a_running_command() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let id = spawn("ping 127.0.0.1 -n 30", &root()).expect("spawn");
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let report = status(&id).expect("status");
+            assert!(report.contains("is running"), "{report}");
+            assert!(report.contains("pid"), "{report}");
+            let _ = kill(&id).expect("kill");
         });
     }
 
     /// An unknown id is reported, not panicked on: the common cause is a restart.
     #[test]
     fn an_unknown_id_is_reported() {
-        assert!(read_output("term-nope")
+        assert!(read_output("term-nope", None)
             .expect_err("unknown")
             .contains("restart"));
         assert!(kill("term-nope").expect_err("unknown").contains("restart"));
+        assert!(status("term-nope")
+            .expect_err("unknown")
+            .contains("restart"));
     }
 }

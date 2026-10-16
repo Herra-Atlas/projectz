@@ -40,13 +40,19 @@ export const PERMISSION_LABELS: Record<PermissionMode, string> = {
   full: "Full access",
 };
 
-/** One line explaining which tools a level approves automatically. */
+/** One line explaining which tools a level approves automatically.
+ *
+ * These are a contract with `policy.rs`: every name listed here is one the level
+ * really does approve, and every tool the level approves is named here. They had
+ * drifted -- `auto_writes` claimed to ask before running a command while the
+ * policy's own write list was missing `run_terminal`, so the prompt appeared
+ * anyway and the hint was describing a level that did not exist. */
 export const PERMISSION_HINTS: Record<PermissionMode, string> = {
   ask: "Ask you before every tool call.",
   auto_safe:
-    "Auto-approve reads — list_dir, read_file, grep, glob, skill_read, search_web, web_fetch and terminal_output. Ask before every other tool.",
+    "Auto-approve reads — list_dir, read_file, grep, glob, skill_read, search_web, web_fetch, terminal_output and terminal_status. Ask before every other tool.",
   auto_writes:
-    "Also auto-approve the writes — write_file, write_document, edit_file, edit_lines, move_file, delete_file, skill_manage and sub_agent. Ask before running a command or scheduling a job.",
+    "Also auto-approve the writes and commands — write_file, write_document, edit_file, edit_lines, move_file, delete_file, skill_manage, run_terminal, terminal_kill, sub_agent and schedule_job. Ask before anything else.",
   full: "Auto-approve every tool call.",
 };
 

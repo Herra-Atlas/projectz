@@ -209,7 +209,10 @@ fn detail_for(tool: &str, arguments: &Value) -> String {
         };
     }
     // A background command is identified by the id the model was handed.
-    if matches!(tool, "terminal_output" | "terminal_kill") {
+    if matches!(
+        tool,
+        "terminal_output" | "terminal_kill" | "terminal_status"
+    ) {
         return string_at(arguments, "id").unwrap_or_default();
     }
     // A sub-agent is identified by the label the caller gave it, and only failing
@@ -266,6 +269,7 @@ fn label_for(tool: &str) -> &'static str {
         "run_terminal" => "Run command",
         "terminal_output" => "Read output",
         "terminal_kill" => "Stop command",
+        "terminal_status" => "Command status",
         "search_web" => "Search the web",
         "web_fetch" => "Open page",
         "skill_read" => "Read skill",
@@ -298,7 +302,7 @@ fn outcome_for(tool: &str, result: &str) -> Result<String, String> {
         "run_terminal" => exit_outcome(result),
         // A background command reports in its first line whether it is still
         // running; a move and a delete say what they did in their first line.
-        "move_file" | "delete_file" | "terminal_output" | "terminal_kill" => {
+        "move_file" | "delete_file" | "terminal_output" | "terminal_kill" | "terminal_status" => {
             Ok(first_line(result).to_string())
         }
         // A write says what it did in words that read better than a figure, and

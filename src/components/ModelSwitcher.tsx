@@ -86,7 +86,9 @@ export default function ModelSwitcher({ selectedEndpoint, selectedModel, localMo
   };
 
   // `groups` already excludes disabled providers and hidden models, so it can
-  // drive both the favorites list and the per-provider sections directly.
+  // drive both the favorites list and the per-provider sections directly. A
+  // favorite is a shortcut, not a move: it stays in its provider section too, so
+  // the star above is a second door to the same model rather than the only one.
   const normalizedQuery = query.trim().toLowerCase();
   const matches = (model: string, provider: string) => `${model} ${provider}`.toLowerCase().includes(normalizedQuery);
   const favoritesShown = groups.flatMap((group) => group.models
@@ -96,7 +98,7 @@ export default function ModelSwitcher({ selectedEndpoint, selectedModel, localMo
     .map((group) => ({
       endpoint: group.endpoint,
       entries: group.models
-        .filter((model) => !favorites.includes(modelKey(group.endpoint.id, model)) && matches(model, group.endpoint.name))
+        .filter((model) => matches(model, group.endpoint.name))
         .map((model) => ({ endpoint: group.endpoint, model, key: modelKey(group.endpoint.id, model) })),
     }))
     .filter((group) => group.entries.length > 0);
@@ -114,18 +116,33 @@ export default function ModelSwitcher({ selectedEndpoint, selectedModel, localMo
     setOpen(false);
   };
 
-  const renderModel = (entry: { endpoint: { id: string; name: string }; model: string; key: string }) => (
-    <div key={entry.key} className="group flex min-h-9 items-center gap-1 rounded-md px-1 hover:bg-[var(--raised)]">
-      <button type="button" onClick={() => selectRemoteModel(entry.endpoint.id, entry.model)} className="flex min-w-0 flex-1 items-center gap-2 rounded px-1.5 py-1 text-left text-[13px]" aria-current={selectedEndpoint === entry.endpoint.id && selectedModel === entry.model ? "true" : undefined}>
-        <span className="min-w-0 flex-1 truncate">{entry.model}</span>
-        <ModelBadges capabilities={capabilitiesByModel[entry.key]} />
-        {selectedEndpoint === entry.endpoint.id && selectedModel === entry.model && <Check size={14} className="shrink-0 text-[var(--accent)]" />}
-      </button>
-      <button type="button" onClick={() => toggleFavorite(entry.key)} className="grid size-8 shrink-0 place-items-center rounded text-[var(--quiet)] opacity-0 transition-opacity group-hover:opacity-50 group-focus-within:opacity-50 focus-visible:opacity-80 hover:!text-[var(--muted)] hover:!opacity-80" aria-label={favorites.includes(entry.key) ? `Remove ${entry.model} from favorites` : `Add ${entry.model} to favorites`} title={favorites.includes(entry.key) ? "Remove favorite" : "Add favorite"}>
-        <Star size={14} fill={favorites.includes(entry.key) ? "currentColor" : "none"} />
-      </button>
-    </div>
-  );
+  // The star is outline-only now, so a favorited model is marked by colour and
+  // by staying visible -- an unfilled star that also hid until hover would say
+  // nothing about which models are already favorites. The same row shows in both
+  // the FAVORITES section and its provider, so both carry the same lit star.
+  const starClass = (favorite: boolean) =>
+    `grid size-8 shrink-0 place-items-center rounded transition-opacity ${
+      favorite
+        ? "text-[var(--accent)] hover:!text-[var(--text)]"
+        : "text-[var(--quiet)] opacity-0 group-hover:opacity-50 group-focus-within:opacity-50 focus-visible:opacity-80 hover:!text-[var(--muted)] hover:!opacity-80"
+    }`;
+
+  const renderModel = (entry: { endpoint: { id: string; name: string }; model: string; key: string }) => {
+    const favorite = favorites.includes(entry.key);
+    const selected = selectedEndpoint === entry.endpoint.id && selectedModel === entry.model;
+    return (
+      <div key={entry.key} className="group flex min-h-9 items-center gap-1 rounded-md px-1 hover:bg-[var(--raised)]">
+        <button type="button" onClick={() => selectRemoteModel(entry.endpoint.id, entry.model)} className="flex min-w-0 flex-1 items-center gap-2 rounded px-1.5 py-1 text-left text-[13px]" aria-current={selected ? "true" : undefined}>
+          <span className="min-w-0 flex-1 truncate">{entry.model}</span>
+          <ModelBadges capabilities={capabilitiesByModel[entry.key]} />
+          {selected && <Check size={14} className="shrink-0 text-[var(--accent)]" />}
+        </button>
+        <button type="button" onClick={() => toggleFavorite(entry.key)} className={starClass(favorite)} aria-label={favorite ? `Remove ${entry.model} from favorites` : `Add ${entry.model} to favorites`} title={favorite ? "Remove favorite" : "Add favorite"}>
+          <Star size={14} />
+        </button>
+      </div>
+    );
+  };
 
   return (
     <div ref={popoverRef} className="relative">

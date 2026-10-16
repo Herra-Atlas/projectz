@@ -32,6 +32,22 @@ export const DEFAULT_CONTEXT_LENGTH = 200_000;
 export const DEFAULT_EFFORT_VALUES = ["none", "low", "medium", "high"];
 
 /**
+ * The value meaning "send no reasoning level at all, let the provider decide".
+ *
+ * The empty string, because that is exactly what it sends: the request carries no
+ * `reasoning_effort` field, and the provider applies whatever its own default is.
+ *
+ * **It is in every list of values, and first.** Two bugs came from not having it.
+ * A model whose provider lists levels without `medium` — the list varies, which is
+ * the whole reason the levels are read from the provider — fell back to a hardcoded
+ * `"medium"` that was not in the list, so no row in the menu was ticked and the
+ * control looked like it had no value at all; and every reply was then sent a
+ * level that model had never offered. Naming the default as a real choice fixes
+ * both: there is always a selectable value, and it is the provider's own.
+ */
+export const EFFORT_PROVIDER_DEFAULT = "";
+
+/**
  * Reads a model's capabilities from the local cache.
  *
  * This never throws and never rejects: a provider that was never tested has no
@@ -67,11 +83,16 @@ export function contextLengthFor(capabilities: ModelCapabilities | null): number
  * A provider spells them differently (`none` on one, `off` on another) and the
  * difference is exactly why a hardcoded level is rejected with HTTP 400. When
  * the provider said nothing, the previous four levels are used.
+ *
+ * The provider's own default leads the list in every case, so the menu always has
+ * at least one entry and always has one selected. Note that it is an *addition* to
+ * what the provider listed rather than a replacement, so nothing a model accepts
+ * becomes unreachable by adding it.
  */
 export function effortValuesFor(capabilities: ModelCapabilities | null): string[] {
   const reported = capabilities?.reasoning_values;
-  if (reported && reported.length > 0) return reported;
-  return DEFAULT_EFFORT_VALUES;
+  const levels = reported && reported.length > 0 ? reported : DEFAULT_EFFORT_VALUES;
+  return [EFFORT_PROVIDER_DEFAULT, ...levels];
 }
 
 /** True when the model takes no reasoning control at all.

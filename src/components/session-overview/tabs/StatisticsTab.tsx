@@ -28,8 +28,13 @@ export default function StatisticsTab({ stats }: { stats: SessionStats }) {
     <>
       <Group icon={<Layers size={13} />} title="Tokens">
         <StatGrid>
+          {/* The real spend leads: every request the conversation made, so a
+              reply that ran a tool counts both the round that called it and the
+              round that answered. `Total` and `Prompt` below report only the
+              final round of each reply, which is what the context charts plot. */}
+          <Stat label="Used" value={formatTokens(stats.usedTotalTokens)} hint="every request, incl. tool rounds" />
           <Stat label="Total" value={formatTokens(stats.totalTokens)} hint="prompt + completion" />
-          <Stat label="Prompt" value={formatTokens(stats.promptTokens)} hint="sent to models" />
+          <Stat label="Prompt" value={formatTokens(stats.promptTokens)} hint="final round of each reply" />
           <Stat label="Completion" value={formatTokens(stats.completionTokens)} hint="generated" />
         </StatGrid>
       </Group>

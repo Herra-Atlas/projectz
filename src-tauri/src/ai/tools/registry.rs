@@ -177,14 +177,28 @@ impl ToolSpec {
 
 /// What a tool does to the system.
 ///
-/// `Read` tools are safe to run and safe to cache. `Write` tools change the
-/// filesystem, so their results are never cached and they invalidate every
-/// cached read taken before them.
+/// The classification drives exactly two things -- whether a result may be
+/// cached, and whether taking it invalidates what was cached before -- and those
+/// are two separate questions. They used to be one: everything that was not a
+/// pure read was `Write`, so `ask_user` and `todo`, which touch no file at all,
+/// wiped the conversation's whole cache every time the agent asked a question or
+/// ticked an item off its checklist. A run that reads a dozen files and updates
+/// its list between them then re-reads all twelve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Effect {
     /// Observes only; its result may be cached.
     Read,
-    /// Changes state; invalidates cached reads.
+    /// Never cached, and **does not invalidate**: the tool writes a note to
+    /// itself rather than to the workspace.
+    ///
+    /// `ask_user` and `todo` are the whole of this class. Their results must not
+    /// be cached -- a question has to be asked afresh and a checklist changes as
+    /// work progresses -- but neither can have changed a file, so nothing read
+    /// before them has gone stale. Treating them as writes cost the cache for no
+    /// correctness in return.
+    Volatile,
+    /// Changes state; invalidates every cached read taken before it, and is never
+    /// itself cached.
     Write,
 }
 
@@ -241,6 +255,9 @@ impl ToolRegistry {
                 // nothing -- while stopping one is a write.
                 super::terminal::TERMINAL_OUTPUT,
                 super::terminal::TERMINAL_KILL,
+                // A read: liveness, process id, exit code and how much output is
+                // buffered, so the model can ask instead of probing a port.
+                super::terminal::TERMINAL_STATUS,
                 // Moving and removing files, so a refactor does not have to go
                 // through the shell to rename one.
                 super::paths::MOVE_FILE,
@@ -257,12 +274,13 @@ impl ToolRegistry {
                 // for, which is why it ships with the writers rather than the tools
                 // that change source.
                 super::export::WRITE_DOCUMENT,
-                // Asking the user, which parks the run until they answer. With the
-                // writes because its result must never be cached, not because it
-                // edits anything.
+                // Asking the user, which parks the run until they answer. Not a
+                // write: its result must never be cached, but it changes nothing,
+                // so it has no business invalidating the reads already taken.
                 super::ask::ASK_USER,
-                // The agent's own checklist. A write for caching too: the list
-                // changes as work progresses.
+                // The agent's own checklist. `Volatile` for the same reason: the
+                // list moves as work progresses so it cannot be cached, and the
+                // agent ticking an item off has not made any file stale.
                 super::todo::TODO,
             ],
         };

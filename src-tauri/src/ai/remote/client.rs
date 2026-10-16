@@ -18,7 +18,60 @@ use crate::ai::types::{ChatAttachment, ChatEvent, ChatMessage, ReasoningEffort};
 
 #[cfg(test)]
 mod tests {
+    use super::{accumulate_usage, budget_notice, merge_round_usage, BUDGET_FINAL_REMAINING};
     use crate::ai::types::ReasoningEffort;
+    use serde_json::{json, Value};
+
+    /// The budget is stated, and the last one is an instruction to answer.
+    ///
+    /// This is the only thing that turns the round ceiling from a wall into a
+    /// budget: a model told how much is left will spend it on the task, and a
+    /// model told its next answer is the last will write a report instead of
+    /// starting something it cannot finish.
+    #[test]
+    fn a_budget_notice_states_what_is_left() {
+        let warned = budget_notice(12);
+        let text = warned["content"].as_str().expect("content");
+        assert!(text.contains("12 tool rounds left"), "{text}");
+        assert!(!text.contains("Stop calling tools"), "{text}");
+        // A user turn, because llama.cpp rejects a system message that is not
+        // first and this arrives mid-conversation.
+        assert_eq!(warned["role"], "user");
+
+        let final_call = budget_notice(0);
+        let last = final_call["content"].as_str().expect("content");
+        assert!(last.contains("Stop calling tools"), "{last}");
+        assert!(last.contains("still open"), "{last}");
+        // The last notice is handed over with no tools at all, so it must read as
+        // the floor of the budget rather than as one more warning.
+        assert!(BUDGET_FINAL_REMAINING < 12);
+    }
+
+    /// The merge the answer and the wrap-up call both use.
+    ///
+    /// Last-wins on the context figure, accumulate on the spend -- two different
+    /// questions about the same round that must not collapse into one another.
+    #[test]
+    fn a_round_merges_as_context_last_wins_and_spend_accumulated() {
+        let mut usage = Value::Null;
+        merge_round_usage(
+            &mut usage,
+            &json!({"prompt_tokens": 100, "completion_tokens": 5}),
+        );
+        merge_round_usage(
+            &mut usage,
+            &json!({"prompt_tokens": 400, "completion_tokens": 7}),
+        );
+        assert_eq!(
+            usage["prompt_tokens"], 400,
+            "the context is the latest round's"
+        );
+        assert_eq!(
+            usage["used_prompt_tokens"], 500,
+            "the spend is every round's"
+        );
+        assert_eq!(usage["used_completion_tokens"], 12);
+    }
 
     /// A level the provider listed goes out byte for byte. Providers spell these
     /// differently — `none` on one, `off` on another — so any mapping here is a
@@ -76,6 +129,48 @@ mod tests {
         let metrics = event.metrics.expect("metrics are always present");
         assert_eq!(metrics["state"], "done");
         assert_eq!(metrics["agent_id"], "agent-1");
+    }
+
+    /// A reply that ran a tool is billed for both rounds. The context at the
+    /// answer (7,000) is what the charts plot; the spend (12,000) is what the
+    /// `used_*` totals carry, and the two must not collapse into one another.
+    #[test]
+    fn used_tokens_add_up_across_a_reply_while_prompt_tokens_keep_the_last() {
+        let mut usage = json!({"prompt_tokens": 5000, "completion_tokens": 40});
+        accumulate_usage(
+            &mut usage,
+            &json!({"prompt_tokens": 5000, "completion_tokens": 40}),
+        );
+        // The second round after the tool result, merged last-wins as the loop does.
+        usage["prompt_tokens"] = json!(7000);
+        accumulate_usage(
+            &mut usage,
+            &json!({"prompt_tokens": 7000, "completion_tokens": 60}),
+        );
+
+        assert_eq!(usage["prompt_tokens"], 7000);
+        assert_eq!(usage["used_prompt_tokens"], 12000);
+        assert_eq!(usage["used_completion_tokens"], 100);
+    }
+
+    /// A provider that reports no usage must leave the totals absent, not zero:
+    /// the frontend reads absence as "unknown" and falls back to the last-wins
+    /// figure, whereas a zero would report a billed-but-unmeasured reply as free.
+    #[test]
+    fn an_unreported_round_leaves_the_totals_absent() {
+        let mut usage = json!({});
+        accumulate_usage(&mut usage, &json!({}));
+        assert!(usage.get("used_prompt_tokens").is_none());
+        assert!(usage.get("used_completion_tokens").is_none());
+    }
+
+    /// A cancelled run returns a null usage object, and nothing may be grafted
+    /// onto it -- an object check is what stops a panic building totals there.
+    #[test]
+    fn a_null_usage_is_left_untouched() {
+        let mut usage = Value::Null;
+        accumulate_usage(&mut usage, &json!({"prompt_tokens": 10}));
+        assert!(usage.is_null());
     }
 }
 
@@ -181,9 +276,16 @@ pub async fn stream_chat(
         // Counted per run, so the ceiling is on what this reply may arrange.
         jobs_created: std::sync::atomic::AtomicUsize::new(0),
     });
-    for _ in 0..MAX_TOOL_ROUNDS {
+    for round in 0..MAX_TOOL_ROUNDS {
         if cancelled.load(Ordering::Relaxed) {
             return Ok((String::new(), Value::Null));
+        }
+        // The budget, stated before the request that will spend it. See
+        // `budget_notice` for why this is the only thing that makes the ceiling
+        // anything other than a wall the model walks into.
+        let remaining = MAX_TOOL_ROUNDS - round;
+        if remaining == BUDGET_WARN_REMAINING || remaining == BUDGET_FINAL_REMAINING {
+            conversation.push(budget_notice(remaining));
         }
         emit_status(run_id, "thinking", &on_event);
         let (tool_calls, content, round_usage, reasoning_text) = stream_completion(
@@ -201,15 +303,21 @@ pub async fn stream_chat(
             &on_event,
         )
         .await?;
-        if usage.is_null() {
-            usage = round_usage.clone();
-        } else if let (Some(target), Some(values)) =
-            (usage.as_object_mut(), round_usage.as_object())
-        {
-            // Later rounds carry the final answer's throughput, so they win.
-            for (key, value) in values {
-                target.insert(key.clone(), value.clone());
-            }
+        merge_round_usage(&mut usage, &round_usage);
+        // The context the provider just counted, as it arrives. Emitted mid-run
+        // because the composer's ring is the only place a user can see a reply
+        // approaching the window, and the answer's own figure does not exist until
+        // the reply is over -- by which point it is too late to be useful.
+        if let Some(prompt_tokens) = round_usage.get("prompt_tokens").and_then(Value::as_u64) {
+            on_event(ChatEvent {
+                run_id: run_id.to_string(),
+                session_id: None,
+                sequence: 0,
+                kind: "usage".into(),
+                text: None,
+                error: None,
+                metrics: Some(json!({ "prompt_tokens": prompt_tokens })),
+            });
         }
 
         if tool_calls.is_empty() {
@@ -310,9 +418,42 @@ pub async fn stream_chat(
             }
         }
     }
-    Err(format!(
-        "Stopped after {MAX_TOOL_ROUNDS} tool rounds without a final answer"
-    ))
+    // The ceiling is a budget, not a guillotine.
+    //
+    // This used to end the run with an error, which threw away everything the
+    // reply had done and told the user "Stopped after 100 tool rounds without a
+    // final answer" -- the least useful sentence available at that moment. Instead
+    // the model is asked once more with **tools withheld**: it cannot open another
+    // line of enquiry, so the only thing it can do is answer in prose -- what it
+    // did, what is verified, what is still open, and anything it needs. The
+    // notices pushed on the way here are what keep that from being a surprise.
+    emit_status(run_id, "thinking", &on_event);
+    conversation.push(budget_notice(0));
+    let (_, content, round_usage, reasoning_text) = stream_completion(
+        &client,
+        endpoint,
+        model,
+        &conversation,
+        &reasoning,
+        // No tools. That is the whole mechanism: a round that could call a tool
+        // would be another round, and there is no budget left for one.
+        None,
+        run_id,
+        Arc::clone(&cancelled),
+        enable_reasoning_control,
+        &on_event,
+    )
+    .await?;
+    merge_round_usage(&mut usage, &round_usage);
+    if reasoning_text.chars().count() >= MIN_REPORTED_REASONING_CHARS {
+        on_event(reasoning_segment(run_id, reasoning_text));
+    }
+    if content.trim().is_empty() {
+        return Err(format!(
+            "Stopped after {MAX_TOOL_ROUNDS} tool rounds without a final answer"
+        ));
+    }
+    Ok((content, usage))
 }
 
 /// How many times a model may call tools before it must answer.
@@ -327,6 +468,103 @@ pub async fn stream_chat(
 /// below it, not this number.
 const MAX_TOOL_ROUNDS: usize = 100;
 const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Rounds left when the model is told how much budget it has.
+///
+/// Nothing else in the loop tells a model to stop. It answers when it decides it
+/// is finished, and a model that keeps finding one more thing to check will keep
+/// going until the ceiling ends the run for it -- which is how a small task
+/// reached a hundred rounds. Two notices turn the ceiling into a budget the model
+/// can plan against: one early enough to change what it does next, and one at the
+/// end so the last answer is a report rather than a truncated thought.
+const BUDGET_WARN_REMAINING: usize = 12;
+
+/// Rounds left when the model is told to stop looking and answer.
+///
+/// The final call is made with no tools at all, so this is a warning rather than
+/// the mechanism -- it exists so the model spends its last rounds writing rather
+/// than starting something it cannot finish.
+const BUDGET_FINAL_REMAINING: usize = 3;
+
+/// The budget as the model reads it, appended to the request mid-conversation.
+///
+/// A `user` turn rather than a `system` one, even though it is the app talking
+/// and not the user: llama.cpp rejects a `system` message that is not first, and
+/// this has to arrive where the model already is. Nothing here reaches the
+/// transcript -- it is pushed onto the run's request copy, and the frontend
+/// builds the stored conversation from its own messages -- so it is not something
+/// the user has to read past.
+///
+/// `remaining == 0` is the closing instruction, handed over with the tools
+/// withheld, which is why it asks for a report rather than for economy.
+fn budget_notice(remaining: usize) -> Value {
+    let content = if remaining <= BUDGET_FINAL_REMAINING {
+        format!(
+            "[Budget] {remaining} tool rounds left, and then this reply is stopped mid-task. \
+             Stop calling tools and answer now: what you have done, what you verified, what is \
+             still open, and anything you need from the user. A partial answer that says where it \
+             stopped is worth far more than a run that ends without one."
+        )
+    } else {
+        format!(
+            "[Budget] You have {remaining} tool rounds left. Spend them on the task rather than \
+             on re-reading or re-checking what you have already established, and move towards an \
+             answer from here -- batch the calls you still need, and finish with a report rather \
+             than opening a new line of enquiry."
+        )
+    };
+    json!({ "role": "user", "content": content })
+}
+
+/// Folds one round's reported usage into the reply's running figures.
+///
+/// The last-wins half is the context at the answer, which is what the context
+/// ring and the per-reply chart plot, so a later round overwrites an earlier one.
+/// The `used_*` totals are the exception: what a *reply spent* is the sum of every
+/// round it made, because a tool round re-sends the whole conversation and that
+/// second input is real spend the last-wins figure discards. Kept as one function
+/// because the final wrap-up call needs exactly the same merge.
+fn merge_round_usage(usage: &mut Value, round: &Value) {
+    if usage.is_null() {
+        *usage = round.clone();
+    } else if let (Some(target), Some(values)) = (usage.as_object_mut(), round.as_object()) {
+        // Later rounds carry the final answer's throughput, so they win.
+        for (key, value) in values {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+    accumulate_usage(usage, round);
+}
+
+/// Folds one round's reported usage into the reply's running totals.
+///
+/// `usage` carries the last-wins figures a later round overwrites: `prompt_tokens`
+/// is the context at the answer, which is what the context ring and the
+/// per-reply chart want. `used_prompt_tokens` and `used_completion_tokens` are the
+/// exception, because what a *reply spent* is the sum of every round it made -- a
+/// tool round re-sends the whole conversation, and that second input is real spend
+/// the last-wins figure discards. Kept under their own keys rather than folded into
+/// `prompt_tokens`, so a value that means "how full the context was" is never
+/// mistaken for one that means "how much was billed".
+///
+/// A round that reported nothing leaves the totals untouched, so a provider that
+/// never sends usage yields no `used_*` keys at all rather than a misleading zero.
+/// The frontend reads their absence as "unknown" and falls back to the
+/// last-wins figure, which is exact for a reply that made a single request.
+fn accumulate_usage(usage: &mut Value, round: &Value) {
+    let Some(target) = usage.as_object_mut() else {
+        return;
+    };
+    for (reported, total) in [
+        ("prompt_tokens", "used_prompt_tokens"),
+        ("completion_tokens", "used_completion_tokens"),
+    ] {
+        if let Some(value) = round.get(reported).and_then(Value::as_u64) {
+            let running = target.get(total).and_then(Value::as_u64).unwrap_or(0);
+            target.insert(total.to_string(), json!(running + value));
+        }
+    }
+}
 
 /// The `role: "tool"` message answering one call.
 fn tool_message(call_id: &str, content: &str) -> Value {

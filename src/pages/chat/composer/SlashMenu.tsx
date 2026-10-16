@@ -6,7 +6,8 @@ import type { SlashCommand } from "./slashCommands";
  *
  * Presentational: it draws the matches and reports the one chosen. Which match is
  * highlighted, and what choosing does, belong to the composer, which owns both
- * the draft and the state a command changes.
+ * the draft and the state a command changes. A disabled row -- the placeholder --
+ * is drawn but never reported.
  *
  * **Mouse-down, not click.** The field keeps focus while the menu is up, and a
  * click that moved focus first would blur the field and close the menu before the
@@ -26,7 +27,7 @@ export default function SlashMenu({
     <div
       role="listbox"
       aria-label="Commands"
-      className="absolute bottom-full left-0 z-50 mb-2 w-[min(340px,calc(100vw-48px))] rounded-xl border border-[var(--line)] bg-[var(--rail)] p-1.5 shadow-2xl"
+      className="absolute bottom-full left-0 z-50 mb-1.5 max-h-64 w-[min(240px,calc(100vw-48px))] overflow-y-auto rounded-lg border border-[var(--line)] bg-[var(--rail)] p-1 shadow-xl"
     >
       {commands.map((command, index) => (
         <button
@@ -34,20 +35,25 @@ export default function SlashMenu({
           type="button"
           role="option"
           aria-selected={index === activeIndex}
+          aria-disabled={command.disabled}
+          disabled={command.disabled}
           onMouseDown={(event) => {
             event.preventDefault();
+            if (command.disabled) return;
             onChoose(command);
           }}
-          className={`flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${
-            index === activeIndex ? "bg-[var(--raised)]" : "hover:bg-[var(--raised)]"
+          className={`flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${
+            command.disabled
+              ? "cursor-default opacity-60"
+              : index === activeIndex
+                ? "bg-[var(--raised)]"
+                : "hover:bg-[var(--raised)]"
           }`}
         >
-          <ChevronRight size={15} className="shrink-0 text-[var(--muted)]" />
+          <ChevronRight size={12} className="shrink-0 text-[var(--quiet)]" />
           <span className="min-w-0 flex-1">
-            <span className="block truncate text-[13px] text-[var(--text)]">{command.label}</span>
-            <span className="block truncate text-[11px] leading-4 text-[var(--quiet)]">
-              /{command.name} — {command.hint}
-            </span>
+            <span className="block truncate text-[12px] leading-4 text-[var(--text)]">{command.label}</span>
+            <span className="block truncate text-[10px] leading-4 text-[var(--quiet)]">{command.hint}</span>
           </span>
         </button>
       ))}

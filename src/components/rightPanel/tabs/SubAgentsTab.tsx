@@ -1,7 +1,7 @@
-import { useMemo } from "react";
 import { Bot, ChevronRight, LoaderCircle } from "lucide-react";
 import ActivityPanel from "../../../pages/chat/ActivityPanel";
 import { Markdown } from "../../../pages/chat/Markdown";
+import { markdownComponents, MarkdownActionsProvider } from "../../../pages/chat/markdownComponents";
 import FileChanges from "../../../pages/chat/FileChanges";
 import { MARKDOWN_STYLES } from "../../../pages/chat/markdownStyles";
 import LiveSpinner from "../../LiveSpinner";
@@ -46,24 +46,15 @@ type SubAgentsTabProps = {
 export default function SubAgentsTab({ parentSessionId, onOpenUrl }: SubAgentsTabProps) {
   const { runs, activeLive, activeId, transcript, select, close, error, loaded } = useSubAgents(true, parentSessionId);
 
-  const markdownComponents = useMemo(
-    () => ({
-      a: ({ href, children, ...props }: React.ComponentProps<"a">) => (
-        <a
-          {...props}
-          href={href}
-          onClick={(event) => {
-            event.preventDefault();
-            if (href) onOpenUrl(href);
-          }}
-        >
-          {children}
-        </a>
-      ),
-    }),
-    [onOpenUrl],
+  // The chat's own overrides, so a link and a code block -- including its copy
+  // button -- read the same in a run's transcript as in a reply. The provider
+  // carries the actions the module-level overrides read (see
+  // `markdownComponents`); it renders no element, so it wraps nothing visible.
+  const renderMarkdown = (text: string) => (
+    <MarkdownActionsProvider openUrl={onOpenUrl}>
+      <Markdown text={text} components={markdownComponents} />
+    </MarkdownActionsProvider>
   );
-  const renderMarkdown = (text: string) => <Markdown text={text} components={markdownComponents} />;
 
   const active = runs.find((run) => run.id === activeId) ?? null;
 

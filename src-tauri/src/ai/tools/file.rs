@@ -31,10 +31,11 @@ use super::{ToolContext, ToolSpec};
 /// path parser that happens to accept `..`.
 pub const READ_FILE: ToolSpec = ToolSpec {
     name: "read_file",
-    description:
-        "Read a text file from the workspace. Returns the content with line numbers, \
-                  one line per numbered row. Use offset and limit to read part of a large file \
-                  instead of the whole thing. Reading is preferred over guessing a file's contents.",
+    description: "Read a text file from the workspace. Returns the content with line numbers, \
+                  one line per numbered row. A long file is returned in windows: the result \
+                  states the range it covers and the `offset` that reaches the next part, so \
+                  use offset and limit to page through a large file rather than asking for all \
+                  of it. Reading is preferred over guessing a file's contents.",
     parameters: r#"{
         "type": "object",
         "properties": {
@@ -44,11 +45,11 @@ pub const READ_FILE: ToolSpec = ToolSpec {
             },
             "offset": {
                 "type": "integer",
-                "description": "1-based line number to start from. Omit to start at the first line."
+                "description": "1-based line number to start from. Omit to start at the first line. Use the offset named at the end of a window to continue where it stopped."
             },
             "limit": {
                 "type": "integer",
-                "description": "Maximum number of lines to return. Omit for all remaining lines."
+                "description": "Number of lines to return. Defaults to 2000. A window that would be too large to send stops early and says where to continue, so a big limit is safe to ask for."
             }
         },
         "required": ["path"],
@@ -90,13 +91,14 @@ async fn read(arguments: Value, root: PathBuf, context: ToolContext) -> Result<S
     if let Some(document) = crate::documents::extract(&resolved) {
         let text = document?;
         // The offset and limit apply to the extracted text, so a long document is
-        // still paged the same way a long source file is.
+        // paged the same way a long source file is -- through the same window
+        // function, so both say where to continue in the same words.
         let offset = positive_usize(arguments.get("offset"), "offset")?.unwrap_or(1);
         let limit =
             Some(positive_usize(arguments.get("limit"), "limit")?.unwrap_or(DEFAULT_READ_LINES));
         return Ok(format!(
             "[Text extracted from {path}]\n\n{}",
-            numbered_slice(&text, offset, limit)
+            read_slice(&text, offset, limit)
         ));
     }
     run(arguments, root)
@@ -190,10 +192,22 @@ fn run(arguments: Value, root: PathBuf) -> Result<String, String> {
         Some(positive_usize(arguments.get("limit"), "limit")?.unwrap_or(DEFAULT_READ_LINES));
 
     let resolved = resolve_within(&root, path)?;
-    let body = std::fs::read_to_string(&resolved)
-        .map_err(|error| format!("Could not read {}: {error}", resolved.display()))?;
+    let body = std::fs::read_to_string(&resolved).map_err(|error| {
+        // Named for what it is, because the raw OS error reads as a bug in the
+        // app: a UTF-16 or binary file is not text, and no amount of re-reading
+        // it as text will work. The fix is a different tool, not a narrower range.
+        if error.kind() == std::io::ErrorKind::InvalidData {
+            format!(
+                "{} is not UTF-8 text, so it cannot be read as a file. It may be binary, or \
+                 text in another encoding (UTF-16 is common on Windows).",
+                resolved.display()
+            )
+        } else {
+            format!("Could not read {}: {error}", resolved.display())
+        }
+    })?;
 
-    Ok(numbered_slice(&body, offset, limit))
+    Ok(read_slice(&body, offset, limit))
 }
 
 /// Lines returned by a read that named no `limit`.
@@ -385,6 +399,102 @@ fn deepest_existing_ancestor(path: &Path) -> PathBuf {
     existing
 }
 
+/// Largest a read's window may be, in characters.
+///
+/// Deliberately below [`super::output::MAX_TOOL_OUTPUT`], so a window this tool
+/// produced always survives the shared cap -- trailer included. That is the whole
+/// point of bounding it here: the shared cap keeps the head *and the tail* and
+/// drops what is between them, which for a read means the model is handed the top
+/// of a file, the bottom of a file, and no way to ask about the middle. A window
+/// that stops on a line boundary and names the `offset` that continues it can
+/// always be finished off in one more call.
+const READ_CHAR_BUDGET: usize = 26_000;
+
+/// Room for the line number, the tab and the newline of one row.
+///
+/// The budget is about characters of *content*; this keeps a row's own numbering
+/// from counting against it, so the arithmetic stays about the file. Eight digits
+/// of line number plus a tab and a newline, rounded up.
+const LINE_OVERHEAD: usize = 12;
+
+/// Renders a line-numbered window of a file that fits [`READ_CHAR_BUDGET`].
+///
+/// The bounded counterpart to [`numbered_slice`], and the one the read path uses.
+/// Two differences, and both matter to a caller that has to page:
+///
+/// - It stops early on **characters**, not only lines, because a line count is not
+///   a size: 2,000 lines of prose and 2,000 lines of minified JavaScript are two
+///   very different requests, and only the second reaches the shared cap.
+/// - The trailer names the **next offset**, so continuing is one call rather than
+///   an inference from the range already shown.
+///
+/// A single line longer than the whole budget is cut inside itself and says so.
+/// That is the one case paging cannot reach -- `offset` and `limit` address whole
+/// lines -- so it is stated rather than left as a silent gap.
+fn read_slice(body: &str, offset: usize, limit: Option<usize>) -> String {
+    let lines: Vec<&str> = body.lines().collect();
+    let total = lines.len();
+    let start = offset.saturating_sub(1).min(total);
+    // An explicit limit is a wish, not a contract: a caller that asks for 4,000
+    // lines gets as many as fit and is told where to continue, rather than a
+    // refusal or a file with its middle missing.
+    let wanted = limit.unwrap_or(total);
+
+    let mut out = String::new();
+    // Tracked as it goes rather than measured from `out` each round, so a long
+    // window costs one pass over the file instead of one per line.
+    let mut used = 0usize;
+    let mut end = start;
+    while end < total && end - start < wanted {
+        let line = lines[end];
+        let cost = line.chars().count() + LINE_OVERHEAD;
+        if cost > READ_CHAR_BUDGET {
+            if end == start {
+                // The first line alone is over budget, so there is no window to
+                // give: show what fits and name the tool that can find a point
+                // inside it, because no offset can.
+                let taken = READ_CHAR_BUDGET - LINE_OVERHEAD;
+                let head: String = line.chars().take(taken).collect();
+                out.push_str(&format!("{}\t{head}\n", end + 1));
+                out.push_str(&format!(
+                    "\n[line {} is {} characters, longer than one read can carry; showing its \
+                     first {taken}. Use grep to find what you need inside it.]\n",
+                    end + 1,
+                    line.chars().count()
+                ));
+                return out;
+            }
+            break;
+        }
+        if used + cost > READ_CHAR_BUDGET && end > start {
+            break;
+        }
+        out.push_str(&(end + 1).to_string());
+        out.push('\t');
+        out.push_str(line);
+        out.push('\n');
+        used += cost;
+        end += 1;
+    }
+
+    if out.is_empty() {
+        return if body.is_empty() {
+            "The file is empty.".to_string()
+        } else {
+            format!("The file has {total} lines, none at or after {offset}.")
+        };
+    }
+    if end < total {
+        out.push_str(&format!(
+            "\n[showing lines {}-{} of {total}. Read more with offset={}.]\n",
+            start + 1,
+            end,
+            end + 1
+        ));
+    }
+    out
+}
+
 /// Renders a line-numbered slice of a file.
 ///
 /// Public because [`super::write::EDIT_LINES`] reports a refused edit's current
@@ -561,47 +671,125 @@ mod tests {
 
         let out = run(json!({ "path": "big.txt" }), root.clone()).expect("read");
         assert!(out.contains("1\tline1"), "{out}");
+        // It stopped early, said which range it covered, and named the offset that
+        // reaches the rest. That is what makes the bound a window rather than a
+        // hole: the model can always finish the file off in one more call.
+        assert!(out.contains("showing lines 1-"), "{out}");
         assert!(
-            out.contains(&format!(
-                "showing lines 1-{DEFAULT_READ_LINES} of {}",
-                DEFAULT_READ_LINES + 500
-            )),
-            "a bounded read must say what it withheld: {out}"
+            out.contains(&format!("of {}", DEFAULT_READ_LINES + 500)),
+            "{out}"
         );
+        assert!(out.contains("Read more with offset="), "{out}");
         assert!(
             !out.contains("omitted from the middle"),
-            "the shared cap cut the middle out"
+            "the shared cap cut the middle out: {out}"
+        );
+        // And the whole thing fits what the shared cap will pass through.
+        assert!(
+            out.chars().count() < super::super::output::MAX_TOOL_OUTPUT,
+            "a read window must survive the shared cap: {}",
+            out.chars().count()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The offset a window names is one the next read can actually use.
+    ///
+    /// The trailer is only worth printing if following it works, so the two are
+    /// asserted together rather than separately.
+    #[test]
+    fn the_named_offset_reaches_the_lines_the_window_withheld() {
+        let root = temp_root();
+        let body = (1..=6_000)
+            .map(|n| format!("line{n} padding padding padding padding"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(root.join("big.txt"), &body).expect("write");
+
+        let first = run(json!({ "path": "big.txt" }), root.clone()).expect("read");
+        let next = first
+            .split("Read more with offset=")
+            .nth(1)
+            .and_then(|tail| tail.split('.').next())
+            .expect("the window should name an offset")
+            .parse::<usize>()
+            .expect("the named offset should be a number");
+
+        let second = run(json!({ "path": "big.txt", "offset": next }), root.clone()).expect("read");
+        // The continued read starts exactly where the first stopped, with no line
+        // lost between them.
+        assert!(
+            first.contains(&format!("{}\tline{}", next - 1, next - 1)),
+            "{first}"
+        );
+        assert!(
+            second.starts_with(&format!("{next}\tline{next}")),
+            "{second}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn an_explicit_limit_above_the_default_is_honoured() {
-        // A caller that asked for more than the default meant it. The bound is a
-        // default, not a refusal.
+    fn an_explicit_limit_is_honoured_when_it_fits() {
+        // The bound is a default, not a refusal: a caller that asked for 100 lines
+        // of a 100-line file gets all of them.
         let root = temp_root();
-        let body = (1..=DEFAULT_READ_LINES + 100)
+        let body = (1..=100)
             .map(|n| format!("line{n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(root.join("a.txt"), &body).expect("write");
+
+        let out = run(json!({ "path": "a.txt", "limit": 100 }), root.clone()).expect("read");
+        assert!(out.contains("100\tline100"), "{out}");
+        assert!(!out.contains("showing lines"), "{out}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A limit larger than one read can carry pages instead of failing.
+    ///
+    /// Asking for the whole of a large file is a reasonable thing for a model to
+    /// do, and the answer is the first window plus where to continue -- not a
+    /// refusal, and not a file with its middle missing.
+    #[test]
+    fn a_limit_too_large_for_one_read_pages_instead_of_holing() {
+        let root = temp_root();
+        let total = 9_000;
+        let body = (1..=total)
+            .map(|n| format!("line{n} some real content on the line"))
             .collect::<Vec<_>>()
             .join("\n");
         std::fs::write(root.join("big.txt"), &body).expect("write");
 
-        let out = run(
-            json!({ "path": "big.txt", "limit": DEFAULT_READ_LINES + 100 }),
-            root.clone(),
-        )
-        .expect("read");
+        let out = run(json!({ "path": "big.txt", "limit": total }), root.clone()).expect("read");
+        assert!(out.starts_with("1\t"), "{out}");
+        assert!(out.contains("Read more with offset="), "{out}");
         assert!(
-            out.contains(&format!(
-                "{}\tline{}",
-                DEFAULT_READ_LINES + 100,
-                DEFAULT_READ_LINES + 100
-            )),
-            "{out}"
+            !out.contains("omitted from the middle"),
+            "the shared cap cut the middle out: {out}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// One line longer than a whole read is cut inside itself, and says so.
+    ///
+    /// This is the single case paging cannot reach -- offset and limit address
+    /// whole lines -- so it is the one place a read has to withhold part of a
+    /// line. Stating it is what keeps it from reading as the end of the line.
+    #[test]
+    fn a_single_line_too_long_for_one_read_is_cut_and_admits_it() {
+        let root = temp_root();
+        let huge = "x".repeat(80_000);
+        std::fs::write(root.join("min.js"), format!("{huge}\n")).expect("write");
+
+        let out = run(json!({ "path": "min.js" }), root.clone()).expect("read");
+        assert!(out.starts_with("1\t"), "{out}");
+        assert!(out.contains("longer than one read can carry"), "{out}");
+        assert!(out.contains("Use grep"), "{out}");
         assert!(
-            !out.contains("showing lines"),
-            "the whole file was asked for"
+            out.chars().count() < super::super::output::MAX_TOOL_OUTPUT,
+            "the window must survive the shared cap: {}",
+            out.chars().count()
         );
         let _ = std::fs::remove_dir_all(&root);
     }

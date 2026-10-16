@@ -14,12 +14,14 @@
 //! question rides the same gate over its own map rather than inventing a second
 //! suspend-and-wake mechanism that would have to be kept in step with the first.
 //!
-//! # Why it is a `Write`
+//! # Why it is `Volatile` rather than a `Write`
 //!
-//! Not because it changes files, but because of what `Write` means here: its
-//! result is never cached, and taking a fresh answer invalidates the earlier
-//! reads the model made before it knew what the user wanted. A cached answer to a
-//! question asked twice would be the first answer returned as the second's.
+//! `Effect` answers two questions -- may this result be cached, and does it make
+//! what was cached before go stale -- and this tool's answers are "no" and "no".
+//! A cached answer to a question asked twice would be the first answer returned
+//! as the second's, so it is never cached. But asking changed no file, so nothing
+//! the model read beforehand went stale, and invalidating it would only make the
+//! conversation pay to read the same files twice.
 
 use std::sync::Arc;
 
@@ -54,8 +56,10 @@ pub const ASK_USER: ToolSpec = ToolSpec {
         "required": ["question"],
         "additionalProperties": false
     }"#,
-    // A write for caching, not because it edits anything: see the module note.
-    effect: super::Effect::Write,
+    // Not a write: its result must never be cached -- an answer asked twice has
+    // to be asked afresh -- but a question changes nothing, so marking it `Write`
+    // only cost the conversation every read it had cached before asking.
+    effect: super::Effect::Volatile,
     command_argument: None,
     execute: |arguments, context| Box::pin(ask(arguments, context)),
 };
@@ -140,10 +144,11 @@ mod tests {
         assert!(error.contains("agent run"), "{error}");
     }
 
-    /// It is a write for caching: never cached, and it invalidates earlier reads.
+    /// Never cached -- a stale answer returned as a fresh one is worse than no
+    /// answer -- but it invalidates nothing, because it changed nothing.
     #[test]
-    fn asking_is_a_write_for_caching() {
-        assert_eq!(ASK_USER.effect, super::super::Effect::Write);
+    fn asking_is_volatile_and_runs_no_command() {
+        assert_eq!(ASK_USER.effect, super::super::Effect::Volatile);
         assert_eq!(ASK_USER.command_argument, None);
     }
 }

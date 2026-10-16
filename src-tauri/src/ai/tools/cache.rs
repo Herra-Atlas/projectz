@@ -18,8 +18,21 @@
 //! The second rule is enforced by a timestamp rather than by classifying tools:
 //! a write stamps the session, and any entry older than the stamp is ignored. A
 //! tool cannot forget to invalidate, because invalidation is not the tool's job.
+//!
+//! # What each `Effect` means here
+//!
+//! [`Effect`] decides both halves of that, and the two are separate questions:
+//!
+//! - `Read` is stored and replayed, and leaves the conversation's entries alone.
+//! - `Write` is never stored and stamps the session, so nothing read before it is
+//!   served again.
+//! - `Volatile` is never stored and **never stamps**. `ask_user` and `todo` change
+//!   no file, so treating them as writes only threw away reads that were still
+//!   perfectly good -- the single largest reason a long agent run re-read the same
+//!   files over and over.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
@@ -27,6 +40,15 @@ use serde_json::Value;
 use crate::database::{utc_now, Database};
 
 use super::Effect;
+
+/// Argument names holding one workspace-relative path.
+///
+/// Listed rather than guessed at from the value's shape, because a string
+/// argument that is not a path must keep its bytes in the key.
+const PATH_ARGUMENTS: &[&str] = &["path", "from", "to"];
+
+/// Argument names holding a list of paths.
+const PATH_LIST_ARGUMENTS: &[&str] = &["paths", "files"];
 
 /// Cache key for one call.
 ///
@@ -39,15 +61,84 @@ use super::Effect;
 /// Hashed rather than stored raw: the arguments can be a page of text, and the
 /// key is compared on every tool call. `sha2` is already a dependency, so this
 /// costs no new crate.
-pub fn cache_key(tool_name: &str, arguments: &Value) -> String {
+///
+/// `root` is the workspace the arguments are read against. It is part of the key
+/// because a path argument's meaning depends on it -- `src/main.rs` in one folder
+/// is a different file from the same string in another -- which is what stops a
+/// search being answered from entries taken before the user switched workspace.
+pub fn cache_key(tool_name: &str, arguments: &Value, root: Option<&Path>) -> String {
     use sha2::{Digest, Sha256};
     let mut digest = Sha256::new();
     digest.update(tool_name.as_bytes());
     // NUL separator so a tool name cannot be confused with the start of the
     // arguments: without it, ("ab", "c") and ("a", "bc") would hash alike.
     digest.update([0u8]);
-    digest.update(canonical_json(arguments).as_bytes());
+    if let Some(root) = root {
+        digest.update(root.to_string_lossy().as_bytes());
+    }
+    digest.update([0u8]);
+    digest.update(canonical_json(&normalized(arguments, root)).as_bytes());
     format!("{tool_name}:{:x}", digest.finalize())
+}
+
+/// The arguments as the key should see them.
+///
+/// Two calls that mean the same thing have to hash the same, or the cache misses
+/// on a spelling difference rather than on anything real. Two normalizations, and
+/// only these two, because a normalization that changed a call's meaning would be
+/// far worse than a miss:
+///
+/// - A `null` is dropped. Every tool here reads an explicit null exactly as it
+///   reads an absent field, so `{"path":"a"}` and `{"path":"a","limit":null}` are
+///   one call written two ways.
+/// - A path argument is rewritten to the workspace-relative slash form the tools
+///   resolve it to anyway, so `./src/a.ts`, `src\a.ts` and `src/a.ts` share one
+///   entry instead of three.
+fn normalized(arguments: &Value, root: Option<&Path>) -> Value {
+    let Value::Object(map) = arguments else {
+        return arguments.clone();
+    };
+    let mut out = serde_json::Map::new();
+    for (key, value) in map {
+        if value.is_null() {
+            continue;
+        }
+        if let Some(root) = root {
+            if PATH_ARGUMENTS.contains(&key.as_str()) {
+                if let Some(text) = value.as_str() {
+                    out.insert(key.clone(), Value::String(relative_path(root, text)));
+                    continue;
+                }
+            }
+            if PATH_LIST_ARGUMENTS.contains(&key.as_str()) {
+                if let Some(items) = value.as_array() {
+                    let rewritten = items
+                        .iter()
+                        .map(|item| match item.as_str() {
+                            Some(text) => Value::String(relative_path(root, text)),
+                            None => item.clone(),
+                        })
+                        .collect();
+                    out.insert(key.clone(), Value::Array(rewritten));
+                    continue;
+                }
+            }
+        }
+        out.insert(key.clone(), value.clone());
+    }
+    Value::Object(out)
+}
+
+/// One path argument in the form the key compares.
+///
+/// A refused path -- absolute, or containing `..` -- is left exactly as written.
+/// The tool will refuse it too, and rewriting it would be claiming an equivalence
+/// between two calls that are both about to fail for their own unrelated reasons.
+fn relative_path(root: &Path, requested: &str) -> String {
+    match super::file::resolve_within(root, requested) {
+        Ok(resolved) => super::walk::relative_slash(root, &resolved),
+        Err(_) => requested.to_string(),
+    }
 }
 
 /// The next stamp after `previous`, in the same `utc_now` format.
@@ -124,6 +215,13 @@ fn canonical_json(value: &Value) -> String {
 #[derive(Clone)]
 pub struct ToolCache {
     database: Arc<Database>,
+    /// The workspace in force when this run started.
+    ///
+    /// Captured once per run rather than read per call, so every key this run
+    /// writes or looks up is read against one folder. It rides on the key, which
+    /// is what keeps a run that spans a workspace switch from answering itself
+    /// with entries taken in the folder that used to be open.
+    root: Option<PathBuf>,
     /// The last stamp handed out, so the next one is guaranteed to sort after it.
     ///
     /// The database compares these as strings, so two stamps that are equal are
@@ -149,6 +247,7 @@ impl ToolCache {
     pub fn new(database: Arc<Database>) -> Self {
         Self {
             database,
+            root: super::workspace::root(),
             last_stamp: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -184,8 +283,8 @@ impl ToolCache {
 
     /// A cached result for this call, if one is still valid.
     ///
-    /// Returns `None` for a tool that changes anything, before consulting the
-    /// database: caching a write is never correct, and a lookup that finds an
+    /// Returns `None` for anything that is not a `Read`, before consulting the
+    /// database: caching a write is never correct, and a lookup that found an
     /// entry would then hide the write's own effect.
     pub fn get(
         &self,
@@ -194,11 +293,14 @@ impl ToolCache {
         effect: Effect,
         arguments: &Value,
     ) -> Option<String> {
-        if effect == Effect::Write {
+        if effect != Effect::Read {
             return None;
         }
-        self.database
-            .tool_cache_get(session_id, tool_name, &cache_key(tool_name, arguments))
+        self.database.tool_cache_get(
+            session_id,
+            tool_name,
+            &cache_key(tool_name, arguments, self.root.as_deref()),
+        )
     }
 
     /// Stores a result, unless the tool changed something.
@@ -208,6 +310,9 @@ impl ToolCache {
     /// [`Self::next_stamp`], so it is strictly newer than every read already
     /// cached in this run -- which is the whole reason the read side can treat
     /// "equal" as "this is current" rather than "this might predate a write".
+    ///
+    /// A `Volatile` result is neither stored nor stamped: it must not be replayed,
+    /// and it did not change anything for a stamp to invalidate.
     pub fn put(
         &self,
         session_id: &str,
@@ -216,6 +321,9 @@ impl ToolCache {
         arguments: &Value,
         result: &str,
     ) {
+        if effect == Effect::Volatile {
+            return;
+        }
         let stamp = self.next_stamp(session_id);
         if effect == Effect::Write {
             self.database
@@ -225,7 +333,7 @@ impl ToolCache {
         self.database.tool_cache_put(
             session_id,
             tool_name,
-            &cache_key(tool_name, arguments),
+            &cache_key(tool_name, arguments, self.root.as_deref()),
             result,
             &stamp,
         );
@@ -257,16 +365,16 @@ mod tests {
         // The same call written by the model in a different key order must hit
         // the same entry, or the cache silently never works.
         assert_eq!(
-            cache_key("read_file", &json!({ "path": "a", "limit": 5 })),
-            cache_key("read_file", &json!({ "limit": 5, "path": "a" }))
+            cache_key("read_file", &json!({ "path": "a", "limit": 5 }), None),
+            cache_key("read_file", &json!({ "limit": 5, "path": "a" }), None)
         );
     }
 
     #[test]
     fn different_arguments_give_different_keys() {
         assert_ne!(
-            cache_key("read_file", &json!({ "path": "a" })),
-            cache_key("read_file", &json!({ "path": "b" }))
+            cache_key("read_file", &json!({ "path": "a" }), None),
+            cache_key("read_file", &json!({ "path": "b" }), None)
         );
     }
 
@@ -275,8 +383,8 @@ mod tests {
         // `read_file` and `grep` can be called with the same object and
         // must not share an entry.
         assert_ne!(
-            cache_key("read_file", &json!({ "path": "a" })),
-            cache_key("grep", &json!({ "path": "a" }))
+            cache_key("read_file", &json!({ "path": "a" }), None),
+            cache_key("grep", &json!({ "path": "a" }), None)
         );
     }
 
@@ -285,16 +393,16 @@ mod tests {
         // Unlike object keys, list order is meaning. Two different orders are two
         // different requests.
         assert_ne!(
-            cache_key("t", &json!({ "args": ["a", "b"] })),
-            cache_key("t", &json!({ "args": ["b", "a"] }))
+            cache_key("t", &json!({ "args": ["a", "b"] }), None),
+            cache_key("t", &json!({ "args": ["b", "a"] }), None)
         );
     }
 
     #[test]
     fn nested_objects_are_canonicalized_too() {
         assert_eq!(
-            cache_key("t", &json!({ "o": { "x": 1, "y": 2 } })),
-            cache_key("t", &json!({ "o": { "y": 2, "x": 1 } }))
+            cache_key("t", &json!({ "o": { "x": 1, "y": 2 } }), None),
+            cache_key("t", &json!({ "o": { "y": 2, "x": 1 } }), None)
         );
     }
 
@@ -302,17 +410,128 @@ mod tests {
     fn a_numeric_and_a_string_value_do_not_collide() {
         // JSON keeps 5 and "5" distinct; string concatenation alone would not.
         assert_ne!(
-            cache_key("t", &json!({ "n": 5 })),
-            cache_key("t", &json!({ "n": "5" }))
+            cache_key("t", &json!({ "n": 5 }), None),
+            cache_key("t", &json!({ "n": "5" }), None)
         );
     }
 
     #[test]
     fn a_tool_name_cannot_be_confused_with_the_arguments() {
-        // Without the separator, these two would hash to the same bytes.
+        // The tool name is its own field in the digest, behind a NUL separator.
+        // Without one, a name and the start of an argument object could run
+        // together and two different calls could hash alike.
         assert_ne!(
-            cache_key("ab", &json!({})),
-            cache_key("a", &json!({ "b": null }))
+            cache_key("ab", &json!({ "b": 1 }), None),
+            cache_key("a", &json!({ "b": 1 }), None)
+        );
+        assert_ne!(
+            cache_key("read_file", &json!({}), None),
+            cache_key("read_fil", &json!({ "e": 1 }), None)
+        );
+    }
+
+    /// A workspace, so path normalization has something to resolve against.
+    fn temp_root() -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("projectz-cache-{}-{unique}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+        dir
+    }
+
+    /// The same file written three ways is one entry, not three.
+    ///
+    /// The model writes `./src/a.ts` one round and `src/a.ts` the next, and the
+    /// tools resolve both to the same file. Keying on the characters they were
+    /// passed made that a miss, which is a miss for no reason at all.
+    #[test]
+    fn three_spellings_of_one_path_are_one_key() {
+        let root = temp_root();
+        let plain = cache_key("read_file", &json!({ "path": "src/a.ts" }), Some(&root));
+        let dotted = cache_key("read_file", &json!({ "path": "./src/a.ts" }), Some(&root));
+        let doubled = cache_key("read_file", &json!({ "path": "src//a.ts" }), Some(&root));
+        let other = cache_key("read_file", &json!({ "path": "src/b.ts" }), Some(&root));
+
+        assert_eq!(plain, dotted, "`./` changed the key");
+        assert_eq!(plain, doubled, "a doubled separator changed the key");
+        assert_ne!(plain, other, "two different files must not share an entry");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The folder a path is read against is part of the key.
+    ///
+    /// Switching workspace mid-conversation must not let a search be answered by
+    /// an entry taken in the folder that used to be open -- the same arguments
+    /// name a different file in each.
+    #[test]
+    fn the_workspace_is_part_of_the_key() {
+        let first = temp_root();
+        let second = temp_root();
+        assert_ne!(
+            cache_key("grep", &json!({ "pattern": "x" }), Some(&first)),
+            cache_key("grep", &json!({ "pattern": "x" }), Some(&second))
+        );
+        // And an unknown workspace is its own case rather than matching a real one.
+        assert_ne!(
+            cache_key("grep", &json!({ "pattern": "x" }), Some(&first)),
+            cache_key("grep", &json!({ "pattern": "x" }), None)
+        );
+        let _ = std::fs::remove_dir_all(&first);
+        let _ = std::fs::remove_dir_all(&second);
+    }
+
+    /// An explicit null is the same call as an absent field.
+    ///
+    /// Every tool here reads a null exactly as it reads a missing argument, so a
+    /// model that names every field every time must not miss the entry written by
+    /// one that names only what it needs.
+    #[test]
+    fn an_explicit_null_is_the_same_as_omitting_the_argument() {
+        assert_eq!(
+            cache_key("read_file", &json!({ "path": "a" }), None),
+            cache_key("read_file", &json!({ "path": "a", "limit": null }), None)
+        );
+    }
+
+    /// The hit-rate fix, end to end: a checklist update no longer evicts reads.
+    ///
+    /// `todo` and `ask_user` were classified as writes, so an agent that ticked an
+    /// item off its list between reads threw away everything it had already read
+    /// and paid to read it again. Nothing either tool does can make a file stale.
+    #[test]
+    fn a_checklist_update_does_not_evict_earlier_reads() {
+        let database = seeded();
+        let cache = ToolCache::new(Arc::clone(&database));
+        let read = json!({ "path": "src/App.tsx" });
+
+        cache.put("s1", "read_file", Effect::Read, &read, "the file");
+        cache.put(
+            "s1",
+            "todo",
+            Effect::Volatile,
+            &json!({}),
+            "Checklist updated",
+        );
+        cache.put(
+            "s1",
+            "ask_user",
+            Effect::Volatile,
+            &json!({ "question": "which?" }),
+            "The user answered: the first one",
+        );
+
+        assert_eq!(
+            cache.get("s1", "read_file", Effect::Read, &read),
+            Some("the file".to_string()),
+            "a note the agent wrote to itself must not invalidate a read"
+        );
+        assert_eq!(
+            cache.get("s1", "todo", Effect::Volatile, &json!({})),
+            None,
+            "a volatile result must never be replayed"
         );
     }
 

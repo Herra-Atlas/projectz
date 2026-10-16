@@ -382,6 +382,7 @@ function AppShell() {
           onOpenFile={setRequestedFile}
           titleModels={preferences.sessionTitleModels}
           onAutoTitle={chat.setAutoTitle}
+          workspaceRoot={workspaces.selected}
         />
         </>}
       </div>

@@ -1,11 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen } from "@tauri-apps/api/event";
 import { ArrowUp, Check, Clipboard, LoaderCircle, Paperclip, RotateCcw, SkipForward, Square, X } from "lucide-react";
 import ActivityPanel from "./ActivityPanel";
 import { Markdown } from "./Markdown";
+import { PathText } from "./PathText";
+import { expandWorkspacePaths, trimWorkspacePaths } from "../../features/workspace/workspacePaths";
 import FileChanges from "./FileChanges";
+import { markdownComponents, MarkdownActionsProvider } from "./markdownComponents";
 import ModelSwitcher from "../../components/ModelSwitcher";
 import ModeSelector from "../../components/ModeSelector";
 import SelectionActions, { type SelectionAction } from "./SelectionActions";
@@ -17,6 +20,7 @@ import { useSessionTitle } from "../../features/models/useSessionTitle";
 import {
   contextLengthFor,
   DEFAULT_CONTEXT_LENGTH,
+  EFFORT_PROVIDER_DEFAULT,
   effortValuesFor,
   loadModelCapabilities,
   reasoningSupported,
@@ -36,10 +40,12 @@ import {
 import { EMPTY_TITLE_MODELS, type AiEvent, type AttachedFile, type BackgroundRun, type LocalModelEvent, type PendingChat, type SelectedText, type WebSearchOutput } from "./types";
 import type { ActivityStep, ChatMessage, ChatSession, SessionRunStatus } from "../../features/chat/types";
 
-import { closeOpenSteps } from "./closeOpenSteps";
+import { closeOpenSteps, closeRunningThought } from "./closeOpenSteps";
+import { hasPartialReply, partialReplyMessage } from "./partialReply";
 import { MARKDOWN_STYLES } from "./markdownStyles";
 import { useAttachments } from "./useAttachments";
 import ContextRing from "./composer/ContextRing";
+import { contextUsage } from "./composer/contextUsage";
 import EffortControl from "./composer/EffortControl";
 import StartModelDialog from "./composer/StartModelDialog";
 import SlashMenu from "./composer/SlashMenu";
@@ -145,9 +151,17 @@ type ChatPageProps = {
   /** Models that name new conversations, in order; empty disables the feature. */
   titleModels?: ModelSelection[];
   onAutoTitle: (sessionId: string, title: string) => void;
+  /**
+   * The open workspace root, or `null` when no folder is open.
+   *
+   * Used to shorten a pasted path and to draw a stored one short in the
+   * transcript. Passed in rather than read here so the composer and the header
+   * cannot disagree about which folder is current.
+   */
+  workspaceRoot?: string | null;
 };
 
-export default function ChatPage({ endpointId, model, localModelId, session, sessionLoading = false, activeId = null, onOpenSettings, onEnsureSession, onFirstSend, onActivity, onModelSelect, onLocalModelSelect, modelRefreshKey, settingsRefreshKey = 0, onMessagesChange, onWorkingModeChange, onNotify, onOpenUrl, onOpenFile, titleModels, onAutoTitle }: ChatPageProps) {
+export default function ChatPage({ endpointId, model, localModelId, session, sessionLoading = false, activeId = null, onOpenSettings, onEnsureSession, onFirstSend, onActivity, onModelSelect, onLocalModelSelect, modelRefreshKey, settingsRefreshKey = 0, onMessagesChange, onWorkingModeChange, onNotify, onOpenUrl, onOpenFile, titleModels, onAutoTitle, workspaceRoot }: ChatPageProps) {
   const [messages, setMessages] = useState<ChatMessage[]>(session?.messages ?? []);
   // The latest transcript, for the run listener (a mount-time effect) to build on
   // when something arrives outside the current render -- a background sub-agent's
@@ -165,7 +179,20 @@ export default function ChatPage({ endpointId, model, localModelId, session, ses
   // the other a row that can be running, cached or failed.
   const [streamActivity, setStreamActivity] = useState<ActivityStep[]>([]);
   const [searching, setSearching] = useState(false);
-  const [effort, setEffort] = useState("medium");
+  // The level the selected model is asked for. The empty value is the provider's
+  // own default -- the field is simply not sent -- and it is the starting point as
+  // well as an option, because a level chosen for one model is a level the next
+  // one may never have heard of.
+  const [effort, setEffort] = useState(EFFORT_PROVIDER_DEFAULT);
+  /**
+   * The context size the provider reported for the round in flight.
+   *
+   * Set from the run's `usage` events, cleared when a run ends. It is what lets the
+   * composer's ring show a real figure while the agent works: the stored replies
+   * carry the size of requests that are already over, and the answer's own figure
+   * does not exist until the reply has finished.
+   */
+  const [livePromptTokens, setLivePromptTokens] = useState<number | null>(null);
   // Agent mode and its permission level, both belonging to the open conversation.
 //
 // Stored on the session rather than held only in state, so switching away and
@@ -220,12 +247,12 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     onNotify,
   });
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
-  // Web search is on by default for every conversation. The composer's `+` menu
-  // is gone; the `/web-on` and `/web-off` slash commands are how it is changed.
-  const [webSearchEnabled, setWebSearchEnabled] = useState(true);
   // Which row of the slash menu is highlighted. Clamped against the matches at
   // the point of use, so a shrinking list can never point past its end.
   const [slashIndex, setSlashIndex] = useState(0);
+  // What a paste shortened, keyed by the short form it left in the draft. Held
+  // until the send, which is the only place the full path is wanted.
+  const trimmedPathsRef = useRef<Map<string, string>>(new Map());
   // Messages typed while a reply was already running, sent the moment it ends.
   // Held in a ref because the run listener (a mount-time effect) drains it, and
   // mirrored in a count so the composer can show how many are waiting.
@@ -327,30 +354,18 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   // so a thought renders with the same fences and lists the answer does. A model
   // writes its thinking the way it writes an answer, and formatting one and not
   // the other makes the thought look like something the app did to it.
-  const markdownComponents = useMemo(() => ({
-    a: ({ href, children, ...props }: React.ComponentProps<"a">) => (
-      <a
-        {...props}
-        href={href}
-        onClick={(event) => {
-          event.preventDefault();
-          if (href) onOpenUrl(href);
-        }}
-        onAuxClick={(event) => {
-          event.preventDefault();
-          if (href) onOpenUrl(href);
-        }}
-      >
-        {children}
-      </a>
-    ),
-  }), [onOpenUrl]);
-  // Stable identity, and it returns a memoised `Markdown`: a rerender driven by
-  // the streaming reply therefore leaves every finished reply's parse untouched
-  // instead of re-rendering it through `react-markdown` on each token.
+  //
+  // The overrides themselves are a module constant (see `markdownComponents`) and
+  // the callbacks reach them through the provider here, rather than being closed
+  // over by the override -- a fresh arrow per render is a *new component type* to
+  // React, and remounting a code block resets its scroll position.
   const renderMarkdown = useCallback(
-    (text: string) => <Markdown text={text} components={markdownComponents} />,
-    [markdownComponents],
+    (text: string) => (
+      <MarkdownActionsProvider openUrl={onOpenUrl} notify={onNotify}>
+        <Markdown text={text} components={markdownComponents} />
+      </MarkdownActionsProvider>
+    ),
+    [onOpenUrl, onNotify],
   );
 
   useEffect(() => {
@@ -381,11 +396,19 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         setPermission(remembered.permission);
       } else {
         setMode(session?.mode ?? "chat");
-        setPermission(session?.permission ?? DEFAULT_PERMISSION);
+        // The app-wide default, not a hardcoded `ask`. A conversation with no
+        // level stored is one that has never chosen one, so it inherits the level
+        // the user last worked at -- which is what the setting is for. Falling
+        // back to `ask` here silently dropped a user working at `full` back to
+        // being prompted for every call, with nothing on screen to explain it.
+        setPermission(session?.permission ?? defaultPermissionRef.current);
       }
     } else {
       setMode("chat");
-      setPermission(DEFAULT_PERMISSION);
+      // A new, unsaved conversation starts at the app-wide level too, so an Agent
+      // send in a conversation that does not exist yet is not quietly asked to
+      // approve every call after the user has set a level that says otherwise.
+      setPermission(defaultPermissionRef.current);
     }
     // Tells the backend which session is on screen, so a reply finishing here does not
     // raise a notification for something the user is already watching.
@@ -403,6 +426,9 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     streamActivityRef.current = run?.activity ?? [];
     setStreamActivity(run?.activity ?? []);
     setSearching(run?.searching === true);
+    // The context figure this run has already reported, so switching away and back
+    // mid-reply does not drop the ring to the previous reply's size.
+    setLivePromptTokens(run?.promptTokens ?? null);
     setRunning(Boolean(run));
   }, [activeId, session?.id, session?.messages, sessionLoading]);
 
@@ -450,29 +476,37 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     return () => { active = false; };
   }, [endpointId, model, localModelId, modelRefreshKey]);
 
-  // Prefer the provider's real prompt token count from the latest reply, and add the
-  // text generated since then. Fall back to a character estimate when usage is unknown.
-  const lastReportedPromptTokens = [...messages].reverse().find((message) => message.metrics?.prompt_tokens !== undefined)?.metrics?.prompt_tokens ?? 0;
-  const textSinceLastReport = lastReportedPromptTokens === 0
-    ? messages.reduce((total, message) => total + message.content.length + (message.tool?.results.reduce((sum, result) => sum + result.title.length + result.snippet.length, 0) ?? 0), 0) + streamText.length + streamReasoning.length
-    : streamText.length + streamReasoning.length;
-  const contextIsEstimated = lastReportedPromptTokens === 0;
-  const contextTokens = contextIsEstimated
-    ? Math.ceil(textSinceLastReport / 4)
-    : lastReportedPromptTokens + Math.ceil(textSinceLastReport / 4);
+  // How full the next request will be. The arithmetic lives in `contextUsage`, fed
+  // with the provider's own count for the round in flight when there is one -- which
+  // is what makes the figure move while the agent works rather than sitting on the
+  // previous reply's size until the answer lands.
+  const { tokens: contextTokens, estimated: contextIsEstimated } = contextUsage({
+    messages,
+    livePromptTokens,
+    activity: streamActivity,
+    streamText,
+    streamReasoning,
+  });
   // A local model keeps the context size set in its runtime settings; a remote
   // one uses whatever its provider reported, falling back to a conservative
   // default rather than the generous guess this used to assume.
   const remoteContext = contextLengthFor(capabilities);
   const displayedContextLimit = contextLimit ?? remoteContext ?? DEFAULT_CONTEXT_LENGTH;
   // The effort levels are whatever this model accepts, in its own provider's
-  // vocabulary. Keep the current choice only if the new model still offers it.
+  // vocabulary, with "let the provider choose" in front of them. The current
+  // choice is kept only if the new model still offers it: a level one provider
+  // listed is a level the next one rejects with HTTP 400.
   const effortValues = effortValuesFor(capabilities);
   useEffect(() => {
-    setEffort((current) => (effortValues.includes(current) ? current : "medium"));
+    setEffort((current) => (effortValues.includes(current) ? current : EFFORT_PROVIDER_DEFAULT));
   }, [effortValues.join(",")]);
   const canSetEffort = reasoningSupported(capabilities);
   const canUseTools = toolsSupported(capabilities);
+  // The level a conversation with no level of its own falls back to: the app-wide
+  // setting, read once at mount. Held in a ref as well as state because the session
+  // effect needs it synchronously, and a conversation opened before the setting has
+  // been read must not be recorded as `ask` behind the user's back.
+  const defaultPermissionRef = useRef<PermissionMode>(DEFAULT_PERMISSION);
   // The stored level is a default for conversations that have never chosen one,
   // not an override. It is read once and applied only where the open conversation
   // has no level of its own, so switching to a conversation that chose one does
@@ -482,6 +516,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       try {
         const stored = await invoke<string | null>("database_get_setting", { key: PERMISSION_SETTING_KEY });
         const fallback = permissionOrDefault(stored);
+        defaultPermissionRef.current = fallback;
         setPermission((current) => (current === DEFAULT_PERMISSION ? fallback : current));
       } catch {
         // No stored value, or a database that predates the setting. The default
@@ -498,10 +533,10 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
    * cannot truncate a transcript -- changing the mode mid-conversation must not
    * be able to cost the conversation its history.
    *
-   * The backend reads `app.agent_permission` per run, so that setting is kept
-   * pointing at whatever was last chosen. A new conversation then opens with the
-   * level the user last worked at, which is the behaviour that had, while each
-   * conversation still remembers its own.
+   * The level also travels on every request, which is the one that decides: the
+   * backend reads it from the run rather than from a setting, so the level a
+   * conversation shows is the level it is run at. The settings write below is what
+   * a *new* conversation starts from.
    */
   const rememberWorkingMode = useCallback((nextMode: ChatMode, nextPermission: PermissionMode) => {
     const id = sessionIdRef.current;
@@ -519,8 +554,9 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     setPermission(next);
     rememberWorkingMode(mode, next);
     void invoke("database_set_setting", { key: PERMISSION_SETTING_KEY, value: next }).catch(() => {
-      // A failed write is not worth interrupting the user for; the level still
-      // applies to the next reply, and it is read per run on the backend.
+      // A failed write is not worth interrupting the user for. The level still
+      // applies to the next reply -- it is sent on the request -- and only the
+      // default a *later* conversation starts from is lost.
     });
   };
   const persistMessages = (sessionId: string | null, next: ChatMessage[]) => {
@@ -678,6 +714,24 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         run.completionId = payload.text;
       } else if (payload.kind === "reasoning_phase") {
         run.isReasoning = payload.text === "reasoning";
+        if (!run.isReasoning) {
+          // The answer has begun, so whatever the model was thinking is over.
+          // Closed here rather than at the end of the run, because a thought left
+          // open keeps counting while the answer streams -- which reads as a model
+          // still thinking long after it started writing.
+          closeRunningThought(run.activity);
+          if (isActive) {
+            streamActivityRef.current = [...run.activity];
+            scheduleStreamFlush();
+          }
+        }
+      } else if (payload.kind === "usage" && payload.metrics?.prompt_tokens !== undefined) {
+        // The provider's own count for the round in flight. This is the only live
+        // measurement of context there is, and the reason the ring moves while the
+        // agent works rather than waiting for the reply to end and reporting a
+        // figure that is already out of date.
+        run.promptTokens = payload.metrics.prompt_tokens;
+        if (isActive) setLivePromptTokens(payload.metrics.prompt_tokens);
       } else if (payload.kind === "status") {
         // Set once, on the first `thinking` of a run. Every later round emits the
         // same status, and overwriting on each one restarted the clock the
@@ -741,6 +795,24 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         // A call the model has asked for but not yet run. The row appears now so
         // a slow tool is visibly in flight rather than absent until it returns.
         const steps = run.activity;
+        // The reply is still working, so anything it has written so far is
+        // narration rather than an answer -- "I have the full picture, here is the
+        // plan before I build". Moved into the panel, where the rest of the run is
+        // recorded, for two reasons: the answer's bubble is left holding the answer,
+        // and the paragraph survives. Left where it was, it was painted as the
+        // answer and then disappeared when the reply ended, because the stored
+        // message keeps the final round only.
+        if (run.text.trim().length > 0) {
+          steps.push({ kind: "note", text: run.text.trim(), running: false });
+          run.text = "";
+          if (isActive) {
+            streamTextRef.current = "";
+            setStreamText("");
+          }
+        }
+        // Whatever the model was thinking before it reached for this tool is over,
+        // whether or not the backend managed to report it as a finished segment.
+        closeRunningThought(steps);
         steps.push({
           kind: "tool",
           tool: payload.text ?? "tool",
@@ -832,7 +904,12 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         const generationTokensPerSecond = payload.metrics?.generation_tokens_per_second ?? completionTokens / generationSeconds;
         const promptTokens = payload.metrics?.prompt_tokens;
         const promptEvalTokensPerSecond = payload.metrics?.prompt_eval_tokens_per_second;
-        const next = [...run.baseMessages, { role: "assistant" as const, content: response, reasoning: run.reasoning || undefined, ...(run.activity.length > 0 ? { activity: run.activity } : {}), modelId: run.modelLabel, providerId: run.providerLabel, metrics: { prompt_seconds: promptSeconds, generation_seconds: generationSeconds, elapsed_seconds: elapsedSeconds, tokens_per_second: generationTokensPerSecond, generation_rate_estimated: payload.metrics?.generation_tokens_per_second == null, completion_tokens: completionTokens, ...(promptTokens !== undefined ? { prompt_tokens: promptTokens } : {}), ...(promptEvalTokensPerSecond !== undefined ? { prompt_eval_tokens_per_second: promptEvalTokensPerSecond } : {}) } }];
+        // The reply's spend across every round it made, larger than `promptTokens`
+        // whenever a tool ran. Absent from a provider that reports no usage, and
+        // then the stored message keeps only the last round's figure.
+        const usedPromptTokens = payload.metrics?.used_prompt_tokens;
+        const usedCompletionTokens = payload.metrics?.used_completion_tokens;
+        const next = [...run.baseMessages, { role: "assistant" as const, content: response, reasoning: run.reasoning || undefined, ...(run.activity.length > 0 ? { activity: run.activity } : {}), modelId: run.modelLabel, providerId: run.providerLabel, metrics: { prompt_seconds: promptSeconds, generation_seconds: generationSeconds, elapsed_seconds: elapsedSeconds, tokens_per_second: generationTokensPerSecond, generation_rate_estimated: payload.metrics?.generation_tokens_per_second == null, completion_tokens: completionTokens, ...(promptTokens !== undefined ? { prompt_tokens: promptTokens } : {}), ...(usedPromptTokens !== undefined ? { used_prompt_tokens: usedPromptTokens } : {}), ...(usedCompletionTokens !== undefined ? { used_completion_tokens: usedCompletionTokens } : {}), ...(promptEvalTokensPerSecond !== undefined ? { prompt_eval_tokens_per_second: promptEvalTokensPerSecond } : {}) } }];
         finishRun();
         onActivityRef.current(run.sessionId, isActive ? null : "done");
         onMessagesChangeRef.current(run.sessionId, next);
@@ -845,6 +922,10 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           setSearching(false);
           setRunning(false);
           setMessages(next);
+          // The reply's own figure is now on the stored message, which is the base
+          // the ring reads from here on. Keeping the live one would leave the two
+          // disagreeing for a frame.
+          setLivePromptTokens(null);
         }
         drainQueued(run.sessionId, next);
       } else if (payload.kind === "stopped") {
@@ -862,11 +943,13 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         finishRun();
         onActivityRef.current(run.sessionId, null);
         let base: ChatMessage[] = run.baseMessages;
-        if (run.text) {
-          // Whatever arrived is kept, for the reason `stop()` keeps it: the
-          // transcript is the record, and a cancelled reply that dropped its
-          // answer misreports what happened.
-          base = [...run.baseMessages, { role: "assistant" as const, content: run.text, reasoning: run.reasoning || undefined, ...(run.activity.length > 0 ? { activity: run.activity } : {}), modelId: run.modelLabel, providerId: run.providerLabel }];
+        // Text **or** steps. A reply stopped while it was still working has no text
+        // yet -- the answer is the last thing it writes -- so gating on text alone
+        // threw away everything it had done: no assistant message was written, and
+        // the live panel was cleared, so the work vanished from the screen the
+        // moment the user cancelled it.
+        if (hasPartialReply(run)) {
+          base = [...run.baseMessages, partialReplyMessage(run)];
           onMessagesChangeRef.current(run.sessionId, base);
           if (isActive) setMessages(base);
         }
@@ -880,6 +963,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           setStreamText("");
           setStreamReasoning("");
           resetStreamActivity();
+          setLivePromptTokens(null);
         }
         drainQueued(run.sessionId, base);
       } else if (payload.kind === "failed") {
@@ -899,6 +983,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           setSearching(false);
           setRunning(false);
           setMessages(next);
+          setLivePromptTokens(null);
         }
         drainQueued(run.sessionId, next);
       }
@@ -920,8 +1005,13 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       // work the user paid for and never asked to stop.
       for (const [runId, run] of backgroundRunsRef.current) {
         backgroundRunsRef.current.delete(runId);
-        if (run.text) {
-          onMessagesChangeRef.current(run.sessionId, [...run.baseMessages, { role: "assistant" as const, content: run.text, reasoning: run.reasoning || undefined, ...(run.activity.length > 0 ? { activity: closeOpenSteps(run.activity) } : {}), modelId: run.modelLabel, providerId: run.providerLabel }]);
+        // The same test as the stop path: a run that got as far as calling a tool
+        // did something worth keeping, whether or not it had started writing.
+        if (hasPartialReply(run)) {
+          onMessagesChangeRef.current(run.sessionId, [
+            ...run.baseMessages,
+            partialReplyMessage({ ...run, activity: closeOpenSteps(run.activity) }),
+          ]);
         }
         onActivityRef.current(run.sessionId, null);
       }
@@ -979,6 +1069,10 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     resetStreamActivity();
     setSearching(false);
     setRunning(true);
+    // Cleared rather than carried over: the figure belonged to the previous run's
+    // request, and the ring should fall back to the last stored reply until this
+    // run's first round reports its own.
+    setLivePromptTokens(null);
     // A queued message is sent from a draft the user already cleared, so the field
     // is left alone -- clearing it again would wipe whatever they have typed since.
     if (clearDraft) {
@@ -1002,9 +1096,12 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       : requestMessages;
     try {
       await invoke("ai_chat", {
-        request: { run_id: runId, session_id: sessionId, session_title: sessionTitle || undefined, messages: messagesWithInstructions, endpoint_id: endpointId || null, local_model: Boolean(localModelId), model: localModelId ? "projectz-local" : model || null, // Sent verbatim: the value came from the provider's own list of accepted
-        // levels, so translating or guessing it here is what causes HTTP 400.
-        reasoning: canSetEffort ? effort : undefined, web_search_enabled: webSearchEnabled, mode, permission, attachments: requestAttachments.map(({ name, mime_type, data_base64 }) => ({ name, mime_type, data_base64 })), skill_ids: skillIds },
+        request: { run_id: runId, session_id: sessionId, session_title: sessionTitle || undefined, messages: messagesWithInstructions, endpoint_id: endpointId || null, local_model: Boolean(localModelId), model: localModelId ? "projectz-local" : model || null, // Sent verbatim when there is a level to send: the value came from the
+        // provider's own list of accepted levels, so translating or guessing it
+        // here is what causes HTTP 400. An empty value is the provider's own default
+        // and sends **no field at all**, which is what lets the provider choose --
+        // rather than the app choosing for it from a vocabulary it never offered.
+        reasoning: canSetEffort && effort ? effort : undefined, web_search_enabled: mode === "agent", mode, permission, attachments: requestAttachments.map(({ name, mime_type, data_base64 }) => ({ name, mime_type, data_base64 })), skill_ids: skillIds },
       });
       return true;
     } catch (reason: unknown) {
@@ -1028,6 +1125,20 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       return false;
     }
   };
+
+  /**
+   * The latest `sendMessages`, for the local-model listener to call.
+   *
+   * `sendMessages` closes over the mode and the access level of the render that
+   * built it. That listener is registered once, so calling it directly from there
+   * sent the parked reply at the level captured at mount: start a local model,
+   * switch to Full while the engine loads, and the reply went out as `ask` and
+   * prompted for every call, with the composer still reading "Full". The queued
+   * messages path already solved this with a ref; this is the same fix for the
+   * other door.
+   */
+  const sendMessagesRef = useRef(sendMessages);
+  sendMessagesRef.current = sendMessages;
 
   const startOrQueueChat = async (requestMessages: ChatMessage[], sessionId: string, requestAttachments: AttachedFile[], skillIds: string[], clearDraft = true) => {
     if (!localModelId) return sendMessages(requestMessages, sessionId, requestAttachments, skillIds, clearDraft);
@@ -1057,7 +1168,9 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         setStartModelPrompt(false);
         setStartingModel(false);
         setInput("");
-        void sendMessages(pending.messages, pending.sessionId, pending.attachments, pending.skillIds);
+        // Through the ref, so the reply goes out at the mode and access level in
+        // force now rather than the ones this listener captured at mount.
+        void sendMessagesRef.current(pending.messages, pending.sessionId, pending.attachments, pending.skillIds);
       } else if (payload.kind === "failed") {
         setStartingModel(false);
         if (pendingChatRef.current) {
@@ -1150,7 +1263,10 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   dispatchRef.current = dispatch;
 
   const send = async () => {
-    const text = input.trim();
+    // Expanded first, so everything downstream -- the request, the stored message
+    // and the title -- carries the path the user pasted rather than the shorthand
+    // the field was showing.
+    const text = expandWorkspacePaths(input.trim(), trimmedPathsRef.current);
     // Refused while the open conversation's transcript is still loading. Every
     // other check here is about *when* a reply may run; this one is about whether
     // the history is even known yet. Sending from an empty transcript would look
@@ -1209,11 +1325,12 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       runIdRef.current = "";
       setRunning(false);
     }
-    if (run && run.text) {
-      // A stopped reply keeps whatever steps it took, for the same reason it
-      // keeps its text: the transcript is the record of what happened, and a
-      // partial answer that dropped its tool calls would misreport the run.
-      const next = [...run.baseMessages, { role: "assistant" as const, content: run.text, reasoning: run.reasoning || undefined, ...(run.activity.length > 0 ? { activity: run.activity } : {}), modelId: run.modelLabel, providerId: run.providerLabel }];
+    if (run && hasPartialReply(run)) {
+      // A stopped reply keeps whatever it managed, text and steps alike: the
+      // transcript is the record, and a cancelled reply that dropped its work
+      // misreports what happened -- including one stopped while it was still
+      // reading files, where the steps *are* everything it did.
+      const next = [...run.baseMessages, partialReplyMessage(run)];
       persistMessages(run.sessionId, next);
       if (run.sessionId === sessionIdRef.current) {
         setMessages(next);
@@ -1223,6 +1340,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         setStreamReasoning("");
         resetStreamActivity();
         setSearching(false);
+        setLivePromptTokens(null);
       }
     } else if (run && run.sessionId === sessionIdRef.current) {
       streamTextRef.current = "";
@@ -1231,6 +1349,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       setStreamReasoning("");
       resetStreamActivity();
       setSearching(false);
+      setLivePromptTokens(null);
     }
     void invoke("ai_cancel_chat", { runId });
   };
@@ -1339,9 +1458,9 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
 
   /** Runs a command and clears the draft, because a command is not a message. */
   const runSlashCommand = (command: SlashCommand) => {
-    const on = command.action === "web-search-on";
-    setWebSearchEnabled(on);
-    onNotify("success", on ? "Web search on" : "Web search off");
+    // The menu carries a placeholder while there are no commands: a row to look
+    // at, not one to run. When a real command lands, its action runs here.
+    if (command.disabled) return;
     setInput("");
     setSlashIndex(0);
     inputRef.current?.focus();
@@ -1369,6 +1488,44 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   // Covers drafts that do not come from typing, such as one built from a
   // highlighted passage, and resets the height after a send clears the field.
   useEffect(resizeComposer, [input]);
+
+  // A pasted path is shown short so it does not take over the field, but the
+  // message must still carry the full one. The mapping lives only as long as the
+  // draft that produced it: an empty field forgets it, so a token typed later by
+  // hand is never quietly expanded into a path nobody pasted.
+  useEffect(() => {
+    if (input.length === 0) trimmedPathsRef.current.clear();
+  }, [input]);
+
+  /**
+   * Shortens every workspace path in a paste, in place.
+   *
+   * Handled on paste rather than on change because a path is long, arrives whole,
+   * and rewriting the field while someone types into it would move their caret
+   * for reasons they cannot see.
+   */
+  const handlePaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const pasted = event.clipboardData.getData("text");
+    if (!workspaceRoot || pasted.length === 0) return;
+    const shortened = trimWorkspacePaths(pasted, workspaceRoot);
+    if (shortened.text === pasted) return;
+
+    event.preventDefault();
+    for (const [relative, absolute] of shortened.trimmed) {
+      trimmedPathsRef.current.set(relative, absolute);
+    }
+
+    const field = inputRef.current;
+    const start = field?.selectionStart ?? input.length;
+    const end = field?.selectionEnd ?? input.length;
+    setInput(input.slice(0, start) + shortened.text + input.slice(end));
+    // React has not painted the new value yet, so the caret is placed on the next
+    // frame -- after the field holds the text it is being positioned in.
+    requestAnimationFrame(() => {
+      const caret = start + shortened.text.length;
+      field?.setSelectionRange(caret, caret);
+    });
+  };
 
   return (
     <main
@@ -1458,7 +1615,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
                       The user's own text goes through `userTextOnly` because a
                       stored message carries the skills applied to it, which the
                       model needs and the reader does not. */}
-                  </> : userTextOnly(message.content)}
+                  </> : <PathText text={userTextOnly(message.content)} root={workspaceRoot} />}
                 </div>
               </article>
               )
@@ -1483,6 +1640,10 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         left={selection.left}
         onCopy={() => { void navigator.clipboard.writeText(selection.text).then(clearSelection, () => onNotify("error", "Could not copy the selection.")); }}
         onAction={draftFromSelection}
+        // Opens the highlighted address in the panel browser -- the same path a
+        // link in an answer takes -- then drops the bar and the highlight, as
+        // Copy does once its selection has been dealt with.
+        onOpenUrl={(url) => { onOpenUrl(url); clearSelection(); }}
         onDismiss={clearSelection}
       />}
 
@@ -1545,7 +1706,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
             <div className="flex items-start gap-1">
             {/* Attachments are the only composer control now: the `+` menu and its
                 skills / web-search rows are gone, so this opens the file dialog
-                directly. Web search is on for the run itself. */}
+                directly. Web search is the Agent run's own, not a switch here. */}
             <button type="button" onClick={() => void chooseFiles()} aria-label="Attach files" title="Attach files" className="mt-1.5 grid size-8 shrink-0 place-items-center rounded-md text-[var(--muted)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><Paperclip size={18} /></button>
             <textarea
               ref={inputRef}
@@ -1553,6 +1714,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
               rows={1}
               value={input}
               onChange={(event) => setInput(event.target.value)}
+              onPaste={handlePaste}
               onInput={resizeComposer}
               onKeyDown={(event) => {
                 // While the menu is open it owns Enter and the arrow keys; a

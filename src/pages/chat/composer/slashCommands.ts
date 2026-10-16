@@ -6,42 +6,43 @@
  * a command changes how the *next send* behaves rather than being sent, so the
  * draft is cleared once one runs.
  *
- * Kept as data with a named `action` rather than a rendered element or a closure:
- * the registry stays pure and testable, and the one component that owns the state
- * a command touches (the composer) switches on the action.
+ * Kept as data rather than a rendered element or a closure: the registry stays
+ * pure and testable, and the one component that owns the state a command touches
+ * (the composer) switches on the command.
  */
 
-/** What a command does. One variant per thing a command can change. */
-export type SlashAction = "web-search-on" | "web-search-off";
-
 export type SlashCommand = {
-  /** Typed after the slash, e.g. `/web-on`. */
+  /** Typed after the slash, e.g. `/fork`. */
   name: string;
   /** Menu title. */
   label: string;
   /** One line under the title, shown in the menu. */
   hint: string;
-  action: SlashAction;
+  /**
+   * A placeholder is drawn but cannot be run. The menu carries one while there
+   * is nothing to offer, so `/` says something instead of opening an empty box.
+   */
+  disabled?: boolean;
 };
 
-/** The commands offered, in menu order. */
+/**
+ * The commands offered, in menu order.
+ *
+ * No real commands yet. Nothing has earned a place here -- a command that only
+ * repeats a control already sitting beside the field is a second door into the
+ * same room -- so the menu holds a placeholder until something does.
+ */
 export const SLASH_COMMANDS: SlashCommand[] = [
   {
-    name: "web-on",
-    label: "Web search on",
-    hint: "Let this reply search the web",
-    action: "web-search-on",
-  },
-  {
-    name: "web-off",
-    label: "Web search off",
-    hint: "Answer without searching the web",
-    action: "web-search-off",
+    name: "soon",
+    label: "Nothing here yet",
+    hint: "Commands will land here",
+    disabled: true,
   },
 ];
 
 /**
- * The query while a command is being typed: `/web` gives `web`.
+ * The query while a command is being typed: `/ag` gives `ag`.
  *
  * `null` for anything that is not a bare leading slash-word, which is what closes
  * the menu -- a space or a newline means the rest is a message, not a name.
@@ -53,10 +54,17 @@ export function slashQuery(draft: string): string | null {
   return rest;
 }
 
-/** Commands whose name still matches the typed query, in menu order. */
+/**
+ * Commands matching the typed query, in menu order.
+ *
+ * A bare `/` matches everything, the placeholder included -- that is the one
+ * moment it is worth showing. The first letter typed drops it out, because a name
+ * it cannot be run by is not a match.
+ */
 export function matchCommands(query: string): SlashCommand[] {
   const needle = query.trim().toLowerCase();
-  return SLASH_COMMANDS.filter((command) => command.name.startsWith(needle));
+  if (needle.length === 0) return SLASH_COMMANDS;
+  return SLASH_COMMANDS.filter((command) => !command.disabled && command.name.startsWith(needle));
 }
 
 /**
@@ -71,5 +79,5 @@ export function exactCommand(draft: string): SlashCommand | null {
   const query = slashQuery(draft.trimEnd());
   if (query === null || query.length === 0) return null;
   const name = query.toLowerCase();
-  return SLASH_COMMANDS.find((command) => command.name === name) ?? null;
+  return SLASH_COMMANDS.find((command) => !command.disabled && command.name === name) ?? null;
 }

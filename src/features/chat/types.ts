@@ -6,7 +6,7 @@
  * streaming would be gone by the time the user scrolled back to ask what the
  * agent had been doing.
  */
-export type ActivityStep = ToolStep | ThoughtStep;
+export type ActivityStep = ToolStep | ThoughtStep | NoteStep;
 
 /**
  * One tool call.
@@ -129,6 +129,28 @@ export type ThoughtStep = {
   startedAt?: number;
 };
 
+/**
+ * Prose the model wrote in the middle of the work rather than as its answer.
+ *
+ * A reply that thinks, calls a tool, writes a paragraph, calls another tool and
+ * only then answers has written two different things: narration and an answer.
+ * Both arrive on the stream as ordinary content, so without this the narration
+ * was painted into the answer's own bubble and then disappeared when the reply
+ * ended -- the stored message keeps the final round only -- which left the user
+ * watching text change under them and reading working notes as the conclusion.
+ *
+ * So a paragraph belongs to the work as soon as a tool call proves the reply was
+ * still working. It stays inside "Worked for ...", where the record of the run
+ * lives, and the answer's bubble is left to the answer.
+ */
+export type NoteStep = {
+  kind: "note";
+  /** What the model said before it carried on. */
+  text: string;
+  /** Always false in practice: a note is complete the moment it is moved here. */
+  running: boolean;
+};
+
 export type ChatMessage = {
   role: "user" | "assistant" | "system" | "tool";
   content: string;
@@ -169,7 +191,24 @@ export type ChatMessage = {
     generation_rate_estimated?: boolean;
     completion_tokens?: number;
     prompt_eval_tokens_per_second?: number;
+    /**
+     * The context at the reply's answer, i.e. its final round only.
+     *
+     * This is what the context ring and the per-reply charts plot: how full the
+     * window was when the answer was written. It is not what the reply spent --
+     * see `used_prompt_tokens` for that.
+     */
     prompt_tokens?: number;
+    /**
+     * Every request's input and output for the reply, added up.
+     *
+     * A reply that ran a tool sends the conversation again for its answer, so the
+     * final round's `prompt_tokens` understates the reply whenever a tool ran.
+     * Absent on a reply saved before this was recorded, and on one whose provider
+     * never reported usage; the session figures fall back to `prompt_tokens` then.
+     */
+    used_prompt_tokens?: number;
+    used_completion_tokens?: number;
   };
 };
 
