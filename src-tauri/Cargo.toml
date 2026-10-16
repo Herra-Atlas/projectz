@@ -1,6 +1,6 @@
 [package]
 name = "projectz"
-version = "0.2.8"
+version = "0.2.9"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -71,5 +71,10 @@ ash = { version = "0.38", optional = true }
 codegen-units = 1
 lto = true
 opt-level = 3
-panic = "abort"
+# Deliberately **not** `panic = "abort"`. Aborting turns one bug in one tool into a
+# dead window mid-reply -- which is what a user reads as "the app restarted", and
+# what costs a long run everything it had done. Unwinding lets the failure be
+# caught where the tool runs (see `ai/remote/client.rs`) and turned into a failed
+# call the model can route around, so the reply carries on. The bytes this costs
+# are worth a window that stays up.
 strip = true

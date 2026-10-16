@@ -4,6 +4,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { ChevronDown, Power } from "lucide-react";
 import NotificationStack from "./features/notifications/NotificationStack";
+import ErrorBoundary from "./components/ErrorBoundary";
 import { NotificationHostProvider } from "./features/notifications/notificationHost";
 import { useCopiedNotification, useNotifications } from "./features/notifications/useNotifications";
 import Sidebar from "./components/Sidebar";
@@ -49,9 +50,11 @@ type StartupProgress = { phase: string; message: string; progress: number };
  */
 export default function App() {
   return (
-    <NotificationHostProvider>
-      <AppShell />
-    </NotificationHostProvider>
+    <ErrorBoundary>
+      <NotificationHostProvider>
+        <AppShell />
+      </NotificationHostProvider>
+    </ErrorBoundary>
   );
 }
 

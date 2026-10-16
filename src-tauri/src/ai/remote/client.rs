@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use base64::Engine;
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use serde_json::{json, Value};
 use tracing::{info, warn};
 
@@ -746,15 +746,34 @@ impl<'a> CallRunner<'a> {
             // What lets `sub_agent` start a run of its own.
             run: Some(Arc::clone(self.run)),
         };
+        // **A tool that panics is a failed call, not a dead app.** A tool runs
+        // inside the reply's own task, so an unwinding panic here used to take the
+        // whole window down mid-reply -- the user's "the app just restarted", and
+        // the loss of everything the run had done. Catching it turns the bad call
+        // into text the model can read and route around, and the loop carries on.
+        //
+        // `AssertUnwindSafe` is the honest wrapper: a tool's own state is not
+        // promised to be intact after it panics, and the only thing read from it
+        // afterwards is the message this produces. The panic itself is logged by
+        // the app's hook (`lib.rs`).
+        //
         // `succeeded` is carried out because the text alone cannot tell a failure
         // from a tool that legitimately returned those words.
-        let (result, succeeded) = match self
-            .registry
-            .run(&call.name, arguments.clone(), context)
-            .await
-        {
-            Ok(text) => (text, true),
-            Err(error) => (error, false),
+        let outcome =
+            std::panic::AssertUnwindSafe(self.registry.run(&call.name, arguments.clone(), context))
+                .catch_unwind()
+                .await;
+        let (result, succeeded) = match outcome {
+            Ok(Ok(text)) => (text, true),
+            Ok(Err(error)) => (error, false),
+            Err(_) => (
+                format!(
+                    "{} crashed while running -- a bug in the app, not in your call, and it has \
+                     been logged. Try a different approach.",
+                    call.name
+                ),
+                false,
+            ),
         };
         // The diff is drained here, per call, because this is the only place that
         // knows which write produced it. Draining per round would hand two writes'

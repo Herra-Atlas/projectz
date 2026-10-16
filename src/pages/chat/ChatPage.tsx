@@ -1033,6 +1033,31 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     };
   }, [onNotify]);
 
+  /**
+   * Writes out an in-flight reply when the window is going away.
+   *
+   * A reload or a quit tears the webview down, and everything about a running
+   * reply lives in refs -- so without this the reply vanishes from the transcript
+   * and takes its "Worked for" with it, which is exactly what a user sees after a
+   * restart. React's unmount cleanup is not guaranteed to run on that path, so the
+   * work done so far is flushed here instead. Nothing is cancelled: this only
+   * records what the reply had reached.
+   */
+  useEffect(() => {
+    const persistLiveRuns = () => {
+      for (const run of backgroundRunsRef.current.values()) {
+        if (!hasPartialReply(run)) continue;
+        onMessagesChangeRef.current(run.sessionId, [
+          ...run.baseMessages,
+          partialReplyMessage({ ...run, activity: closeOpenSteps(run.activity) }),
+        ]);
+      }
+    };
+    window.addEventListener("pagehide", persistLiveRuns);
+    return () => window.removeEventListener("pagehide", persistLiveRuns);
+  }, []);
+
+
   useEffect(() => {
     const thread = threadRef.current;
     if (!thread) return;

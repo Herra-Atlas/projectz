@@ -63,6 +63,15 @@ pub fn run() {
         .try_init();
     tracing::info!("Rust logging initialized");
 
+    // A panic is logged rather than left to the default hook, because the interesting
+    // one is now *caught* where it happens (the tool loop) and the app carries on --
+    // so stderr is the only place the reason survives to be looked at. The default
+    // hook would also print, but without the timestamp or the level the rest of the
+    // log carries, which is what makes it findable after the fact.
+    std::panic::set_hook(Box::new(|info| {
+        tracing::error!("panic: {info}");
+    }));
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
