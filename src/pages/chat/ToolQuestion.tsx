@@ -73,28 +73,37 @@ export default function ToolQuestion({ request, onAnswer }: ToolQuestionProps) {
         </div>
       )}
 
-      {/* The field sits inside a form so Enter submits, matching the composer's
-          own send behaviour rather than inventing a second one. */}
-      <form
-        onSubmit={(event) => { event.preventDefault(); submit(); }}
-        className="flex items-center gap-1.5 pl-[21px]"
-      >
+      {/* A plain row, deliberately **not** a `<form>`. This prompt is drawn inside
+          the composer's own form, and a form inside a form is invalid HTML whose
+          implicit submission can slip past React's handler to the browser's
+          default action -- navigating the webview to the same URL, which reloads
+          the whole app. That reload is what read as "the app restarted": the
+          loading screen, and every running reply gone. Enter is handled on the
+          field instead, matching the composer's own send behaviour. */}
+      <div className="flex items-center gap-1.5 pl-[21px]">
         <input
           ref={inputRef}
           value={text}
           onChange={(event) => setText(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              submit();
+            }
+          }}
           placeholder="Answer…"
           aria-label="Your answer"
           className="h-8 min-w-0 flex-1 rounded-md border border-[var(--line)] bg-[var(--rail)] px-2.5 text-[12px] text-[var(--text)] outline-none placeholder:text-[var(--quiet)] focus:border-[var(--accent)]"
         />
         <button
-          type="submit"
+          type="button"
+          onClick={submit}
           disabled={!text.trim()}
           className="inline-flex h-8 shrink-0 items-center rounded-md bg-[var(--accent)] px-3 text-[11px] font-medium text-[var(--accent-ink)] transition-opacity hover:opacity-90 disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
         >
           Answer
         </button>
-      </form>
+      </div>
     </div>
   );
 }

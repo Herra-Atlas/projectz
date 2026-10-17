@@ -4,6 +4,7 @@ import { ChartNoAxesColumn, ChartSpline, Check, ChevronLeft, ChevronRight, Circl
 import type { ChatSessionHeader, SessionActivity, SessionRunStatus } from "../features/chat/types";
 import { SESSION_DOT_COLORS, SESSION_DOT_DEFAULT, SESSION_DOT_DONE, SESSION_DOT_ERROR } from "../features/chat/types";
 import LiveSpinner from "./LiveSpinner";
+import ProjectZCrown from "./ProjectZCrown";
 
 const MENU_WIDTH = 200;
 const DOT_SUBMENU_WIDTH = 152;
@@ -251,7 +252,25 @@ export default function Sidebar({
   const sidebar = (
     <aside className={`flex h-full shrink-0 flex-col border-r border-[var(--line)] bg-[var(--rail)] transition-[width] duration-200 ${collapsed ? "w-[68px]" : "w-[260px] max-sm:fixed max-sm:inset-y-0 max-sm:left-0 max-sm:z-50 max-sm:shadow-2xl"}`}>
       <div className={`flex h-[60px] shrink-0 items-center gap-2 border-b border-[var(--line)] ${collapsed ? "justify-center px-2" : "px-4"}`}>
-        {!collapsed && <p className="min-w-0 flex-1 truncate text-[13px] font-semibold tracking-tight">ProjectZ</p>}
+        {!collapsed && (
+          <div className="relative min-w-0 flex-1">
+            {/* Sized and offset to rest on the "Pr" at the top-left of the word --
+                a hat on the head -- and pointer-transparent, so it changes neither
+                the row's layout nor what clicking the title does. */}
+            <ProjectZCrown
+              className="pointer-events-none absolute -top-1.5 -left-2 select-none bg-[var(--text)]"
+              style={{
+                width: "18px",
+                height: "13px",
+                // A slight tilt, pivoting on where it meets the word, so it reads
+                // as a crown set on at an angle rather than one pasted flat.
+                transform: "rotate(-18deg)",
+                transformOrigin: "center bottom",
+              }}
+            />
+            <p className="min-w-0 truncate text-[13px] font-semibold tracking-tight">ProjectZ</p>
+          </div>
+        )}
         <button
           type="button"
           className="grid size-7 shrink-0 place-items-center rounded-md text-[var(--quiet)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)]"
@@ -259,7 +278,12 @@ export default function Sidebar({
           aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
         >
-          {collapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
+          {/* Collapsed, the crown is the sidebar's only mark -- the title is not
+              drawn, so the icon stands in for it rather than leaving an arrow.
+              Expanded, the chevron stays, saying what clicking will do. */}
+          {collapsed
+            ? <ProjectZCrown className="bg-[var(--text)]" style={{ width: "18px", height: "18px" }} />
+            : <ChevronLeft size={16} />}
         </button>
       </div>
 
