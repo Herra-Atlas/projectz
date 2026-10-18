@@ -34,8 +34,12 @@
             root.style.setProperty("--accent", entry.accent);
             root.style.setProperty("--accent-ink", entry.ink);
           }
+          /* The tint per theme comes from the mirror too, so this script does
+             not have to know which palettes are light -- it used to keep its own
+             list, and had already missed one. A stale mirror leaves the default
+             tint from the meta tag, which the app corrects once it is up. */
           var meta = document.querySelector('meta[name="theme-color"]');
-          if (meta) meta.setAttribute("content", theme === "light" || theme === "paper" ? "#fbfbfc" : "#0e0e10");
+          if (meta && entry && entry.themeColor) meta.setAttribute("content", entry.themeColor);
         } catch (error) {
           /* A missing or malformed mirror is not a reason to fail to render:
              the app starts on the default theme and corrects itself once the

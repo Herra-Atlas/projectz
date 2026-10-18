@@ -93,6 +93,15 @@ pub struct Diff {
     pub lines: Vec<Line>,
     /// Lines dropped from the middle, so the panel can say how many.
     pub hidden: usize,
+    /// Added lines over the whole change, before [`MAX_DIFF_LINES`] cut it.
+    ///
+    /// Counted from the complete diff rather than from `lines`, which is only the
+    /// part that survived the cap. The file-changes summary reads this so a large
+    /// write reports what it changed rather than the ceiling: a 500-line file the
+    /// agent created said "+200" while the count was taken from the trimmed diff.
+    pub added: usize,
+    /// Removed lines over the whole change, before the cap. See [`Diff::added`].
+    pub removed: usize,
 }
 
 /// Differences between two file bodies, collapsed and capped.
@@ -188,7 +197,12 @@ fn lcs(old: &[&str], new: &[&str]) -> Vec<Line> {
 fn wholesale(old: &[&str], new: &[&str]) -> Diff {
     let mut lines: Vec<Line> = old.iter().map(|line| Line::removed(line)).collect();
     lines.extend(new.iter().map(|line| Line::added(line)));
-    Diff { lines, hidden: 0 }
+    Diff {
+        lines,
+        hidden: 0,
+        added: new.len(),
+        removed: old.len(),
+    }
 }
 
 /// Keeps changed regions with [`CONTEXT`] lines either side, dropping the rest.
@@ -219,7 +233,17 @@ fn collapse(lines: Vec<Line>) -> Diff {
 
     let mut kept = Vec::new();
     let mut hidden = 0usize;
+    // Totalled over every line, before the cap and the context pass thin them:
+    // this is the count of what actually changed, as distinct from `lines`, which
+    // is only what the panel can afford to draw.
+    let mut added = 0usize;
+    let mut removed = 0usize;
     for (index, line) in lines.into_iter().enumerate() {
+        match &line {
+            Line::Added { .. } => added += 1,
+            Line::Removed { .. } => removed += 1,
+            Line::Context { .. } => {}
+        }
         if !shown[index] {
             hidden += 1;
             continue;
@@ -238,6 +262,8 @@ fn collapse(lines: Vec<Line>) -> Diff {
     Diff {
         lines: kept,
         hidden,
+        added,
+        removed,
     }
 }
 
@@ -329,6 +355,32 @@ mod tests {
             "{}",
             result.lines.len()
         );
+    }
+
+    /// The counts are the whole change, not the drawn subset. A cap that also
+    /// capped the *figure* made a 500-line file the agent created read "+200",
+    /// which is the wrong number on the one summary a reader trusts.
+    #[test]
+    fn the_totals_count_the_lines_the_cap_left_out() {
+        let after: String = (1..=500).map(|n| format!("line{n}\n")).collect();
+        let result = diff("", &after);
+        assert!(result.lines.len() <= MAX_DIFF_LINES);
+        assert!(result.hidden > 0);
+        assert_eq!(result.added, 500);
+        assert_eq!(result.removed, 0);
+    }
+
+    /// The totals are the *changed* lines, so the context kept around an edit is
+    /// not counted as part of it.
+    #[test]
+    fn the_totals_do_not_count_context() {
+        let before: String = (1..=200).map(|n| format!("line{n}\n")).collect();
+        let after = before.replace("line100\n", "LINE100\n");
+        let result = diff(&before, &after);
+        assert_eq!(result.added, 1);
+        assert_eq!(result.removed, 1);
+        // The retained neighbourhood proves context is present but not counted.
+        assert!(result.lines.len() > result.added + result.removed);
     }
 
     /// The quadratic guard: a pair too large to align still produces a diff

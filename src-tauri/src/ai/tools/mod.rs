@@ -14,6 +14,7 @@ pub mod agent;
 mod approval;
 mod ask;
 mod background;
+mod browser;
 mod cache;
 mod diff;
 mod export;
@@ -247,6 +248,7 @@ mod tests {
             registry_for(ToolMode::Agent, true).names(),
             listed(&[
                 "ask_user",
+                "browser_exec",
                 "delete_file",
                 "edit_file",
                 "edit_lines",
@@ -307,6 +309,7 @@ mod tests {
             names(ToolMode::Agent, true),
             listed(&[
                 "ask_user",
+                "browser_exec",
                 "delete_file",
                 "edit_file",
                 "edit_lines",
@@ -334,6 +337,7 @@ mod tests {
             names(ToolMode::Agent, false),
             listed(&[
                 "ask_user",
+                "browser_exec",
                 "delete_file",
                 "edit_file",
                 "edit_lines",

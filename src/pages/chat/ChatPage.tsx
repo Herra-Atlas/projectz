@@ -38,7 +38,8 @@ import {
   type WorkingMode,
 } from "../../features/chat/chatMode";
 import { EMPTY_TITLE_MODELS, type AiEvent, type AttachedFile, type BackgroundRun, type LocalModelEvent, type PendingChat, type SelectedText, type WebSearchOutput } from "./types";
-import type { ActivityStep, ChatMessage, ChatSession, SessionRunStatus } from "../../features/chat/types";
+import type { ActivityStep, ChatMessage, ChatSession, SessionRunStatus, ToolStepStats } from "../../features/chat/types";
+import { withToolRecap } from "../../features/chat/toolRecap";
 
 import { closeOpenSteps, closeRunningThought } from "./closeOpenSteps";
 import { hasPartialReply, partialReplyMessage } from "./partialReply";
@@ -81,6 +82,24 @@ function attachSearch(run: BackgroundRun, search: WebSearchOutput) {
       search,
     });
   }
+}
+
+/**
+ * The wire figures a finished sub-agent reports, as its row stores them.
+ *
+ * Field names are translated in one place rather than at every read of the row,
+ * and a run that reported no usage keeps `tokens` absent instead of zero -- an
+ * unknown cost must not read as a free run.
+ */
+function subagentStats(metrics: AiEvent["metrics"]): ToolStepStats | undefined {
+  const stats = metrics?.stats;
+  if (!stats) return undefined;
+  return {
+    ...(stats.used_tokens !== undefined ? { tokens: stats.used_tokens } : {}),
+    toolUses: stats.tool_uses ?? 0,
+    turns: stats.turns ?? 0,
+    seconds: stats.seconds ?? 0,
+  };
 }
 
 type ChatPageProps = {
@@ -272,6 +291,27 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       hidden?: boolean,
     ) => Promise<void>
   >(async () => {});
+
+  /**
+   * Sends the next message queued for a conversation, on top of `base`.
+   *
+   * Pulled out of the run listener so the stop handler can reach it too. A message
+   * typed while a reply ran belongs to the conversation, not to the event that ends
+   * the reply -- and a stopped run never raises the event this used to hang off,
+   * because `stop` removes the run before the backend's `stopped` event arrives,
+   * so the listener's run lookup discards it. Without this the message sat in the
+   * queue until some later reply happened to end.
+   *
+   * One message per call, always the oldest for the session, so a queue drains in
+   * the order it was written and a message for another conversation is left alone.
+   */
+  const drainQueued = useCallback((sessionId: string, base: ChatMessage[]) => {
+    const index = queuedMessagesRef.current.findIndex((item) => item.sessionId === sessionId);
+    if (index === -1) return;
+    const [item] = queuedMessagesRef.current.splice(index, 1);
+    setQueuedCount(queuedMessagesRef.current.length);
+    void dispatchRef.current(item.text, item.attachments, base, sessionId, false, item.hidden ?? false);
+  }, []);
   const [startModelPrompt, setStartModelPrompt] = useState(false);
   const [startingModel, setStartingModel] = useState(false);
   const pendingChatRef = useRef<PendingChat | null>(null);
@@ -553,6 +593,20 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   const changePermission = (next: PermissionMode) => {
     setPermission(next);
     rememberWorkingMode(mode, next);
+    // A reply already streaming keeps the level it *started* with unless it is
+    // told, because the level is captured on the request. Without this the
+    // composer would show the new level while the run in flight still used the
+    // old one -- which is what a level that "did not work" looks like: a command
+    // running under `auto_safe`, or a browser prompt under `full`. Re-point the
+    // run on screen; if none is going the next send carries the level anyway.
+    const activeSession = sessionIdRef.current;
+    const activeRunId = activeSession ? sessionRunIdsRef.current.get(activeSession) : undefined;
+    if (activeRunId) {
+      void invoke("ai_set_run_permission", { runId: activeRunId, permission: next }).catch(() => {
+        // A run that ended between the click and this call is a no-op, and the
+        // next send carries the level regardless, so there is nothing to report.
+      });
+    }
     void invoke("database_set_setting", { key: PERMISSION_SETTING_KEY, value: next }).catch(() => {
       // A failed write is not worth interrupting the user for. The level still
       // applies to the next reply -- it is sent on the request -- and only the
@@ -593,13 +647,16 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       // in the live run's activity while the reply is still going and in a stored
       // assistant message once it has ended, so both are patched -- and the live one
       // matters because its activity is what gets persisted when the reply ends.
-      const attachSubagentReport = (sessionId: string, report: string, failed: boolean) => {
+      const attachSubagentReport = (sessionId: string, report: string, failed: boolean, stats?: ToolStepStats) => {
         const fill = (steps: ActivityStep[]): boolean => {
           for (let index = steps.length - 1; index >= 0; index--) {
             const step = steps[index];
             if (step.kind === "tool" && step.tool === "sub_agent" && step.output === undefined) {
               step.output = report;
               step.outcome = failed ? "failed" : "finished";
+              // The delegated run's own figures, drawn under the report so the run
+              // is judged from the row rather than by opening the Sub agents panel.
+              if (stats) step.stats = stats;
               // The delegated work failed, so the row reads as a failed step rather
               // than a successful call that happens to carry a sad paragraph.
               step.failed = failed;
@@ -648,7 +705,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         // The report goes on the `sub_agent` row inside "Worked for ...", not into
         // the transcript as the user's own message; the model still receives it, as
         // a hidden turn (below).
-        attachSubagentReport(reportSession, report, failed);
+        attachSubagentReport(reportSession, report, failed, subagentStats(payload.metrics));
         if (failed) onNotify("error", `Sub-agent "${label}" failed.`);
         const content = failed
           ? `Sub-agent \`${label}\` failed and did not finish. Its report:\n\n${report}`
@@ -712,17 +769,10 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           sessionRunIdsRef.current.delete(run.sessionId);
         }
       };
-      // A message typed while this conversation was answering. Sent now that the
-      // reply has ended, so the queue drains in order and one reply never starts
-      // on top of another. Matched by session, so a message queued for one
-      // conversation is not sent into another.
-      const drainQueued = (sessionId: string, base: ChatMessage[]) => {
-        const index = queuedMessagesRef.current.findIndex((item) => item.sessionId === sessionId);
-        if (index === -1) return;
-        const [item] = queuedMessagesRef.current.splice(index, 1);
-        setQueuedCount(queuedMessagesRef.current.length);
-        void dispatchRef.current(item.text, item.attachments, base, sessionId, false, item.hidden ?? false);
-      };
+      // A message typed while this conversation was answering is sent now that the
+      // reply has ended -- through the shared `drainQueued`, which the stop handler
+      // also uses. Matched by session, so a message queued for one conversation is
+      // not sent into another.
       if (payload.kind === "completion_id" && payload.text) {
         run.completionId = payload.text;
       } else if (payload.kind === "reasoning_phase") {
@@ -1031,7 +1081,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       sessionRunIdsRef.current.clear();
       unlistenPromise.then((unlisten) => unlisten());
     };
-  }, [onNotify]);
+  }, [onNotify, drainQueued]);
 
   /**
    * Writes out an in-flight reply when the window is going away.
@@ -1129,9 +1179,15 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     } catch {
       instructions = "";
     }
+    // What each earlier reply did, carried on that reply's own text. The provider
+    // is sent only `{role, content}`, so without this the model remembers what it
+    // said and not what it saw -- see `toolRecap.ts`. Derived on every send, from
+    // the stored steps, so the bytes are identical from one turn to the next and
+    // a provider's cache still matches.
+    const wireMessages = requestMessages.map(withToolRecap);
     const messagesWithInstructions = instructions
-      ? [{ role: "system", content: instructions }, ...requestMessages]
-      : requestMessages;
+      ? [{ role: "system" as const, content: instructions }, ...wireMessages]
+      : wireMessages;
     try {
       await invoke("ai_chat", {
         request: { run_id: runId, session_id: sessionId, session_title: sessionTitle || undefined, messages: messagesWithInstructions, endpoint_id: endpointId || null, local_model: Boolean(localModelId), model: localModelId ? "projectz-local" : model || null, // Sent verbatim when there is a level to send: the value came from the
@@ -1363,24 +1419,18 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       runIdRef.current = "";
       setRunning(false);
     }
+    // The transcript this stop leaves behind -- and the base any queued message is
+    // sent on top of. Text and steps alike: a stopped reply keeps whatever it
+    // managed, because the transcript is the record and a cancelled reply that
+    // dropped its work misreports what happened, including one stopped while it was
+    // still reading files, where the steps *are* everything it did.
+    let base: ChatMessage[] = run?.baseMessages ?? messagesRef.current;
     if (run && hasPartialReply(run)) {
-      // A stopped reply keeps whatever it managed, text and steps alike: the
-      // transcript is the record, and a cancelled reply that dropped its work
-      // misreports what happened -- including one stopped while it was still
-      // reading files, where the steps *are* everything it did.
-      const next = [...run.baseMessages, partialReplyMessage(run)];
-      persistMessages(run.sessionId, next);
-      if (run.sessionId === sessionIdRef.current) {
-        setMessages(next);
-        streamTextRef.current = "";
-        streamReasoningRef.current = "";
-        setStreamText("");
-        setStreamReasoning("");
-        resetStreamActivity();
-        setSearching(false);
-        setLivePromptTokens(null);
-      }
-    } else if (run && run.sessionId === sessionIdRef.current) {
+      base = [...run.baseMessages, partialReplyMessage(run)];
+      persistMessages(run.sessionId, base);
+    }
+    if (run && run.sessionId === sessionIdRef.current) {
+      setMessages(base);
       streamTextRef.current = "";
       streamReasoningRef.current = "";
       setStreamText("");
@@ -1389,6 +1439,11 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       setSearching(false);
       setLivePromptTokens(null);
     }
+    // A message queued while this reply ran is sent now, not left waiting for the
+    // `stopped` event: this handler removes the run before that event arrives, so
+    // the listener's run lookup discards it and the queue would otherwise sit until
+    // some later reply happened to end.
+    if (run) drainQueued(run.sessionId, base);
     void invoke("ai_cancel_chat", { runId });
   };
 

@@ -258,10 +258,17 @@ export function useChatSessions(enabled: boolean, reloadKey = 0, modelId = "", p
   const createSessionWithMessages = useCallback((messages: ChatMessage[], workingMode?: WorkingMode) => {
     const now = new Date().toISOString();
     const firstPrompt = messages.find((message) => message.role === "user")?.content;
-    const session: ChatSession = {
+    // A header, not a whole session. The list holds headers and the transcript
+    // lives in `transcripts`, so keeping a copy of the messages here too meant
+    // every *header* write -- a rename, a pin, a dot, a level change -- carried a
+    // stale transcript: `updateHeader` spreads the list item and hands it to
+    // `saveHeader`, which sends whatever it is given, so the backend rewrote the
+    // conversation to the messages it had at creation. Two bugs in one: later
+    // replies could be dropped, and the header written beside them was not the one
+    // on screen.
+    const header: ChatSessionHeader = {
       id: crypto.randomUUID(),
       title: firstPrompt ? firstPrompt.slice(0, 48).trim() : "New conversation",
-      messages,
       createdAt: now,
       updatedAt: now,
       modelId: modelId || undefined,
@@ -269,14 +276,16 @@ export function useChatSessions(enabled: boolean, reloadKey = 0, modelId = "", p
       mode: workingMode?.mode,
       permission: workingMode?.permission,
     };
-    setSessions((current) => sortSessions([session, ...current]));
+    setSessions((current) => sortSessions([header, ...current]));
     // Marked loaded without a fetch: these messages are the transcript, and
     // saving them wrote every one of them.
-    setTranscripts((current) => ({ ...current, [session.id]: messages }));
-    setSessionsLoaded((current) => ({ ...current, [session.id]: true }));
-    setActiveId(session.id);
-    void chatRepository.save(session);
-    return session.id;
+    setTranscripts((current) => ({ ...current, [header.id]: messages }));
+    setSessionsLoaded((current) => ({ ...current, [header.id]: true }));
+    setActiveId(header.id);
+    // The one save that carries the transcript: the row does not exist yet, and a
+    // header-only write would create it with no messages.
+    void chatRepository.save({ ...header, messages });
+    return header.id;
   }, [modelId, providerId]);
 
   const updateMessages = useCallback((id: string, messages: ChatMessage[]) => {

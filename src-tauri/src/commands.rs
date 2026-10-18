@@ -28,6 +28,23 @@ pub fn ai_cancel_chat(runtime: State<'_, AiRuntime>, run_id: String) {
     runtime.cancel_chat(&run_id);
 }
 
+/// Re-points the level a reply in flight decides at.
+///
+/// The composer stays live while a reply streams, so a level picked there has to
+/// reach the run that is already going -- otherwise the screen shows one level
+/// while the run uses another, and a level that "did not work" is really a level
+/// that arrived a message too late. Returns whether a run with that id was going;
+/// `false` is normal (the reply just ended) and harmless, because the next send
+/// carries the level regardless.
+#[tauri::command]
+pub fn ai_set_run_permission(
+    runtime: State<'_, AiRuntime>,
+    run_id: String,
+    permission: crate::ai::tools::PermissionMode,
+) -> bool {
+    runtime.set_run_permission(&run_id, permission)
+}
+
 #[tauri::command]
 pub async fn ai_skip_local_reasoning(
     runtime: State<'_, AiRuntime>,
@@ -280,6 +297,19 @@ pub fn database_set_setting(
     runtime.database().set_setting(&key, &value)
 }
 
+/// Repaints the native window frame for the theme the frontend resolved.
+///
+/// Every surface inside the webview reads a CSS token, but the title bar and its
+/// buttons are drawn by the OS, so matching them means telling the window.
+/// `system` -- or any value not recognised -- hands the frame back to the
+/// operating system, which is the one case where following it is correct.
+#[tauri::command]
+pub fn set_window_theme(window: tauri::WebviewWindow, theme: Option<String>) -> Result<(), String> {
+    window
+        .set_theme(crate::window::frame_theme(theme.as_deref()))
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub fn database_tables(runtime: State<'_, AiRuntime>) -> Result<Vec<String>, String> {
     runtime.database().table_names()
@@ -316,6 +346,27 @@ pub fn workspace_close(
     path: String,
 ) -> Result<crate::database::workspaces::Workspaces, String> {
     runtime.close_workspace(&path)
+}
+
+/// What the agent's browser profile is using: its name, its folder, its size.
+///
+/// Read by the settings page so the profile can be *seen*. A saved login is only
+/// trustworthy if the thing holding it can be found, and until this existed the
+/// folder had no name, no size, and no way for a user to look at it or clear it.
+#[tauri::command]
+pub async fn browser_profile_status() -> Result<crate::browser::ProfileStatus, String> {
+    crate::browser::profile_status().await
+}
+
+/// Deletes the agent's browser profile: its cookies, its saved logins, its history.
+///
+/// The driver stops the browser first, because a profile in use cannot be deleted.
+/// Deliberately not a model tool: what this machine is trusted to remember is the
+/// user's decision, of the same kind as adding an MCP server, and not a step in a
+/// task an agent can take on its own initiative.
+#[tauri::command]
+pub async fn browser_profile_forget() -> Result<(), String> {
+    crate::browser::forget_profile().await
 }
 
 /// Every configured MCP server, with what each said last time it answered.

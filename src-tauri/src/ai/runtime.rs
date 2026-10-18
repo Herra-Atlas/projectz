@@ -65,6 +65,15 @@ pub struct AiRuntime {
     /// prompt arrives as a separate command that has no reference to the run
     /// that asked. One gate means one place holds the outstanding prompts.
     approval: crate::ai::tools::ApprovalGate,
+    /// The gate each run in flight decides at, keyed by its run id.
+    ///
+    /// Held so the composer can re-point a run that is already streaming. The
+    /// selector is live during a reply, and a level picked there has to reach the
+    /// run rather than wait for the next message -- otherwise the screen shows one
+    /// level while the run uses another, and a terminal call runs under
+    /// `auto_safe`, or a browser call prompts under `full`. Removed when the run
+    /// ends, so a finished run's id is never re-pointed by a late change.
+    live_gates: Arc<Mutex<HashMap<String, crate::ai::tools::ApprovalGate>>>,
 }
 
 impl AiRuntime {
@@ -86,6 +95,7 @@ impl AiRuntime {
             // Ask-first, and the setting is read per run so a user who switches
             // to Full does not have to restart the app.
             approval: crate::ai::tools::ApprovalGate::new(crate::ai::tools::PermissionMode::Ask),
+            live_gates: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -106,6 +116,24 @@ impl AiRuntime {
         access: crate::ai::tools::AccessSet,
     ) -> crate::ai::tools::ApprovalGate {
         self.approval.with_mode(mode).with_access(access)
+    }
+
+    /// Re-points the level a reply in flight decides at.
+    ///
+    /// Returns whether a run with that id was going. `false` is an ordinary
+    /// outcome and not an error: the reply may have finished in the moment between
+    /// the selector moving and this arriving, and the next send carries the level
+    /// anyway. Only the gate for *this* run is touched, so another conversation's
+    /// run is never affected -- see `ApprovalGate::set_mode`.
+    pub fn set_run_permission(&self, run_id: &str, mode: crate::ai::tools::PermissionMode) -> bool {
+        let gates = self.live_gates.lock().unwrap();
+        match gates.get(run_id) {
+            Some(gate) => {
+                gate.set_mode(mode);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Records the user's answer to a pending tool prompt.
@@ -602,6 +630,15 @@ impl AiRuntime {
             .lock()
             .unwrap()
             .insert(run_id.clone(), Arc::clone(&cancelled));
+        // The gate this run decides at, built here rather than at the call so it can
+        // be held for the run's life: a level chosen in the composer while the reply
+        // streams is re-pointed onto this gate (`ai_set_run_permission`), so the
+        // level on screen is the level the run is using.
+        let gate = self.approval_gate(request.permission, request.access.unwrap_or_default());
+        self.live_gates
+            .lock()
+            .unwrap()
+            .insert(run_id.clone(), gate.clone());
         if is_local {
             self.local_runs.lock().unwrap().insert(run_id.clone());
         }
@@ -661,7 +698,7 @@ impl AiRuntime {
             &run_id_clone,
             session_id.as_deref(),
             Some(&self.database),
-            self.approval_gate(request.permission, request.access.unwrap_or_default()),
+            gate,
             cancelled,
             subagent_default,
             vision_default,
@@ -673,6 +710,9 @@ impl AiRuntime {
         )
         .await;
         self.active_runs.lock().unwrap().remove(&run_id);
+        // Dropped with the run, so a late level change finds nothing to re-point
+        // rather than reaching a gate no run is using any more.
+        self.live_gates.lock().unwrap().remove(&run_id);
         self.local_runs.lock().unwrap().remove(&run_id);
         let result = if cancelled_state.load(std::sync::atomic::Ordering::Relaxed) {
             Err(crate::ai::STOPPED.to_string())

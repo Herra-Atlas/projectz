@@ -28,8 +28,23 @@ import {
  * mark here. A tool with none still gets a mark rather than a blank, but a named
  * one is what keeps two rows apart at a glance.
  */
-export default function ToolIcon({ tool, size = 12 }: { tool: string; size?: number }) {
-  const props = { size, className: "shrink-0 text-[var(--quiet)]" };
+export default function ToolIcon({
+  tool,
+  size = 12,
+  className = "text-[var(--quiet)]",
+}: {
+  tool: string;
+  size?: number;
+  /**
+   * The mark's colour, defaulting to the row's quiet tone.
+   *
+   * Overridable so a failed call can tint its icon red without a second icon
+   * component: the failure should be visible on the mark itself, not only in the
+   * text beside it.
+   */
+  className?: string;
+}) {
+  const props = { size, className: `shrink-0 ${className}` };
   if (tool === "read_file") return <FileText {...props} />;
   if (tool === "list_dir") return <FolderOpen {...props} />;
   if (tool === "grep") return <Search {...props} />;

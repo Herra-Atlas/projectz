@@ -263,6 +263,97 @@
   --series-6: #8a6d1f;
 }
 
+/*
+  Ember: the dark palette warmed toward brown and gold. The one dark ground that
+  is warm rather than neutral or cool -- the dark counterpart to Paper.
+*/
+[data-theme="ember"] {
+  color-scheme: dark;
+  --page: #120d0c;
+  --rail: #181110;
+  --panel: #1e1614;
+  --raised: #281d1a;
+  --line: #342623;
+  --line-strong: #4a3730;
+  --text: #f1e9e4;
+  --muted: #b2a099;
+  --quiet: #7c6b64;
+}
+
+/*
+  Ocean: the dark palette cooled toward deep teal, bluer and greener than Slate's
+  navy grey -- the one dark ground with a real water cast.
+*/
+[data-theme="ocean"] {
+  color-scheme: dark;
+  --page: #08141a;
+  --rail: #0d1c24;
+  --panel: #12232c;
+  --raised: #1a2f3a;
+  --line: #233c48;
+  --line-strong: #35566a;
+  --text: #e2eff4;
+  --muted: #94aab4;
+  --quiet: #657d88;
+}
+
+/*
+  Sage: a light palette with a green cast. Paper warms toward yellow and Mist
+  cools toward blue, so this is the light ground that reads as plant rather than
+  page -- the counterpart to Forest.
+*/
+[data-theme="sage"] {
+  color-scheme: light;
+  --page: #f2f4ee;
+  --rail: #e8ece1;
+  --panel: #ffffff;
+  --raised: #e3e9db;
+  --line: #d7dfcd;
+  --line-strong: #b8c5aa;
+  --text: #1b2118;
+  --muted: #535d4c;
+  --quiet: #7d8874;
+  --accent: #a9660f;
+  --accent-ink: #ffffff;
+  --danger: #bf4232;
+  --added: #2f7d3a;
+  --removed: #b35242;
+  --series-1: #a9660f;
+  --series-2: #1f6fbf;
+  --series-3: #6d3fd1;
+  --series-4: #2f7d3a;
+  --series-5: #b83f63;
+  --series-6: #8a6d1f;
+}
+
+/*
+  Blush: a light palette with a warm rose cast, nearer red than Paper's ivory --
+  the light counterpart to Plum and Ember.
+*/
+[data-theme="blush"] {
+  color-scheme: light;
+  --page: #f9f3f4;
+  --rail: #f2e8ea;
+  --panel: #ffffff;
+  --raised: #efe0e3;
+  --line: #e6d5d9;
+  --line-strong: #cfb8bd;
+  --text: #241a1d;
+  --muted: #5f5156;
+  --quiet: #8b7c81;
+  --accent: #a9660f;
+  --accent-ink: #ffffff;
+  --danger: #bf4232;
+  --added: #2f7d3a;
+  --removed: #b35242;
+  --series-1: #a9660f;
+  --series-2: #1f6fbf;
+  --series-3: #6d3fd1;
+  --series-4: #2f7d3a;
+  --series-5: #b83f63;
+  --series-6: #8a6d1f;
+}
+
 *,
 *::before,
 *::after {

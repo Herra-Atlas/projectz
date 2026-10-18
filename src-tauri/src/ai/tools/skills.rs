@@ -43,7 +43,7 @@ pub const SKILL_READ: ToolSpec = ToolSpec {
         "properties": {
             "name": {
                 "type": "string",
-                "description": "The skill's name, exactly as listed."
+                "description": "The skill's name, as listed. The whole `name [type]` label works too."
             }
         },
         "required": ["name"],
@@ -162,12 +162,16 @@ pub const SKILL_MANAGE: ToolSpec = ToolSpec {
                 "type": "string",
                 "description": "The full instructions to store, in the second person and specific enough to act on."
             },
+            "skill_type": {
+                "type": "string",
+                "description": "One word naming the family this skill belongs to, shown in brackets beside its name in the list. Use \"unorganized\" when none fits."
+            },
             "enabled": {
                 "type": "boolean",
                 "description": "For update only. Set false to stop a skill being offered, keeping the text."
             }
         },
-        "required": ["action", "instructions"],
+        "required": ["action", "instructions", "skill_type"],
         "additionalProperties": false
     }"#,
     // A write: it changes stored state the user will rely on later.
@@ -230,12 +234,47 @@ fn draft_from(arguments: &Value, required: bool) -> Result<NewSkill, String> {
         description: text("description"),
         instructions: text("instructions")
             .ok_or("skill_manage requires `instructions` — the text to store")?,
-        skill_type: text("skill_type"),
+        skill_type: text("skill_type").or_else(|| Some(DEFAULT_TYPE.to_string())),
         // Always `Generated`: this skill was drafted by the model from a
         // conversation, and the schema carries an origin precisely so the user
         // can tell a deliberate one from an inferred one.
         origin: SkillOrigin::Generated,
     })
+}
+
+/// The type a skill gets when the caller names none.
+///
+/// `type` is printed beside every skill in the index, so a skill without one
+/// reads as an unlabelled row -- and the index is the only thing a model sees
+/// before it decides whether to read a skill. The word is deliberately dull: it
+/// is a placeholder for "this one did not fit a family", not a category worth
+/// keeping, so nothing treats it as meaningful and the next save replaces it.
+const DEFAULT_TYPE: &str = "unorganized";
+
+/// The names a caller's request may match, most literal first.
+///
+/// The index lists a skill as `name [type] — when to use it`, and a model reading
+/// it sometimes asks for that whole label as though it were the name: the failure
+/// reads `No skill named "Documentation [writing]"` for a skill plainly called
+/// `Documentation`. The bracketed part is the type, which the model was told about
+/// precisely so it could reason about a family of skills, so mistaking it for part
+/// of the name is a reasonable mistake -- and one this tool can absorb rather than
+/// report, which costs a round trip and teaches nothing.
+///
+/// The exact request is tried first, so a skill genuinely named `Foo [bar]` is
+/// still found by the name it was saved under.
+fn names_to_try(requested: &str) -> Vec<&str> {
+    let trimmed = requested.trim();
+    let mut names = vec![trimmed];
+    if let Some(start) = trimmed.find('[') {
+        if trimmed.ends_with(']') && start > 0 {
+            let bare = trimmed[..start].trim();
+            if !bare.is_empty() {
+                names.push(bare);
+            }
+        }
+    }
+    names
 }
 
 fn read(arguments: Value, database: Option<&crate::database::Database>) -> Result<String, String> {
@@ -247,25 +286,25 @@ fn read(arguments: Value, database: Option<&crate::database::Database>) -> Resul
         .filter(|value| !value.is_empty())
         .ok_or("skill_read requires the `name` of a skill")?;
 
-    let skill = database
+    let skills = database
         .enabled_skills()
-        .map_err(|error| format!("Could not read the saved skills: {error}"))?
+        .map_err(|error| format!("Could not read the saved skills: {error}"))?;
+    let skill = names_to_try(name)
         .into_iter()
-        .find(|skill| skill.name.eq_ignore_ascii_case(name))
+        .find_map(|candidate| {
+            skills
+                .iter()
+                .find(|skill| skill.name.eq_ignore_ascii_case(candidate))
+        })
         .ok_or_else(|| {
             // Names rather than ids on purpose: the model never sees an id, so
             // asking for one would make the tool uncallable. The failure lists the
             // real names, because a model guessing at them is the likely cause.
-            let available = database
-                .enabled_skills()
-                .map(|skills| {
-                    skills
-                        .iter()
-                        .map(|skill| skill.name.clone())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default();
+            let available = skills
+                .iter()
+                .map(|skill| skill.name.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
             format!("No skill named `{name}`. Available: {available}")
         })?;
 
@@ -310,22 +349,22 @@ fn manage(
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .unwrap_or(skill.name.as_str());
-            let existing = database
+            let skills = database
                 .enabled_skills()
-                .map_err(|error| format!("Could not read the saved skills: {error}"))?
+                .map_err(|error| format!("Could not read the saved skills: {error}"))?;
+            let existing = names_to_try(target)
                 .into_iter()
-                .find(|entry| entry.name.eq_ignore_ascii_case(target))
+                .find_map(|candidate| {
+                    skills
+                        .iter()
+                        .find(|entry| entry.name.eq_ignore_ascii_case(candidate))
+                })
                 .ok_or_else(|| {
-                    let available = database
-                        .enabled_skills()
-                        .map(|skills| {
-                            skills
-                                .iter()
-                                .map(|skill| skill.name.clone())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        })
-                        .unwrap_or_default();
+                    let available = skills
+                        .iter()
+                        .map(|skill| skill.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     format!("No skill named `{target}`. Available: {available}")
                 })?;
 
@@ -541,6 +580,85 @@ mod tests {
     fn reading_without_a_name_is_reported() {
         let database = database();
         assert!(read(json!({}), Some(database.as_ref())).is_err());
+    }
+
+    /// The failure this exists for. The index prints `name [type]`, a model asked
+    /// for the whole label, and the tool refused a skill it had just offered --
+    /// costing a round trip and teaching nothing.
+    #[test]
+    fn a_name_copied_from_the_index_still_finds_the_skill() {
+        let database = database();
+        let body = read(
+            json!({ "name": "Rust house style [unorganized]" }),
+            Some(database.as_ref()),
+        )
+        .expect("the bracketed label should resolve to the skill");
+        assert!(body.contains("Prefer Result over panic."), "{body}");
+    }
+
+    /// The type is a suffix, not part of the name: anything else in brackets is
+    /// not stripped out of the middle of a name.
+    #[test]
+    fn only_a_trailing_bracketed_suffix_is_ignored() {
+        assert_eq!(
+            names_to_try("Documentation [writing]"),
+            vec!["Documentation [writing]", "Documentation"]
+        );
+        // The exact request is tried first, so a skill genuinely saved with
+        // brackets is still reachable by the name it was saved under.
+        assert_eq!(names_to_try("Foo [bar]").first(), Some(&"Foo [bar]"));
+        // Nothing to strip.
+        assert_eq!(names_to_try("  Email inbox  "), vec!["Email inbox"]);
+        assert_eq!(names_to_try("[leading]"), vec!["[leading]"]);
+        assert_eq!(names_to_try("unclosed [bracket"), vec!["unclosed [bracket"]);
+    }
+
+    /// A skill saved without a type is stored under the name for "no family",
+    /// because the index prints a type beside every name and an unlabelled row is
+    /// the one thing a model cannot judge.
+    #[test]
+    fn a_skill_saved_without_a_type_is_stored_as_unorganized() {
+        let database = std::sync::Arc::new(
+            crate::database::Database::in_memory().expect("an in-memory database"),
+        );
+        manage(
+            json!({
+                "action": "create",
+                "name": "Winding down",
+                "instructions": "Say what changed and what is left."
+            }),
+            Some(database.as_ref()),
+        )
+        .expect("a created skill");
+
+        let stored = database.enabled_skills().expect("the stored skills");
+        let skill = stored
+            .iter()
+            .find(|skill| skill.name == "Winding down")
+            .expect("the skill should be stored");
+        assert_eq!(skill.skill_type.as_deref(), Some(DEFAULT_TYPE));
+    }
+
+    /// And a type the caller did give is kept rather than overwritten by the
+    /// default.
+    #[test]
+    fn a_type_the_caller_gave_is_kept() {
+        let database = std::sync::Arc::new(
+            crate::database::Database::in_memory().expect("an in-memory database"),
+        );
+        manage(
+            json!({
+                "action": "create",
+                "name": "Email inbox",
+                "skill_type": "browser",
+                "instructions": "Check the inbox at example.test."
+            }),
+            Some(database.as_ref()),
+        )
+        .expect("a created skill");
+
+        let stored = database.enabled_skills().expect("the stored skills");
+        assert_eq!(stored[0].skill_type.as_deref(), Some("browser"));
     }
 
     /// A run with no conversation must not answer from stored state at all, since

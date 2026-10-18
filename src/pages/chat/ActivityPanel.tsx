@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Brain, ChevronRight, LoaderCircle } from "lucide-react";
 import ToolIcon from "../../components/ToolIcon";
-import type { ActivityStep, DiffLine, NoteStep, ThoughtStep, ToolDiff, ToolStep } from "../../features/chat/types";
+import { formatTokens } from "../../features/chat/sessionStats";
+import type { ActivityStep, DiffLine, NoteStep, ThoughtStep, ToolDiff, ToolStep, ToolStepStats } from "../../features/chat/types";
 
 /**
  * One row of the panel: either a single call, or a run of them folded together.
@@ -82,8 +83,10 @@ export default function ActivityPanel({ steps, live, renderMarkdown, totalSecond
           size={13}
           className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`}
         />
+        {/* Present tense while the run is in flight: "Working for" is the truth
+            as the clock counts, and "Worked for" only once it has stopped. */}
         <span className="text-[var(--muted)]">
-          Worked for {formatSeconds(totals.seconds)}
+          {live ? "Working for" : "Worked for"} {formatSeconds(totals.seconds)}
         </span>
         {/* Tool uses only. A thought is a step the panel lists, but the count in
             the header is the number of things the agent *did* — the figure the
@@ -92,7 +95,9 @@ export default function ActivityPanel({ steps, live, renderMarkdown, totalSecond
             that. Hidden entirely when there were no tools, so a reply that only
             reasoned does not claim it ran something. */}
         {totals.toolCount > 0 && (
-          <span className="text-[var(--quiet)]">· {totals.toolCount} steps</span>
+          <span className="text-[var(--quiet)]">
+            · {totals.toolCount === 1 ? "1 step" : `${totals.toolCount} steps`}
+          </span>
         )}
       </button>
 
@@ -227,6 +232,12 @@ function NoteRow({
  * back. The output is rendered in a monospace block rather than as markdown,
  * because it is the tool's literal text: a diff, a stack trace or a directory
  * listing is not prose, and formatting it would misrepresent what the model saw.
+ *
+ * **A failure reads red on the row, not under it.** The reason used to be printed
+ * below every failed row, so a run with a refusal or two carried a wall of error
+ * text the reader scrolled past. Now the icon and the label take `--danger` and
+ * the reason itself sits behind the same disclosure as a success's output: the
+ * signal is on the row, the detail is one click away.
  */
 function ToolRow({ steps, live }: { steps: ToolStep[]; live: boolean }) {
   const [expanded, setExpanded] = useState(false);
@@ -248,12 +259,18 @@ function ToolRow({ steps, live }: { steps: ToolStep[]; live: boolean }) {
   // A search has nothing to open until its results land, so the row is only a
   // disclosure once they have: a caret over a running search would open nothing.
   const hasResults = steps.some((step) => step.search);
-  const collapsible = steps.length > 1 || outputs.length > 0 || diffs.length > 0 || hasResults;
+  // A failure opens too: its reason lives behind the row rather than printed
+  // beneath it, so the collapsed row only has to say red and the disclosure is
+  // how the reader gets the detail.
+  const collapsible =
+    steps.length > 1 || outputs.length > 0 || diffs.length > 0 || hasResults || failed;
 
   const label = (
     <>
-      <ToolIcon tool={first.tool} />
-      <span className="shrink-0 text-[var(--muted)]">{collapsible ? groupLabel(steps) : first.label}</span>
+      <ToolIcon tool={first.tool} className={failed ? "text-[var(--danger)]" : undefined} />
+      <span className={`shrink-0 ${failed ? "text-[var(--danger)]" : "text-[var(--muted)]"}`}>
+        {collapsible ? groupLabel(steps) : first.label}
+      </span>
       {/* Content-width, and truncating rather than growing. `flex-1` here was
           wrong: it stretched the detail to fill the row, so the figures and the
           caret were pushed to the far edge and a short command left a hand's
@@ -318,7 +335,7 @@ function ToolRow({ steps, live }: { steps: ToolStep[]; live: boolean }) {
         // Indented to the tool icon, not to where the caret used to sit on the
         // left. The content belongs to the call it describes.
         <div className="ml-[18px] pb-1 pl-3">
-          {steps.length > 1 && (
+          {steps.length > 1 ? (
             <ul className="space-y-0.5 border-l border-[var(--line)] pb-1">
               {steps.map((step, index) => (
                 <li key={`${step.tool}-${index}`} className="flex min-h-7 items-center gap-1.5 text-[11px] text-[var(--muted)]">
@@ -330,25 +347,22 @@ function ToolRow({ steps, live }: { steps: ToolStep[]; live: boolean }) {
                 </li>
               ))}
             </ul>
-          )}
+          ) : failed ? (
+            // A single failed call has no output stored, so its reason is the one
+            // thing behind the disclosure. In a run the per-step list above
+            // already names each failure, so this would be the same fact twice.
+            <p className="py-0.5 text-[11px] text-[var(--danger)]">{first.outcome}</p>
+          ) : null}
           {diffs.map(({ step, diff }) => (
             <DiffBlock key={`${step.tool}-diff`} label={step.label} diff={diff} />
           ))}
           {outputs.map(({ step, output }) => (
-            <OutputBlock key={`${step.tool}-${output.slice(0, 24)}`} label={step.label} output={output} />
+            <OutputBlock key={`${step.tool}-${output.slice(0, 24)}`} label={step.label} output={output} stats={step.stats} />
           ))}
           {steps.flatMap((step) => (step.search ? [step.search] : [])).map((search, index) => (
             <SearchResults key={`results-${index}`} search={search} />
           ))}
         </div>
-      )}
-      {/* Only shown when it failed: the reason is the part worth reading, and a
-          failure the user has to expand to discover is a failure they will not
-          notice. */}
-      {failed && (
-        <p className="ml-[18px] py-0.5 pl-3 text-[11px] text-[var(--danger)]">
-          {steps.filter((step) => step.failed).map((step) => `${step.label}: ${step.outcome}`).join(" · ")}
-        </p>
       )}
     </li>
   );
@@ -407,7 +421,7 @@ function SearchResults({
  * keeps a large output from burying the steps that came after it; the full text
  * is in the transcript either way.
  */
-function OutputBlock({ label, output }: { label: string; output: string }) {
+function OutputBlock({ label, output, stats }: { label: string; output: string; stats?: ToolStepStats }) {
   return (
     <figure className="mt-0.5">
       <figcaption className="mb-0.5 text-[10px] uppercase tracking-wide text-[var(--quiet)]">
@@ -416,7 +430,37 @@ function OutputBlock({ label, output }: { label: string; output: string }) {
       <pre className="max-h-72 overflow-auto overscroll-contain whitespace-pre-wrap break-words rounded border border-[var(--line)] bg-[var(--rail)] px-2 py-1.5 font-mono text-[11px] leading-5 text-[var(--muted)]">
         {output}
       </pre>
+      {/* Only a delegated run carries these, and they belong to the output the way
+          a table's totals belong under it -- so they sit inside the block rather
+          than on the row, where they would compete with the outcome beside it. */}
+      {stats && <SubagentStats stats={stats} />}
     </figure>
+  );
+}
+
+/**
+ * What a delegated run cost and did, under its report.
+ *
+ * The same facts the session overview states for a conversation, stated for one
+ * sub-agent run so it can be judged from the reply that spawned it. Deliberately a
+ * plain line rather than a grid: it is one row among a run's steps, not a page of
+ * its own, and a box here would outrank the report it describes.
+ *
+ * Every figure is the run's own -- spend across all its rounds, not its last
+ * request. `tokens` is dropped when the provider reported no usage rather than
+ * shown as zero, because an unknown cost must not read as a free run.
+ */
+function SubagentStats({ stats }: { stats: ToolStepStats }) {
+  const parts = [
+    stats.tokens !== undefined ? `${formatTokens(stats.tokens)} tokens` : null,
+    `${stats.toolUses} tool ${stats.toolUses === 1 ? "use" : "uses"}`,
+    `${stats.turns} ${stats.turns === 1 ? "turn" : "turns"}`,
+    formatSeconds(stats.seconds),
+  ].filter((part): part is string => part !== null);
+  return (
+    <p className="mt-1 border-t border-[var(--line)] pt-1 text-[11px] text-[var(--quiet)] tabular-nums">
+      {parts.join(" · ")}
+    </p>
   );
 }
 
@@ -525,7 +569,15 @@ function groupDetail(steps: ToolStep[]): string {
  */
 function groupOutcome(steps: ToolStep[]): { text: string; failed: boolean } {
   if (steps.some((step) => step.failed)) {
-    return { text: `${steps.filter((step) => step.failed).length} of ${steps.length} failed`, failed: true };
+    // A run states how many of it failed -- a count, not the error. A single
+    // failure says nothing at all here, because its `outcome` *is* the reason,
+    // and the reason is moved behind the disclosure rather than printed on the
+    // row. The red label and icon are what signal it while collapsed.
+    if (steps.length === 1) return { text: "", failed: true };
+    return {
+      text: `${steps.filter((step) => step.failed).length} of ${steps.length} failed`,
+      failed: true,
+    };
   }
   if (steps.length === 1) return { text: steps[0].outcome, failed: false };
   return { text: "", failed: false };

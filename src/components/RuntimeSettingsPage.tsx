@@ -6,6 +6,7 @@ import { SettingRow, SettingsSection, Toggle } from "./SettingsSection";
 import EnginePicker from "./EnginePicker";
 import type { Notify } from "../features/notifications/types";
 import { SCALE_STEPS, scaleToValue, valueToScale } from "../features/models/contextScale";
+import { formatBytes } from "../features/format/bytes";
 import { DEFAULT_CONTEXT, DEFAULT_PARALLEL } from "../features/models/localRuntimeDefaults";
 
 /**
@@ -71,12 +72,6 @@ const KV_QUANTS: { value: KvQuant; label: string; hint: string }[] = [
   { value: "q4_0", label: "q4_0", hint: "Noticeable loss, slightly smaller." },
   { value: "q2_k", label: "q2_k", hint: "Aggressive. Clear quality cost." },
 ];
-
-const formatBytes = (bytes: number) => {
-  if (!bytes || bytes < 1) return "0 MB";
-  const gb = bytes / 1024 ** 3;
-  return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(bytes / 1024 ** 2).toFixed(0)} MB`;
-};
 
 /**
  * Windows' `\\?\` device prefix removed, for display only.

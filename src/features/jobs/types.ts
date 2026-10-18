@@ -22,6 +22,13 @@ export type AccessSet = {
    * round-trip whole.
    */
   jobs: boolean;
+  /**
+   * Whether the run may drive a real browser: open pages, click, fill forms.
+   *
+   * Its own switch rather than part of `web`: a fetch reads a page, while a click
+   * can log in, submit a form and pay for something.
+   */
+  browser: boolean;
 };
 
 /** Everything on, which is what a hand-started run gets. */
@@ -32,6 +39,7 @@ export const ALL_ACCESS: AccessSet = {
   web: true,
   subagents: true,
   jobs: true,
+  browser: true,
 };
 
 /** Which model a job runs on. A local model is named by id; a remote pair is not. */

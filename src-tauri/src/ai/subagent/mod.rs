@@ -28,6 +28,7 @@
 //! knows about, and the answer comes back through the shared map.
 
 mod prompt;
+mod stats;
 pub(crate) mod transcript;
 
 use std::sync::{Arc, Mutex};
@@ -93,6 +94,12 @@ pub async fn spawn(arguments: Value, context: ToolContext) -> Result<String, Str
             // is for.
             read: true,
             web: true,
+            // But not the browser, which is grouped with the writes for the same
+            // reason a fetch is not: reading a page and driving one are different
+            // sizes of permission, and a read-only agent gets the first. Its
+            // prompt and its refusals agree, which is the point of narrowing here
+            // rather than only in the prompt.
+            browser: false,
         })
     };
 
@@ -282,6 +289,10 @@ async fn run_agent(task: AgentTask) {
         Err(error) => (format!("The agent did not finish: {error}"), Value::Null),
     };
     let (events, searches) = (drain(&events), drain(&searches));
+    // What the run cost and how much it did, for the parent's `sub_agent` row. Read
+    // from the same events the transcript is built from, so the two can never
+    // disagree about how many calls or rounds there were -- see [`stats`].
+    let run_stats = stats::summarize(&metrics, &events);
 
     if let Some(database) = context.database.as_ref() {
         let session = transcript::build_run(RunRecord {
@@ -342,6 +353,10 @@ async fn run_agent(task: AgentTask) {
             // Lets the chat draw the `sub_agent` row as failed -- and say so to the
             // user -- rather than showing the report as if the work had succeeded.
             "failed": failed,
+            // What the run cost and how much it did, drawn under the report on the
+            // `sub_agent` row -- the delegated run's own totals, so a delegate can
+            // be judged from the reply that spawned it.
+            "stats": run_stats,
         })),
     });
 }

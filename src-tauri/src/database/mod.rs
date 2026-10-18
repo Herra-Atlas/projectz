@@ -28,7 +28,7 @@ pub struct Database {
 /// both refer to this, so adding a migration is one edit here plus one in
 /// `migrate`. Before this existed, each new migration silently broke a test that
 /// had hardcoded the old number.
-pub const LATEST_SCHEMA_VERSION: i64 = 14;
+pub const LATEST_SCHEMA_VERSION: i64 = 15;
 
 /// The current time as UTC ISO-8601, the format every timestamp uses.
 ///
@@ -1586,6 +1586,25 @@ fn migrate(connection: &mut Connection) -> Result<(), String> {
              );
              -- History is read newest-first for one job.
              CREATE INDEX IF NOT EXISTS idx_job_runs_job ON job_runs(job_id, started_at DESC);
+              PRAGMA user_version={LATEST_SCHEMA_VERSION};"
+        ))
+        .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+    }
+    if version < 15 {
+        let tx = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        // Every skill has a type.
+        //
+        // The column has always allowed none, and a skill without one reads as an
+        // unlabelled row in the index -- which is the only thing a model sees
+        // before deciding whether a skill is worth reading. So the empty ones are
+        // given the name for "no family", the same word the tool now writes for a
+        // skill saved without one. Rows the user or a bundled catalogue gave a
+        // real type keep it.
+        tx.execute_batch(&format!(
+            "UPDATE skills SET type='unorganized' WHERE type IS NULL OR TRIM(type)='';
              PRAGMA user_version={LATEST_SCHEMA_VERSION};"
         ))
         .map_err(|error| error.to_string())?;
@@ -2576,6 +2595,45 @@ mod tests {
             )
             .unwrap();
         assert_eq!(listed, 0);
+    }
+
+    /// Every skill has a type. The index prints one beside every name, so a row
+    /// without one reads as an unlabelled skill -- and the migration has to leave
+    /// a type the user or a catalogue chose exactly as it was.
+    #[test]
+    fn the_type_migration_labels_untyped_skills() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate(&mut connection).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO skills (id,name,instructions,type,origin,enabled,use_count,created_at,updated_at)
+                 VALUES ('a','Typed','x','writing','user',1,0,'t','t'),
+                        ('b','Untyped','x',NULL,'user',1,0,'t','t'),
+                        ('c','Blank','x','   ','user',1,0,'t','t');",
+            )
+            .unwrap();
+
+        // Claim the version before the migration, then migrate the way a launch
+        // would. Idempotent: running it twice is what every later launch does.
+        connection.execute_batch("PRAGMA user_version=14;").unwrap();
+        migrate(&mut connection).unwrap();
+        migrate(&mut connection).unwrap();
+
+        let rows: Vec<(String, Option<String>)> = connection
+            .prepare("SELECT name, type FROM skills ORDER BY name")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("Blank".to_string(), Some("unorganized".to_string())),
+                ("Typed".to_string(), Some("writing".to_string())),
+                ("Untyped".to_string(), Some("unorganized".to_string())),
+            ]
+        );
     }
 
     /// A model id containing a colon survives the split, because the migration

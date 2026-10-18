@@ -84,6 +84,14 @@ const AUTO_WRITE_TOOLS: &[&str] = &[
     // Stopping a process is the consequential half of the terminal group; the
     // read half is `terminal_output`, above.
     "terminal_kill",
+    // `browser_exec` is deliberately **not** here, and it is the one write tool this
+    // list leaves out. A click can log in, submit a form and spend money, and none
+    // of that is visible in the arguments of the call that did it -- unlike a write
+    // to the workspace, whose effect the user can read back. So a browser call is
+    // approved by a person at every level below `full`, where it is allowed like
+    // everything else, which is the same place every MCP tool sits. The invariant
+    // test below names it as the exception rather than skipping it silently, so it
+    // cannot be mistaken for a tool someone forgot to add.
 ];
 
 /// Decides whether this tool name runs automatically in the selected mode.
@@ -246,9 +254,15 @@ mod tests {
         ] {
             assert_eq!(decide(PermissionMode::AutoWrites, tool), Decision::Allow);
         }
-        for tool in ["unknown_tool"] {
+        // The browser is the one write that still asks here, because a click can do
+        // something the arguments do not show. It is approved at `full` alone.
+        for tool in ["browser_exec", "unknown_tool"] {
             assert_eq!(decide(PermissionMode::AutoWrites, tool), Decision::Ask);
         }
+        assert_eq!(
+            decide(PermissionMode::Full, "browser_exec"),
+            Decision::Allow
+        );
     }
 
     /// Every tool that can change anything is auto-approved at `auto_writes`.
@@ -266,11 +280,45 @@ mod tests {
             .into_iter()
             .filter(|name| registry.get(name).expect("registered").effect == Effect::Write)
             .filter(|name| !AUTO_WRITE_TOOLS.contains(&name.as_str()))
+            // The browser is the documented exception: a write that asks below
+            // `full` on purpose, because a click's effect is not in its arguments.
+            // Asserted on its own below, so the exception is stated rather than
+            // hidden inside a filter.
+            .filter(|name| name.as_str() != BROWSER_BELOW_FULL)
             .collect::<Vec<_>>();
         assert!(
             unlisted.is_empty(),
             "these write tools would prompt at auto_writes: {unlisted:?}"
         );
+    }
+
+    /// The one write tool held back until `full`, named once so the exception above
+    /// has a name and cannot quietly become two.
+    const BROWSER_BELOW_FULL: &str = "browser_exec";
+
+    /// The browser is approved only at `full`, and that is the whole of the
+    /// exception: it must not drift back onto the write list, which would approve a
+    /// login or a purchase on a level that never claimed to.
+    #[test]
+    fn the_browser_is_the_only_write_tool_held_back_until_full() {
+        assert_eq!(
+            decide(PermissionMode::Ask, BROWSER_BELOW_FULL),
+            Decision::Ask
+        );
+        assert_eq!(
+            decide(PermissionMode::AutoSafe, BROWSER_BELOW_FULL),
+            Decision::Ask
+        );
+        assert_eq!(
+            decide(PermissionMode::AutoWrites, BROWSER_BELOW_FULL),
+            Decision::Ask
+        );
+        assert_eq!(
+            decide(PermissionMode::Full, BROWSER_BELOW_FULL),
+            Decision::Allow
+        );
+        assert!(!AUTO_WRITE_TOOLS.contains(&BROWSER_BELOW_FULL));
+        assert!(!AUTO_READ_TOOLS.contains(&BROWSER_BELOW_FULL));
     }
 
     /// The read half of the same invariant: every observing tool runs unprompted

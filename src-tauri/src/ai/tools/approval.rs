@@ -164,6 +164,24 @@ impl ApprovalGate {
         self.mode.lock().map(|mode| *mode).unwrap_or_default()
     }
 
+    /// Re-points the level this gate decides at.
+    ///
+    /// The level is **per-run** -- `with_mode` gave this gate its own lock, so
+    /// writing it here changes *this* run and no other. That is what makes it safe
+    /// to do from the composer while a reply streams: the user has moved the
+    /// selector, and the run they are watching must be at the level the selector
+    /// shows, rather than the one it happened to start at.
+    ///
+    /// A sub-agent shares the same lock (it is handed its parent's gate, or a gate
+    /// built with `with_access`, which reuses the mode `Arc`), so a delegated run
+    /// follows its parent's change too. A poisoned lock is left as it is rather
+    /// than forced, so this can never be the way a run is quietly raised.
+    pub fn set_mode(&self, mode: PermissionMode) {
+        if let Ok(mut current) = self.mode.lock() {
+            *current = mode;
+        }
+    }
+
     /// Records the user's answer and releases the waiting run.
     ///
     /// Returns `false` when nothing was waiting on this id, which happens when
@@ -537,6 +555,37 @@ mod tests {
             .expect("settled");
         assert_eq!(decision, Decision::Allow);
         assert!(!prompted, "a run at full should not be prompted");
+    }
+
+    /// A level picked while a reply streams reaches the run in flight.
+    ///
+    /// The composer is live during a reply, so a change that only took effect on
+    /// the *next* message left the screen showing one level while the run used
+    /// another -- which is exactly what "the level did not work" looks like: a
+    /// terminal call under `auto_safe`, or a browser prompt under `full`. The
+    /// gate is per-run, so re-pointing it is how the run catches up.
+    #[test]
+    fn a_live_run_takes_the_level_it_is_re_pointed_to() {
+        let gate = ApprovalGate::new(PermissionMode::Ask).with_mode(PermissionMode::Ask);
+        // Started at `ask`: a browser call would prompt.
+        assert_eq!(gate.mode(), PermissionMode::Ask);
+
+        gate.set_mode(PermissionMode::Full);
+        assert_eq!(gate.mode(), PermissionMode::Full);
+        // And it decides at the new level at once, with no prompt.
+        let mut prompted = false;
+        let mut browser = request();
+        browser.tool_name = "browser_exec".into();
+        browser.command = String::new();
+        let decision = runtime()
+            .block_on(gate.settle("r1", browser, &cancelled(), |_, _| prompted = true))
+            .expect("settled");
+        assert_eq!(decision, Decision::Allow);
+        assert!(!prompted, "a run re-pointed to full must not be prompted");
+
+        // Back down again, and the same call now waits for the user.
+        gate.set_mode(PermissionMode::AutoSafe);
+        assert_eq!(gate.mode(), PermissionMode::AutoSafe);
     }
 
     /// A permission dialog names the command it is about, so a user approving

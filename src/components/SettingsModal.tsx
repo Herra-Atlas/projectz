@@ -17,6 +17,7 @@ import TitleModelPicker from "./TitleModelPicker";
 import SingleModelPicker from "./ModelSelectionPicker";
 import { Segmented, SettingRow, SettingsSection, Toggle } from "./SettingsSection";
 import { COMPACTION_LABELS, type Compaction, type Preferences } from "../features/models/usePreferences";
+import { formatBytes } from "../features/format/bytes";
 import type { Endpoint, LocalModel } from "../features/models/types";
 import type { Skill } from "../features/skills/types";
 import type { InstalledEngine } from "../features/models/useInstalledEngines";
@@ -83,9 +84,30 @@ type GeneralSettings = {
   responseNotifications: boolean;
   showMetrics: boolean;
   sendWith: "Enter" | "Ctrl + Enter";
+  /**
+   * How long the browser is kept after the last call that used it.
+   *
+   * The wire name the backend parses, not the label shown for it, in the same
+   * shape `compaction` uses: renaming a label must not change what is stored.
+   */
+  browserIdle: BrowserIdle;
 };
 
-const DEFAULT_GENERAL: GeneralSettings = { instructions: "", responseNotifications: false, showMetrics: true, sendWith: "Enter" };
+/**
+ * The idle choices, as the stored token and the words for it.
+ *
+ * `never` is a real answer rather than an absence: the browser is a window the
+ * user can watch and may want to keep, and a setting that closed it anyway would
+ * be one they could not actually turn off.
+ */
+const IDLE_LABELS = { "10m": "10 minutes", "30m": "30 minutes", "1h": "1 hour", never: "Never" } as const;
+
+type BrowserIdle = keyof typeof IDLE_LABELS;
+
+/** What the settings row shows about the browser's profile. Mirrors the Rust type. */
+type BrowserProfile = { name: string; path: string; bytes: number; exists: boolean };
+
+const DEFAULT_GENERAL: GeneralSettings = { instructions: "", responseNotifications: false, showMetrics: true, sendWith: "Enter", browserIdle: "10m" };
 
 /** Fills in defaults for any key the stored record predates. */
 const withGeneralDefaults = (saved: Partial<GeneralSettings> | null | undefined): GeneralSettings => ({ ...DEFAULT_GENERAL, ...(saved ?? {}) });
@@ -179,6 +201,16 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
   const [generalSettings, setGeneralSettings] = useState<GeneralSettings>(DEFAULT_GENERAL);
   const [confirmClear, setConfirmClear] = useState(false);
   const [clearingSessions, setClearingSessions] = useState(false);
+  /**
+   * The browser's profile, and whether its deletion has been armed.
+   *
+   * `null` rather than a default object, because "not read yet" and "read and it
+   * does not exist" are different things and the row says so: a profile that has
+   * never been created should not be described as empty.
+   */
+  const [browserProfile, setBrowserProfile] = useState<BrowserProfile | null>(null);
+  const [confirmForget, setConfirmForget] = useState(false);
+  const [forgetting, setForgetting] = useState(false);
   const [instructionExampleIndex, setInstructionExampleIndex] = useState(0);
   const [page, setPage] = useState<SettingsPage>({ view: "providers" });
   const [draft, setDraft] = useState<EndpointDraft>(blankEndpoint);
@@ -309,6 +341,23 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
       .catch(() => undefined);
     return () => { mounted = false; };
   }, [open, notify]);
+
+  /**
+   * The browser's profile, read each time the settings open.
+   *
+   * Read rather than held: it is a folder on disk, and whether it exists and how
+   * large it is both change while this window is shut -- a browse can create it,
+   * and the button below can empty it. A failure leaves the row saying nothing
+   * about a profile rather than describing one that may not be there.
+   */
+  useEffect(() => {
+    if (!open) return;
+    let mounted = true;
+    void invoke<BrowserProfile>("browser_profile_status")
+      .then((status) => { if (mounted) setBrowserProfile(status); })
+      .catch(() => { if (mounted) setBrowserProfile(null); });
+    return () => { mounted = false; };
+  }, [open]);
 
   /**
    * Re-read the engine list after the Engines page changes it.
@@ -468,6 +517,27 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
       notify("error", `Sessions could not be deleted: ${String(reason)}`);
     } finally {
       setClearingSessions(false);
+    }
+  };
+
+  // Armed and confirmed in two steps, for the same reason as the sessions button:
+  // what this destroys is a set of logins the user may not be able to recreate at
+  // a glance, so a stray click must not be able to do it.
+  const forgetBrowserProfile = async () => {
+    setForgetting(true);
+    try {
+      await invoke("browser_profile_forget");
+      setConfirmForget(false);
+      // Re-read rather than blank the row: the browser recreates the folder on its
+      // next use, and the row should describe the profile as it is now, not as the
+      // last read left it.
+      setBrowserProfile(await invoke<BrowserProfile>("browser_profile_status"));
+      notify("success", "Browser profile deleted. The next browse starts signed out.", "settings:browser-profile");
+    } catch (reason) {
+      setConfirmForget(false);
+      notify("error", `The browser profile could not be deleted: ${String(reason)}`, "settings:browser-profile");
+    } finally {
+      setForgetting(false);
     }
   };
 
@@ -890,6 +960,40 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                   />
                 </SettingsSection>
 
+                <SettingsSection title="Browser">
+                  <SettingRow
+                    label="Close when idle"
+                    description="How long the browser the agent drives is kept after the last page it opened. A shorter time means the next browse starts it again; a longer one leaves a window open behind everything else."
+                    control={
+                      <Segmented
+                        label="Close when idle"
+                        value={IDLE_LABELS[generalSettings.browserIdle]}
+                        options={["10 minutes", "30 minutes", "1 hour", "Never"]}
+                        onChange={(label) => {
+                          // The stored value is the token the backend parses, so the
+                          // label is mapped back rather than saved, in the same shape
+                          // the context setting above uses.
+                          const next = (Object.keys(IDLE_LABELS) as BrowserIdle[]).find((key) => IDLE_LABELS[key] === label) ?? "10m";
+                          updateGeneralSettings({ ...generalSettings, browserIdle: next });
+                        }}
+                      />
+                    }
+                  />
+                  <SettingRow
+                    label="Browser profile"
+                    description={
+                      browserProfile
+                        ? browserProfile.exists
+                          ? `Where the agent's sign-ins, cookies and history are kept: ${browserProfile.path} (${formatBytes(browserProfile.bytes)}). This is not your own browser's profile, and clearing it does not sign you out of anything.`
+                          : `The agent's browser has stored nothing yet. Its own profile is created at ${browserProfile.path} the first time it opens a page.`
+                        : "The agent's browser keeps cookies and sign-ins of its own, apart from your browser's."
+                    }
+                    control={
+                      <button type="button" disabled={forgetting || !browserProfile?.exists} onClick={() => setConfirmForget(true)} className="min-h-9 shrink-0 rounded-lg border border-[var(--line)] px-3 text-[13px] text-[var(--muted)] transition-colors hover:border-[var(--danger)] hover:bg-[var(--raised)] hover:text-[var(--danger)] disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]">Forget…</button>
+                    }
+                  />
+                </SettingsSection>
+
                 <SettingsSection title="Sessions">
                   <SettingRow
                     label="Clear all sessions"
@@ -997,6 +1101,16 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
           <div className="mt-5 flex justify-end gap-2">
             <button type="button" onClick={() => setConfirmClear(false)} disabled={clearingSessions} className="min-h-9 rounded-lg border border-[var(--line)] px-3.5 text-[13px] text-[var(--muted)] transition-colors hover:bg-[var(--raised)] disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]">Cancel</button>
             <button type="button" onClick={() => void clearSessions()} disabled={clearingSessions} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-[var(--danger)] px-3.5 text-[13px] font-semibold text-[var(--page)] transition-opacity hover:opacity-90 disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--danger)]">{clearingSessions && <LoaderCircle size={15} className="animate-spin" />}{clearingSessions ? "Deleting…" : "Delete all"}</button>
+          </div>
+        </section>
+      </div>}
+      {confirmForget && <div className="fixed inset-0 z-[150] grid place-items-center bg-black/65 p-4">
+        <section role="dialog" aria-modal="true" aria-labelledby="forget-profile-title" className="w-full max-w-sm rounded-lg border border-[var(--line)] bg-[var(--panel)] p-5 shadow-2xl" onKeyDown={(event) => { if (event.key === "Escape" && !forgetting) setConfirmForget(false); }}>
+          <h2 id="forget-profile-title" className="text-[17px] font-semibold tracking-tight">Forget the browser profile?</h2>
+          <p className="mt-2 text-[13px] leading-5 text-[var(--muted)]">This deletes the cookies, saved sign-ins and history the agent's browser has collected, and cannot be undone. You will stay signed in on your own browser; the agent will have to sign in again.</p>
+          <div className="mt-5 flex justify-end gap-2">
+            <button type="button" onClick={() => setConfirmForget(false)} disabled={forgetting} className="min-h-9 rounded-lg border border-[var(--line)] px-3.5 text-[13px] text-[var(--muted)] transition-colors hover:bg-[var(--raised)] disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]">Cancel</button>
+            <button type="button" onClick={() => void forgetBrowserProfile()} disabled={forgetting} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-[var(--danger)] px-3.5 text-[13px] font-semibold text-[var(--page)] transition-opacity hover:opacity-90 disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--danger)]">{forgetting && <LoaderCircle size={15} className="animate-spin" />}{forgetting ? "Deleting…" : "Forget"}</button>
           </div>
         </section>
       </div>}

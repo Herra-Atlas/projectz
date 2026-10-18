@@ -253,7 +253,7 @@ export default function JobEditor({
 
         <Field label="Access" hint="What this job's agent may use. A tool that is off is not offered to the model at all.">
           <div className="flex flex-wrap gap-x-5 gap-y-3 text-[13px]">
-            {(["read", "write", "terminal", "web", "subagents"] as const).map((capability) => (
+            {(["read", "write", "terminal", "web", "browser", "subagents"] as const).map((capability) => (
               <label key={capability} className="flex items-center gap-2 capitalize text-[var(--text)]">
                 <Toggle checked={draft.access[capability]} onChange={(value) => patch({ access: { ...draft.access, [capability]: value } })} label={capability} />
                 {capability}

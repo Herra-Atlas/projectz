@@ -52,6 +52,13 @@ export default function FileChanges({ steps, live, onOpenFile }: FileChangesProp
   if (!hasChanges(changes)) return null;
 
   const totals = totalChanges(changes);
+  // "Created" only when the work really was creation. A single created file names
+  // itself; a run says "Created N files" only if every one of them was new, since
+  // one edit among several makes the whole reply a change rather than a creation.
+  const summary =
+    changes.length === 1
+      ? `${changes[0].created ? "Created" : "Changed"} ${fileName(changes[0].path)}`
+      : `${changes.every((change) => change.created) ? "Created" : "Changed"} ${changes.length} files`;
   // A write still in flight carries no diff yet, so it contributes nothing here
   // and the row simply appears once the result lands. The spinner is the panel's
   // own convention for "this is happening", reused rather than invented.
@@ -69,7 +76,7 @@ export default function FileChanges({ steps, live, onOpenFile }: FileChangesProp
           {/* The write tool's own mark, so the row is recognisable as a write
               rather than as a summary invented by the app. */}
           <ToolIcon tool="write_file" />
-          <span className="shrink-0 text-[var(--muted)]">{changes.length === 1 ? `Changed ${fileName(changes[0].path)}` : `Changed ${changes.length} files`}</span>
+          <span className="shrink-0 text-[var(--muted)]">{summary}</span>
           {/* The totals, in the panel's `--quiet` rather than in the diff colours:
               the figures here sit among a dozen other rows, and a saturated
               green and red on every reply would outrank the answer they describe.

@@ -1,6 +1,6 @@
 [package]
 name = "projectz"
-version = "0.3.0"
+version = "0.3.3"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -33,6 +33,10 @@ tauri = { version = "2", features = ["tray-icon", "unstable"] }
 tauri-plugin-opener = "2.7"
 tauri-plugin-dialog = "2.8"
 tauri-plugin-notification = "2"
+# A second launch of the app is a request to see the window that is already open,
+# not to start a rival one. Registered first in the builder (see `lib.rs`): it must
+# run before `setup`, and on Windows before any other plugin, to hold the lock early.
+tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", features = ["json", "stream"] }
@@ -61,9 +65,24 @@ glob = "0.3"
 lopdf = "0.42"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 kestrel-rs = "11"
+# The browser tools speak the Chrome DevTools Protocol, which is JSON over a
+# WebSocket. This is the one crate the feature needs and it pulls in no TLS:
+# the socket is to `127.0.0.1`, so there is nothing to encrypt and nothing
+# extra to ship. See `browser/cdp.rs` for why the protocol half is hand-written
+# even so -- it is a handful of messages, and the awkward parts are ours to own.
+tokio-tungstenite = "0.24"
 # Optional: only with the `vulkan-query` feature, which is off by default. See the
 # feature note above.
 ash = { version = "0.38", optional = true }
+
+# Windows only. The driven browser is started as a child of this app and killed at
+# exit through `taskkill`, but a crash or a force-quit never reaches that path -- so
+# the browser is also placed in a job object whose limit kills it the moment this
+# process' last handle to the job closes, i.e. when the app dies however it dies.
+# Already in the tree as a transitive dependency of `tauri`; promoted to direct so
+# the browser owns the one guarantee it needs. See `src/browser/job.rs`.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

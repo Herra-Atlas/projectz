@@ -286,7 +286,10 @@ fn attach_searches(steps: &mut Vec<Value>, searches: &[WebSearchOutput]) {
 }
 
 /// Seconds from the first event to the last, as the panel's "Worked for".
-fn elapsed_seconds(events: &[Stamped]) -> f64 {
+///
+/// Shared with [`super::stats`], which reports the same span to the parent: one
+/// measure of "how long did this run take", used in both places it is shown.
+pub(crate) fn elapsed_seconds(events: &[Stamped]) -> f64 {
     let Some(first) = events.first() else {
         return 0.0;
     };

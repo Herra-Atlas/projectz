@@ -13,23 +13,48 @@
  */
 
 /**
- * A palette the app can render in. Each one has a matching `[data-theme=...]`
- * rule in `App.css`, and adding one means adding it in both places.
- */
-export type ThemeId = "dark" | "midnight" | "slate" | "forest" | "plum" | "light" | "paper" | "mist";
-
-/** What the user chose. `system` follows the operating system. */
-export type ThemeChoice = ThemeId | "system";
-
-/**
  * Which half of the palette scale a theme belongs to.
  *
  * Only used to pick an accent: a colour legible as text on near-black is not
  * legible as text on white, so each accent preset carries a value for each half
  * and a theme says which half it is. A new theme therefore costs no new accent
- * values -- it declares which side it is on.
+ * values -- it declares which side it is on, beside its own id below.
  */
 export type ThemeKind = "dark" | "light";
+
+/**
+ * The palettes the app can render in, in the order the picker shows them.
+ *
+ * **The one list.** A theme is declared here and in `App.css`, whose
+ * `[data-theme=...]` block holds its colour values; nothing else enumerates
+ * them. The id and the kind used to sit in two separate arrays, so a light theme
+ * added to one and forgotten in the other silently drew dark accents on a light
+ * ground. `ThemeId` below is derived from this list rather than restated beside
+ * it, so a theme cannot be half-added.
+ */
+export const THEMES = [
+  { id: "dark", label: "Dark", kind: "dark" },
+  { id: "midnight", label: "Midnight", kind: "dark" },
+  { id: "slate", label: "Slate", kind: "dark" },
+  { id: "forest", label: "Forest", kind: "dark" },
+  { id: "plum", label: "Plum", kind: "dark" },
+  { id: "ember", label: "Ember", kind: "dark" },
+  { id: "ocean", label: "Ocean", kind: "dark" },
+  { id: "light", label: "Light", kind: "light" },
+  { id: "paper", label: "Paper", kind: "light" },
+  { id: "mist", label: "Mist", kind: "light" },
+  { id: "sage", label: "Sage", kind: "light" },
+  { id: "blush", label: "Blush", kind: "light" },
+] as const satisfies readonly { id: string; label: string; kind: ThemeKind }[];
+
+/**
+ * A palette the app can render in. Each one has a matching `[data-theme=...]`
+ * rule in `App.css`, so adding one means adding it here *and* there.
+ */
+export type ThemeId = (typeof THEMES)[number]["id"];
+
+/** What the user chose. `system` follows the operating system. */
+export type ThemeChoice = ThemeId | "system";
 
 export type Appearance = {
   theme: ThemeChoice;
@@ -52,28 +77,47 @@ export const APPEARANCE_KEY = "app.appearance";
  */
 export const APPEARANCE_STORAGE_KEY = "projectz.appearance.v1";
 
-/** The themes offered, in the order the picker shows them. */
-export const THEMES: { id: ThemeId; label: string }[] = [
-  { id: "dark", label: "Dark" },
-  { id: "midnight", label: "Midnight" },
-  { id: "slate", label: "Slate" },
-  { id: "forest", label: "Forest" },
-  { id: "plum", label: "Plum" },
-  { id: "light", label: "Light" },
-  { id: "paper", label: "Paper" },
-  { id: "mist", label: "Mist" },
-];
-
 /** Every value `theme` may hold, for validating what was stored. */
 const THEME_CHOICES = new Set<string>([...THEMES.map((theme) => theme.id), "system"]);
 
-/** The themes whose ground is light. Named once, so `themeKind` cannot come to
-    a different conclusion about a theme than the list above it. */
-const LIGHT_THEMES: ThemeId[] = ["light", "paper", "mist"];
-
 /** Which half of the accent scale a theme draws from. */
 export function themeKind(theme: ThemeId): ThemeKind {
-  return LIGHT_THEMES.includes(theme) ? "light" : "dark";
+  return THEMES.find((entry) => entry.id === theme)?.kind ?? "dark";
+}
+
+/**
+ * The value for `<meta name="theme-color">` in a palette: the tint the operating
+ * system paints the window frame with.
+ *
+ * Derived from the kind rather than read from `App.css`, because the pre-paint
+ * script that needs it has no stylesheet to read. Stating it here is also what
+ * lets `index.html` stop naming the light themes itself -- it kept its own list,
+ * and had already missed `mist`.
+ */
+export function themeColor(theme: ThemeId): string {
+  return themeKind(theme) === "light" ? "#fbfbfc" : "#0e0e10";
+}
+
+/**
+ * What the native window frame is told to be.
+ *
+ * The OS draws the title bar and its buttons, not the webview, so unlike every
+ * other surface in the app this one cannot read a CSS token -- it is set through
+ * a Tauri command. It also only knows light and dark, never a palette: every
+ * theme collapses to one of these three.
+ */
+export type WindowTheme = ThemeKind | "system";
+
+/**
+ * The frame value for a choice. `system` follows the OS, which is exactly what a
+ * `system` theme means; a pinned theme becomes the half it belongs to.
+ *
+ * This is what stops Rust needing its own list of light themes. The value is
+ * stored beside the appearance record, so the frame is painted correctly on the
+ * next launch *before* the frontend runs -- see `useAppearance` and `window.rs`.
+ */
+export function windowTheme(choice: ThemeChoice): WindowTheme {
+  return choice === "system" ? "system" : themeKind(choice);
 }
 
 export type AccentPreset = {

@@ -54,6 +54,13 @@ use crate::database::Database;
 /// The settings key this lives under.
 pub const WINDOW_KEY: &str = "app.window";
 
+/// The settings key the appearance record lives under.
+///
+/// Mirrors `APPEARANCE_KEY` in `features/appearance/appearance.ts`. Read here for
+/// one field only -- the resolved frame theme the frontend stores beside the
+/// choice -- so Rust never has to keep its own list of which palettes are light.
+const APPEARANCE_KEY: &str = "app.appearance";
+
 /// The label of the window whose geometry is tracked.
 const WINDOW_LABEL: &str = "main";
 
@@ -316,6 +323,43 @@ pub fn persist(window: &WebviewWindow, database: &Database, previous: &WindowSta
     }
 }
 
+/// The window theme a `windowTheme` value names, or `None` to follow the OS.
+///
+/// `None` covers the `system` choice, a missing field and an unrecognised value
+/// alike: leaving the frame to the operating system is the safe direction, where
+/// pinning the wrong one is a visible mistake. Public because the
+/// `set_window_theme` command maps the same three values at runtime.
+pub fn frame_theme(name: Option<&str>) -> Option<tauri::Theme> {
+    match name {
+        Some("dark") => Some(tauri::Theme::Dark),
+        Some("light") => Some(tauri::Theme::Light),
+        _ => None,
+    }
+}
+
+/// Paints the native frame for the stored appearance, before the window is shown.
+///
+/// The title bar and its buttons are the OS's and are drawn the instant the
+/// window appears -- which is before the frontend runs. Reading the resolved
+/// value here is what stops a light theme opening under a dark frame for the
+/// moment the webview takes to catch up.
+pub fn apply_frame_theme(window: &WebviewWindow, database: &Database) {
+    let name = database
+        .setting::<serde_json::Value>(APPEARANCE_KEY)
+        .and_then(|record| {
+            record
+                .get("windowTheme")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        });
+    // Only when the frame is pinned. A `system` choice leaves it as configured,
+    // which already follows the operating system, rather than calling through to
+    // set nothing.
+    if let Some(theme) = frame_theme(name.as_deref()) {
+        let _ = window.set_theme(Some(theme));
+    }
+}
+
 /// Applies saved geometry to the window and shows it.
 ///
 /// Called once, from `setup`, before the window has ever been visible. Every
@@ -370,6 +414,10 @@ pub fn restore(window: &WebviewWindow, database: &Database) -> Option<WindowStat
     if state.maximized {
         let _ = window.maximize();
     }
+
+    // Set while the window is still hidden: the frame is painted the moment it
+    // appears, so this has to land before `show()` to be worth doing at all.
+    apply_frame_theme(window, database);
 
     // `unminimize` before `show`: a window left minimized by the last session
     // would otherwise be restored to a minimized rect and appear to open empty.

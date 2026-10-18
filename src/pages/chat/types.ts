@@ -82,6 +82,21 @@ export type AiEvent = {
     model?: string;
     provider?: string;
     started_at?: string;
+    /**
+     * A finished sub-agent's figures, carried on its `subagent_result` event so the
+     * parent's row can state what the delegated run cost and did.
+     *
+     * `used_tokens` counts every round the run made, so it is the run's real spend
+     * rather than its final request; it is absent when the provider reported no
+     * usage. The other three are always present -- they are counted from the run's
+     * own events, which the stored transcript does not keep.
+     */
+    stats?: {
+      used_tokens?: number;
+      tool_uses?: number;
+      turns?: number;
+      seconds?: number;
+    };
   };
 };
 

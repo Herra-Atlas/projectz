@@ -8,10 +8,11 @@
  * the single figure the header can state, and the per-file list under it.
  *
  * **Derived from the stored diff, never from a second count.** `ToolDiff` is
- * what the backend produced while it still held both versions of the file, so
- * the added and removed figures here are the same ones the diff view draws. A
- * count taken anywhere else would be a second implementation of a fact that
- * already exists, and the two would drift the first time a diff is capped.
+ * what the backend produced while it still held both versions of the file, and
+ * it now carries the whole change's added/removed totals beside the lines it
+ * could afford to draw — so a big write reports what it changed rather than the
+ * cap. A count taken anywhere else would be a second implementation of a fact
+ * that already exists, and the two would drift the first time a diff is capped.
  *
  * Only a successful write counts. A refused or failed call did not change
  * anything, and reporting its intended lines as changes would be a lie about
@@ -110,16 +111,22 @@ export function collectFileChanges(steps: ActivityStep[]): FileChange[] {
 }
 
 /**
- * Lines added and removed, read out of the diff's own kinds.
+ * Lines added and removed for one file.
  *
- * Counts `context` as neither, because a context line is present before and
- * after: it is the run of unchanged lines the changes sit in, not part of the
- * change. `hidden` is deliberately ignored — it is lines the backend left out
- * of the diff to keep it small, so counting them would be inventing a figure.
- * The panel says a diff was capped where it draws one; this figure is what is
- * actually shown, which is the honest number.
+ * Prefers the backend's own totals, which cover the whole change including the
+ * lines its cap left out of `lines`. Counting the drawn lines instead capped the
+ * figure at that cap — a 500-line file the agent created read "+200" — which is
+ * the one number a reader takes at face value.
+ *
+ * A diff stored before those totals existed carries only `lines`, so the count
+ * is recovered from them rather than reading as an unchanged file. There the
+ * cap still under-reports, which is the honest limit of what was stored; context
+ * lines are never counted, because they are present before and after.
  */
 function countLines(diff: ToolDiff): { added: number; removed: number } {
+  if (diff.added !== undefined && diff.removed !== undefined) {
+    return { added: diff.added, removed: diff.removed };
+  }
   let added = 0;
   let removed = 0;
   for (const line of diff.lines) {

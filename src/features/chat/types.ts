@@ -83,6 +83,34 @@ export type ToolStep = {
    * for "Created" would break silently the day the wording changes.
    */
   created?: boolean;
+  /**
+   * The figures behind a delegated run, present only on a `sub_agent` row.
+   *
+   * A sub-agent's own totals, shown under its report so the run can be judged from
+   * the reply that spawned it rather than by opening the Sub agents panel. Set when
+   * the run reports back -- see `subagent_result` -- and stored with the step, so a
+   * reopened conversation still states them.
+   */
+  stats?: ToolStepStats;
+};
+
+/**
+ * What a delegated run cost and did, as its own event reported it.
+ *
+ * `tokens` counts every round the run made, so it is the run's real spend rather
+ * than its final request; it is absent when the provider reported no usage, and an
+ * unknown cost is left out rather than shown as zero. The rest are counted from
+ * the run's own events.
+ */
+export type ToolStepStats = {
+  /** Tokens billed across the run, absent when the provider reported no usage. */
+  tokens?: number;
+  /** Tool calls the run made. */
+  toolUses: number;
+  /** Rounds the run took, one per request to the model. */
+  turns: number;
+  /** Seconds from the run's first event to its last. */
+  seconds: number;
 };
 
 /**
@@ -108,6 +136,16 @@ export type ToolDiff = {
   lines: DiffLine[];
   /** Lines left out by the backend's cap, so a truncated diff admits it. */
   hidden?: number;
+  /**
+   * Added and removed lines over the whole change, before the cap.
+   *
+   * The authoritative count for the file-changes summary: `lines` is only the
+   * part that survived the backend's cap, so counting it reported "+200" for a
+   * 500-line creation. Optional because a transcript stored before this existed
+   * carries only `lines`, and the count falls back to reading them.
+   */
+  added?: number;
+  removed?: number;
 };
 
 /**
