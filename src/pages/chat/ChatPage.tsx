@@ -769,6 +769,28 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           sessionRunIdsRef.current.delete(run.sessionId);
         }
       };
+      // The backend compacted the request before this reply's first call. The
+      // notice belongs in the transcript, marked hidden: it is drawn as a centred
+      // line, and adding it to the run's own base means every terminating path --
+      // completed, failed, stopped, unmount -- writes it without a second rule.
+      if (payload.kind === "compaction") {
+        // A hidden `user` turn rather than an assistant one: the model should not
+        // be shown a message it did not write, and two assistant turns in a row
+        // are a shape some providers reject.
+        const notice: ChatMessage = {
+          role: "user",
+          content: payload.text || "Context was compacted to keep this reply within the model's window.",
+          hidden: true,
+        };
+        run.baseMessages = [...run.baseMessages, notice];
+        if (isActive) {
+          const next = [...messagesRef.current, notice];
+          messagesRef.current = next;
+          setMessages(next);
+          autoFollowRef.current = true;
+        }
+        return;
+      }
       // A message typed while this conversation was answering is sent now that the
       // reply has ended -- through the shared `drainQueued`, which the stop handler
       // also uses. Matched by session, so a message queued for one conversation is
@@ -972,8 +994,12 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         // then the stored message keeps only the last round's figure.
         const usedPromptTokens = payload.metrics?.used_prompt_tokens;
         const usedCompletionTokens = payload.metrics?.used_completion_tokens;
-        const next = [...run.baseMessages, { role: "assistant" as const, content: response, reasoning: run.reasoning || undefined, ...(run.activity.length > 0 ? { activity: run.activity } : {}), modelId: run.modelLabel, providerId: run.providerLabel, metrics: { prompt_seconds: promptSeconds, generation_seconds: generationSeconds, elapsed_seconds: elapsedSeconds, tokens_per_second: generationTokensPerSecond, generation_rate_estimated: payload.metrics?.generation_tokens_per_second == null, completion_tokens: completionTokens, ...(promptTokens !== undefined ? { prompt_tokens: promptTokens } : {}), ...(usedPromptTokens !== undefined ? { used_prompt_tokens: usedPromptTokens } : {}), ...(usedCompletionTokens !== undefined ? { used_completion_tokens: usedCompletionTokens } : {}), ...(promptEvalTokensPerSecond !== undefined ? { prompt_eval_tokens_per_second: promptEvalTokensPerSecond } : {}) } }];
+        // Closed **before** the message is built. A step still open when the run
+        // ended would otherwise be stored as running forever -- and the stored
+        // activity is what the next request's tool recap is derived from, so the
+        // model would read a call that never finished.
         finishRun();
+        const next = [...run.baseMessages, { role: "assistant" as const, content: response, reasoning: run.reasoning || undefined, ...(run.activity.length > 0 ? { activity: run.activity } : {}), modelId: run.modelLabel, providerId: run.providerLabel, metrics: { prompt_seconds: promptSeconds, generation_seconds: generationSeconds, elapsed_seconds: elapsedSeconds, tokens_per_second: generationTokensPerSecond, generation_rate_estimated: payload.metrics?.generation_tokens_per_second == null, completion_tokens: completionTokens, ...(promptTokens !== undefined ? { prompt_tokens: promptTokens } : {}), ...(usedPromptTokens !== undefined ? { used_prompt_tokens: usedPromptTokens } : {}), ...(usedCompletionTokens !== undefined ? { used_completion_tokens: usedCompletionTokens } : {}), ...(promptEvalTokensPerSecond !== undefined ? { prompt_eval_tokens_per_second: promptEvalTokensPerSecond } : {}) } }];
         onActivityRef.current(run.sessionId, isActive ? null : "done");
         onMessagesChangeRef.current(run.sessionId, next);
         if (isActive) {
@@ -1033,8 +1059,12 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         const message = payload.error || payload.text || "The provider could not complete this response.";
         if (isActive) onNotify("error", message);
         run.text = run.text ? `${run.text}\n\nRequest failed: ${message}` : `Request failed: ${message}`;
-        const next = [...run.baseMessages, { role: "assistant" as const, content: run.text, reasoning: run.reasoning || undefined, ...(run.activity.length > 0 ? { activity: run.activity } : {}), modelId: run.modelLabel, providerId: run.providerLabel }];
+        // Same rule as a completed reply: close the steps before storing them, so
+        // the work that did happen is recorded as finished rather than as a row
+        // still counting. This is what the next request's recap is built from,
+        // which is how the model knows an action it already took must not repeat.
         finishRun();
+        const next = [...run.baseMessages, { role: "assistant" as const, content: run.text, reasoning: run.reasoning || undefined, ...(run.activity.length > 0 ? { activity: run.activity } : {}), modelId: run.modelLabel, providerId: run.providerLabel }];
         onActivityRef.current(run.sessionId, isActive ? null : "error");
         onMessagesChangeRef.current(run.sessionId, next);
         if (isActive) {
@@ -1544,19 +1574,61 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   // of truth: a bare `/word` that names no command yet opens the menu, and a
   // draft that *is* a command closes it and is drawn as a link instead.
   const slashTyped = slashQuery(input);
+  // A draft that *is* a finished command keeps the menu open while the field still has
+  // focus: `/compact` is a valid name the moment it is typed, and closing the list there
+  // left the user pressing Enter on a suggestion they could no longer see. The link styling
+  // still says it is a command rather than prose, and Enter picks the highlighted row --
+  // which, for an exact draft, is the only row it can be.
   const slashExact = exactCommand(input);
-  const slashMatches =
-    slashTyped !== null && slashExact === null ? matchCommands(slashTyped) : [];
+  const slashMatches = slashTyped !== null ? matchCommands(slashTyped) : [];
   const slashActive = slashMatches.length > 0 ? Math.min(slashIndex, slashMatches.length - 1) : 0;
+
+  /**
+   * Compacts the conversation on screen, on the user's word.
+   *
+   * The backend writes the trimmed transcript and hands back the rows to draw, which is why
+   * this is not a UI-only action: what the user is looking at and what the model will be
+   * sent are the same rows afterwards. An empty array is "nothing to elide", which is a
+   * success -- the conversation was already compact -- rather than a failure to report.
+   */
+  const compactSession = async () => {
+    const sessionId = sessionIdRef.current;
+    if (!sessionId) {
+      onNotify("error", "Open a conversation before compacting it.");
+      return;
+    }
+    if (sessionLoadingRef.current) {
+      onNotify("error", "Still loading this conversation. Try again in a moment.");
+      return;
+    }
+    try {
+      const next = await invoke<ChatMessage[]>("ai_compact_session", { sessionId });
+      if (next.length > 0) {
+        // The ref is what the next send reads, so it is replaced with the same rows the
+        // transcript now shows -- a queued message must not carry the pre-compaction
+        // transcript back to the provider.
+        messagesRef.current = next;
+        setMessages(next);
+        persistMessages(sessionId, next);
+        autoFollowRef.current = true;
+        onNotify("success", "Conversation compacted");
+      } else {
+        onNotify("success", "Nothing to compact in this conversation");
+      }
+    } catch (reason) {
+      onNotify("error", `Could not compact: ${String(reason)}`);
+    }
+  };
 
   /** Runs a command and clears the draft, because a command is not a message. */
   const runSlashCommand = (command: SlashCommand) => {
-    // The menu carries a placeholder while there are no commands: a row to look
-    // at, not one to run. When a real command lands, its action runs here.
     if (command.disabled) return;
     setInput("");
     setSlashIndex(0);
     inputRef.current?.focus();
+    // Keyed by name rather than by a callback on the command: the registry stays pure data,
+    // and the one component that owns the state a command touches switches on it.
+    if (command.name === "compact") void compactSession();
   };
 
   const handleSubmit = (event: React.FormEvent) => {

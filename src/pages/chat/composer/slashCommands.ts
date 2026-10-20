@@ -28,16 +28,17 @@ export type SlashCommand = {
 /**
  * The commands offered, in menu order.
  *
- * No real commands yet. Nothing has earned a place here -- a command that only
- * repeats a control already sitting beside the field is a second door into the
- * same room -- so the menu holds a placeholder until something does.
+ * Each one has to be something that has no control beside the field. `/compact` is the
+ * first because it is the clearest case: automatic compaction only fires from inside a
+ * reply, at 80% of the window, and a user who can feel a conversation getting heavy had no
+ * way to act on that between replies. A command that only repeated a button would be a
+ * second door into the same room; this one is the only door.
  */
 export const SLASH_COMMANDS: SlashCommand[] = [
   {
-    name: "soon",
-    label: "Nothing here yet",
-    hint: "Commands will land here",
-    disabled: true,
+    name: "compact",
+    label: "Compact this conversation",
+    hint: "Trim old tool output so the next reply fits its window",
   },
 ];
 

@@ -7,6 +7,7 @@ import { NEW_DRAFT, draftFrom, serverFrom } from "../features/mcp/draft";
 import { useMcpServers } from "../features/mcp/useMcpServers";
 import McpServerForm from "./mcp/McpServerForm";
 import McpServerRow from "./mcp/McpServerRow";
+import { ANCHOR_ATTRIBUTE, FlashHighlight, SettingsPageTitle } from "./SettingsSection";
 
 /**
  * Settings → MCP servers.
@@ -69,8 +70,8 @@ export default function McpSettingsPage({ notify }: { notify: Notify }) {
 
   return (
     <>
-      <div className="mb-6 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-5">
-        <h2 className="text-[17px] font-semibold tracking-tight">MCP servers</h2>
+      <SettingsPageTitle>
+        <h2 className="text-[17px] font-semibold tracking-tight" {...{ [ANCHOR_ATTRIBUTE]: "mcp.servers" }}>MCP servers</h2>
         <div className="flex items-center gap-2">
           <button
             type="button"
@@ -87,11 +88,12 @@ export default function McpSettingsPage({ notify }: { notify: Notify }) {
             onClick={() => setDraft({ ...NEW_DRAFT })}
             className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 text-[13px] font-medium text-[var(--text)] transition-colors hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
           >
+            <FlashHighlight anchor="mcp.servers" />
             <Plus size={15} />
             Add server
           </button>
         </div>
-      </div>
+      </SettingsPageTitle>
 
       {loading ? (
         <p className="flex items-center gap-2 text-[13px] text-[var(--muted)]">
@@ -99,11 +101,11 @@ export default function McpSettingsPage({ notify }: { notify: Notify }) {
           Loading servers…
         </p>
       ) : servers.length === 0 ? (
-        <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-4 py-7">
+        <div className="px-4 py-7">
           <p className="text-sm text-[var(--muted)]">No MCP servers yet.</p>
         </div>
       ) : (
-        <div className="divide-y divide-[var(--line)] overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--panel)]">
+        <div className="divide-y divide-[var(--line)]">
           {servers.map((server) => (
             <McpServerRow
               key={server.id}

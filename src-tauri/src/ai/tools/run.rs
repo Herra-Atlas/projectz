@@ -82,6 +82,8 @@ pub struct RunHandle {
     /// delegated conversation can grow just as long, and it should not fall back
     /// to a default that disagrees with the setting the user chose.
     pub compaction: crate::ai::compact::Compaction,
+    /// The loaded local model's usable context window, when available.
+    pub local_context_window: Option<u64>,
     /// How many jobs this run has scheduled.
     ///
     /// Per run rather than per conversation, so the ceiling is on what one reply may

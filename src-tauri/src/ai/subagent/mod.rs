@@ -244,6 +244,17 @@ async fn run_agent(task: AgentTask) {
         content: prompt::instruction(kind, &label, &prompt),
     }];
 
+    let context_window = if endpoint.id == crate::ai::local::LOCAL_ENDPOINT_ID {
+        run.local_context_window
+    } else {
+        context
+            .database
+            .as_ref()
+            .and_then(|database| database.model_capabilities(&endpoint.id, &model).ok())
+            .and_then(|capabilities| capabilities.context_length)
+            .and_then(|context| u64::try_from(context).ok())
+    };
+
     let result = stream_chat(
         &endpoint,
         &model,
@@ -276,6 +287,9 @@ async fn run_agent(task: AgentTask) {
         // The parent's compaction setting, so a long delegated run compacts the
         // same way the conversation that started it does.
         run.compaction,
+        context_window,
+        run.local_context_window,
+        None,
         false,
         on_event,
         on_search,
@@ -439,6 +453,7 @@ mod tests {
             subagent_default,
             vision_model: None,
             compaction: crate::ai::compact::Compaction::Normal,
+            local_context_window: None,
             jobs_created: std::sync::atomic::AtomicUsize::new(0),
         })
     }

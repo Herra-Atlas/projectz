@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { ArrowUpDown, Brain, ChevronLeft, ChevronRight, Coins, Globe2, MessageSquare, MessageSquareText, Zap } from "lucide-react";
+import { ArrowUpDown, Brain, ChevronLeft, ChevronRight, Coins, Fingerprint, Globe2, Lightbulb, MessageSquare, MessageSquareText, Zap } from "lucide-react";
 import { formatTokens } from "../../features/chat/sessionStats";
 import type { UsageReport } from "../../features/statistics/types";
 import { FigureCard } from "./FigureCard";
@@ -26,6 +26,13 @@ const figuresFor = (report: UsageReport | null): Figure[] => {
   return [
     { icon: <MessageSquareText size={15} />, label: "Conversations", value: report.sessions.toLocaleString() },
     { icon: <Coins size={15} />, label: "Total tokens", value: formatTokens(report.total_tokens) },
+    // Assist has its own figure rather than being folded into "Total tokens". It is not a
+    // conversation, and a total that quietly included it would answer a question nobody
+    // asked -- so the two are shown side by side and can be read against each other.
+    { icon: <Lightbulb size={15} />, label: "Assist tokens", value: formatTokens(report.assist_total_tokens) },
+    // Taste is its own feature with its own run table, so it gets its own figure
+    // beside Assist rather than disappearing into the conversation total.
+    { icon: <Fingerprint size={15} />, label: "Taste tokens", value: formatTokens(report.taste_total_tokens) },
     { icon: <ArrowUpDown size={15} />, label: "Input tokens", value: formatTokens(report.prompt_tokens) },
     { icon: <ArrowUpDown size={15} />, label: "Output tokens", value: formatTokens(report.completion_tokens) },
     { icon: <MessageSquare size={15} />, label: "Messages sent", value: report.user_messages.toLocaleString() },

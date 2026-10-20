@@ -1,4 +1,5 @@
 mod ai;
+mod assist;
 mod browser;
 mod commands;
 mod database;
@@ -7,6 +8,7 @@ mod jobs;
 mod mcp;
 mod observation;
 mod panel;
+mod taste;
 mod websearch;
 mod window;
 
@@ -37,6 +39,29 @@ pub fn sync_jobs_toggle(app: &tauri::AppHandle, paused: bool) {
     } else {
         "Jobs running"
     });
+}
+
+/// The tray's assist item, held in app state.
+///
+/// The third door into the same switch as the Settings row and the extension's
+/// own popup. Held here for the reason the jobs item is: whichever door moves it,
+/// the other two have to be told, and the item that only knows about its own
+/// clicks is the one that shows the user the wrong thing.
+#[derive(Clone)]
+pub struct AssistToggle(pub CheckMenuItem<tauri::Wry>);
+
+/// Puts the assist switch on the tray item.
+///
+/// Labelled with the situation rather than the action, like the jobs item: the
+/// reader is told what is true now, and the tick says whether it is on.
+pub fn sync_assist_toggle(app: &tauri::AppHandle, enabled: bool) {
+    let Some(item) = app.try_state::<AssistToggle>() else {
+        return;
+    };
+    let _ = item.0.set_checked(enabled);
+    let _ = item
+        .0
+        .set_text(if enabled { "Assist on" } else { "Assist off" });
 }
 
 /// Brings the main window up and in front.
@@ -108,6 +133,30 @@ pub fn run() {
             // it starts needs the runtime while a command may be using the same
             // entry, and a clone is what keeps those two from borrowing one.
             let scheduler = jobs::Scheduler::start(app.handle().clone(), runtime.clone());
+            // The assist watcher: settings, the dedupe memory, and the socket the
+            // browser extension pairs with. Started before the runtime is managed
+            // for the same reason the scheduler is -- the bridge task holds its own
+            // clone, so a run it answers never borrows the entry a command is using.
+            //
+            // The extension folder is what the setup page hands over as a download, so
+            // it is resolved from the source tree in development, and simply absent in a
+            // build that did not ship it -- which the page states rather than offering a
+            // link that would 404.
+            let extension_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("extension")
+                .canonicalize()
+                .ok()
+                .filter(|path| path.is_dir());
+            let assist = assist::Assist::new(std::sync::Arc::clone(&database), extension_dir);
+            app.manage(assist.clone());
+            assist.start(app.handle().clone(), runtime.clone());
+            // The learner. Its cache is primed here and refreshed again once the
+            // database has been migrated by `database_initialize`, because setup
+            // runs before the frontend asks for that.
+            let taste = taste::Taste::new(std::sync::Arc::clone(&database));
+            app.manage(taste.clone());
+            taste.start(app.handle().clone(), runtime.clone());
             app.manage(runtime);
             app.manage(scheduler);
             // Reaches the configured MCP servers once, in the background. Not
@@ -138,6 +187,19 @@ pub fn run() {
             // the reader to work out what is true now.
             let jobs_item =
                 CheckMenuItem::with_id(app, "jobs", "Jobs running", true, true, None::<&str>)?;
+            // Read from the stored record rather than defaulted to off, so a user
+            // who left assist on finds the tray telling the truth at launch. On the
+            // very first launch the table does not exist yet and the default -- off
+            // -- is what is read, which is the same answer.
+            let assist_on = assist::AssistSettings::load(database.as_ref()).enabled;
+            let assist_item = CheckMenuItem::with_id(
+                app,
+                "assist",
+                if assist_on { "Assist on" } else { "Assist off" },
+                true,
+                assist_on,
+                None::<&str>,
+            )?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(
                 app,
@@ -145,6 +207,7 @@ pub fn run() {
                     &show,
                     &PredefinedMenuItem::separator(app)?,
                     &jobs_item,
+                    &assist_item,
                     &PredefinedMenuItem::separator(app)?,
                     &quit,
                 ],
@@ -159,6 +222,7 @@ pub fn run() {
             // click would raise a menu over it.
             let jobs_toggle = jobs_item.clone();
             app.manage(JobsToggle(jobs_toggle.clone()));
+            app.manage(AssistToggle(assist_item.clone()));
             tray.show_menu_on_left_click(false)
                 .on_menu_event(move |app, event| match event.id().as_ref() {
                     "show" => show_main(app),
@@ -176,6 +240,19 @@ pub fn run() {
                             "job-event",
                             serde_json::json!({ "status": "paused", "paused": pause }),
                         );
+                    }
+                    "assist" => {
+                        // Read the stored value rather than the item's own tick, so
+                        // the tray, the Settings row and an extension popup all
+                        // move one fact -- and an item that is somehow out of step
+                        // corrects itself here instead of inverting the wrong way.
+                        let Some(assist) = app.try_state::<assist::Assist>() else {
+                            return;
+                        };
+                        let enabled = !assist.settings().enabled;
+                        if let Err(error) = assist.set_enabled(app, enabled) {
+                            tracing::warn!(%error, "the assist switch could not be moved");
+                        }
                     }
                     "quit" => {
                         if let Some(runtime) = app.try_state::<ai::runtime::AiRuntime>() {
@@ -221,12 +298,24 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::ai_chat,
             commands::ai_cancel_chat,
+            commands::ai_compact_session,
             commands::ai_set_run_permission,
             commands::ai_skip_local_reasoning,
             commands::ai_answer_approval,
             commands::ai_answer_question,
             commands::ai_set_viewed_session,
             commands::ai_generate_title,
+            commands::assist_status,
+            commands::assist_settings,
+            commands::assist_save_settings,
+            commands::assist_set_enabled,
+            commands::taste_status,
+            commands::taste_save_settings,
+            commands::taste_run_now,
+            commands::taste_runs,
+            commands::taste_update_item,
+            commands::taste_delete_item,
+            commands::taste_reset,
             commands::skills_list,
             commands::skills_enabled,
             commands::skills_create,

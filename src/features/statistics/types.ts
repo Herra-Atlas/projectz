@@ -59,4 +59,33 @@ export type UsageReport = {
   session_usage: SessionUsage[];
   models: ModelUsage[];
   model_timeline: ModelBucket[];
+  /**
+   * What assist spent, in its own figures.
+   *
+   * Apart from the conversation totals on purpose: an assist answer is not a
+   * conversation, so a "total tokens" that quietly included it would answer a question
+   * nobody asked. `assist_requests` is counted rather than derived from the token
+   * columns, because a request whose provider reported nothing still happened.
+   */
+  assist_prompt_tokens: number;
+  assist_completion_tokens: number;
+  assist_total_tokens: number;
+  assist_requests: number;
+  assist_models: ModelUsage[];
+  /** Assist's own per-model series, the same shape `model_timeline` is drawn from. */
+  assist_timeline: ModelBucket[];
+  /**
+   * What taste spent, in its own figures.
+   *
+   * A learning run is neither a conversation nor an assist answer, so it is
+   * reported beside both rather than folded into either. `taste_runs` counts
+   * attempts, including a skipped or failed one that reported no tokens.
+   */
+  taste_prompt_tokens: number;
+  taste_completion_tokens: number;
+  taste_total_tokens: number;
+  taste_runs: number;
+  taste_models: ModelUsage[];
+  /** Taste's own per-model series, drawn by the same chart as the other views. */
+  taste_timeline: ModelBucket[];
 };

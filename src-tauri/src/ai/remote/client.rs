@@ -19,7 +19,7 @@ use crate::ai::types::{ChatAttachment, ChatEvent, ChatMessage, ReasoningEffort};
 #[cfg(test)]
 mod tests {
     use super::{
-        accumulate_usage, budget_notice, merge_round_usage, BUDGET_FINAL_REMAINING,
+        accumulate_usage, budget_notice, finish_reason, merge_round_usage, BUDGET_FINAL_REMAINING,
         REQUEST_ATTEMPTS,
     };
     use crate::ai::types::ReasoningEffort;
@@ -31,6 +31,23 @@ mod tests {
     #[test]
     fn a_request_is_retried_exactly_once() {
         assert_eq!(REQUEST_ATTEMPTS, 2);
+    }
+
+    /// **A reply cut off at the ceiling is told apart from one that finished.** Neither the text
+    /// nor the usage figures carry it, and it is the difference between a bad sample worth asking
+    /// again and a request that does not fit -- which is what the caller decides on.
+    #[test]
+    fn the_stop_reason_is_read_from_whichever_field_the_provider_used() {
+        let stopped = json!({ "choices": [{ "finish_reason": "stop" }] });
+        assert_eq!(finish_reason(&stopped), Some("stop"));
+        let cut_off = json!({ "choices": [{ "finish_reason": "length" }] });
+        assert_eq!(finish_reason(&cut_off), Some("length"));
+        // A provider that reports nothing at all is `None` rather than a guess.
+        assert_eq!(
+            finish_reason(&json!({ "choices": [{ "message": {} }] })),
+            None
+        );
+        assert_eq!(finish_reason(&json!({})), None);
     }
 
     /// The budget is stated, and the last one is an instruction to answer.
@@ -217,6 +234,9 @@ pub async fn stream_chat(
     // How aggressively to elide old context before sending. Read from the stored
     // preference by the runtime and carried on the request, like `reasoning`.
     compaction: crate::ai::compact::Compaction,
+    context_window: Option<u64>,
+    local_context_window: Option<u64>,
+    previous_prompt_tokens: Option<u64>,
     // Whether a spawned sub-agent may itself spawn. `false` for a sub-agent's own
     // run, which is what keeps delegation one level deep.
     allow_subagents: bool,
@@ -251,10 +271,26 @@ pub async fn stream_chat(
     // See `ToolCache::next_stamp`.
 
     let mut conversation = prepend_environment(payload, mode, database);
-    // Elide old context before the first send, so a conversation reopened from a
-    // long history does not fail on its own length. The transcript in the database
-    // is untouched; only this request's copy of it is trimmed.
-    crate::ai::compact::apply(&mut conversation, compaction);
+    // **Compaction is a boundary, never a step.** It is decided once, from the
+    // previous reply's measured prompt size, before this run sends anything. The
+    // loop below deliberately does not re-check it: a run that crosses 80%
+    // part-way through is still using the tool output it just received, and
+    // eliding that mid-work would remove the evidence the model is reasoning over.
+    // A long run is bounded by its step budget and by each tool result's own cap.
+    if crate::ai::compact::should_compact(compaction, previous_prompt_tokens, context_window) {
+        crate::ai::compact::apply(&mut conversation, compaction);
+        // Tell the transcript. The user asked to see this the way a finished
+        // sub-agent is shown, rather than discovering later that context moved.
+        on_event(ChatEvent {
+            run_id: run_id.to_string(),
+            session_id: None,
+            sequence: 0,
+            kind: "compaction".into(),
+            text: Some(crate::ai::compact::notice(compaction).to_string()),
+            error: None,
+            metrics: None,
+        });
+    }
     let mut usage = Value::Null;
     // Tools are advertised on every round rather than only the first. A model
     // that finishes a turn after using a tool has still seen the schema, so
@@ -284,6 +320,7 @@ pub async fn stream_chat(
         subagent_default,
         vision_model: vision_default,
         compaction,
+        local_context_window,
         // Counted per run, so the ceiling is on what this reply may arrange.
         jobs_created: std::sync::atomic::AtomicUsize::new(0),
     });
@@ -1319,6 +1356,16 @@ fn prepend_environment(
             sections.push(catalogue);
         }
     }
+    // What ProjectZ has learned about the user. Both modes get it: it is context
+    // about the person, not a fact about the machine, and a Chat run is exactly
+    // where a preference about tone or a known interest is useful.
+    //
+    // The block is a cached string, refreshed only when the profile changes (a run,
+    // a switch, a reset). It must stay byte-identical between requests or the
+    // provider's cached prefix is thrown away for no new information.
+    if let Some(taste) = crate::taste::cached_prompt() {
+        sections.push(taste);
+    }
     if sections.is_empty() {
         return messages;
     }
@@ -1329,21 +1376,88 @@ fn prepend_environment(
     messages
 }
 
-/// Run a single non-streaming completion and return the message text.
+/// The token figures a non-streaming reply reported.
 ///
-/// Used for short internal tasks such as generating a conversation title,
-/// where there is no UI to stream into and no need for events or tools.
+/// Read from the response to one short internal request -- a title, an assist decision --
+/// where there is no stream to count events from. Both callers of the plain
+/// [`complete_once`] ignore these; assist keeps them, because what it spends is a figure the
+/// user asked to see.
 ///
-/// `max_tokens` is passed through because an uncapped request lets a reasoning
-/// model deliberate at length before answering, and every token beyond the few
-/// words the task needs is latency the caller waits for. It is an `Option` so a
-/// caller with no natural limit can still omit it.
-pub async fn complete_once(
+/// Every field is an `Option` because "the provider did not say" and "the provider spent
+/// nothing" are different facts, and the statistics page has to be able to tell them apart:
+/// a default of zero would turn an unknown into a measurement.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ReportedUsage {
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub cached_tokens: Option<u64>,
+}
+
+impl ReportedUsage {
+    /// Adds one attempt's figures to another's.
+    ///
+    /// Written out rather than derived, because the arithmetic is not the obvious one: two
+    /// attempts where only one reported a prompt count must report *that* count -- not twice
+    /// it, and not nothing. Summing is what a retry needs: both attempts were really sent,
+    /// and both were really paid for.
+    pub fn plus(self, other: Self) -> Self {
+        let add = |left: Option<u64>, right: Option<u64>| match (left, right) {
+            (Some(left), Some(right)) => Some(left + right),
+            (Some(value), None) | (None, Some(value)) => Some(value),
+            (None, None) => None,
+        };
+        Self {
+            prompt_tokens: add(self.prompt_tokens, other.prompt_tokens),
+            completion_tokens: add(self.completion_tokens, other.completion_tokens),
+            cached_tokens: add(self.cached_tokens, other.cached_tokens),
+        }
+    }
+}
+
+/// Whether the model may think before it answers.
+///
+/// **Not a preference.** Every caller wants thinking allowed -- a model that reasons is a better
+/// model, and nothing here should take that away. The single exception is the second attempt of an
+/// assist request whose first reply was cut off at the token ceiling *while the model was still
+/// thinking*: repeating that request unchanged is repeating something that has already been shown
+/// not to fit, so the retry is made without the thinking instead. See `assist::decide`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Thinking {
+    Allow,
+    /// The salvage attempt: thinking off, by both of the switches a server might have.
+    Suppress,
+}
+
+/// Runs one non-streaming completion and returns what it said *and* what it cost.
+///
+/// The plain [`complete_once`] below is this with the figures dropped, so there is one
+/// implementation of the request and one opinion about where a provider puts its usage.
+pub async fn complete_once_with_usage(
     endpoint: &Endpoint,
     model: &str,
     messages: &[Value],
     max_tokens: Option<u32>,
-) -> Result<String, String> {
+) -> Result<(String, ReportedUsage), String> {
+    let (content, usage, _) =
+        complete_once_raw(endpoint, model, messages, max_tokens, Thinking::Allow).await?;
+    Ok((content, usage))
+}
+
+/// The same request, with the provider's own response kept.
+///
+/// [`complete_once_with_usage`] keeps only the text a caller can act on, which is everything a
+/// caller normally wants. This keeps the payload that text was read out of, for the one caller
+/// that has to explain a reply it could not use: `reasoning_content` is a *fallback* there, so a
+/// provider that sent both loses its thinking, and `finish_reason` -- cut off by `max_tokens`,
+/// stopped by a filter -- is not in the text at all. The request itself is identical, and there
+/// is one implementation of it.
+pub async fn complete_once_raw(
+    endpoint: &Endpoint,
+    model: &str,
+    messages: &[Value],
+    max_tokens: Option<u32>,
+    thinking: Thinking,
+) -> Result<(String, ReportedUsage, Value), String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .build()
@@ -1354,12 +1468,20 @@ pub async fn complete_once(
     // There is no single value that works everywhere, and sending a wrong one
     // fails the whole request with HTTP 400. The title task is small and
     // `max_tokens` is what keeps it short, so the field is simply not sent.
-    let body = json!({
+    let mut body = json!({
         "model": model,
         "messages": messages,
         "stream": false,
         "max_tokens": max_tokens,
     });
+    if thinking == Thinking::Suppress {
+        // llama.cpp's own switch, for a template that has one (Qwen3's, MiniCPM's and others), and
+        // sent **only** on a salvage attempt. The portability argument above does not apply here:
+        // that request has already failed once, so a field this server does not know is either
+        // ignored -- which is what an unknown field does everywhere -- or it fails a request that
+        // was going to fail the same way again. Nothing is sent on the first attempt.
+        body["chat_template_kwargs"] = json!({ "enable_thinking": false });
+    }
     // Same single retry as the streaming path: a short internal completion can
     // meet a transient provider fault just as a reply can.
     let response = send_request(&client, endpoint, &body).await?;
@@ -1375,7 +1497,57 @@ pub async fn complete_once(
         .or_else(|| payload["choices"][0]["message"]["reasoning_content"].as_str())
         .unwrap_or_default()
         .to_string();
-    Ok(content)
+    // Read here rather than by each caller, so the one place that knows a provider's shape
+    // is the one place that reads its figures -- including the cache token, which several
+    // providers spell differently and which `stream_event` already knows how to find.
+    let usage = ReportedUsage {
+        prompt_tokens: payload
+            .pointer("/usage/prompt_tokens")
+            .and_then(Value::as_u64),
+        completion_tokens: payload
+            .pointer("/usage/completion_tokens")
+            .and_then(Value::as_u64),
+        cached_tokens: crate::ai::remote::stream_event::cached_tokens(&payload),
+    };
+    Ok((content, usage, payload))
+}
+
+/// Why the model stopped, in the provider's own word.
+///
+/// One word matters to a caller: `length` means the reply was cut off at `max_tokens` rather than
+/// finished, which is a fact neither the text nor the usage figures carry -- a reply that stopped
+/// mid-sentence and one that was never generated read the same way without it. Providers that
+/// report nothing at all give `None`.
+pub fn finish_reason(payload: &Value) -> Option<&str> {
+    payload
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+        // The Responses-style spelling, which some compatible servers emit beside it.
+        .or_else(|| {
+            payload
+                .pointer("/choices/0/stop_reason")
+                .and_then(Value::as_str)
+        })
+}
+
+/// Runs one non-streaming completion and returns only its text.
+///
+/// Used for short internal tasks such as generating a conversation title, where there is no
+/// UI to stream into and no need for events or tools.
+///
+/// `max_tokens` is passed through because an uncapped request lets a reasoning model
+/// deliberate at length before answering, and every token beyond the few words the task
+/// needs is latency the caller waits for. It is an `Option` so a caller with no natural
+/// limit can still omit it.
+pub async fn complete_once(
+    endpoint: &Endpoint,
+    model: &str,
+    messages: &[Value],
+    max_tokens: Option<u32>,
+) -> Result<String, String> {
+    complete_once_with_usage(endpoint, model, messages, max_tokens)
+        .await
+        .map(|(content, _usage)| content)
 }
 
 fn prepare_messages(

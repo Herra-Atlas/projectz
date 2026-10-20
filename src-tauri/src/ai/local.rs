@@ -145,6 +145,13 @@ impl LocalModelManager {
         self.database.runtime_settings(model_id)
     }
 
+    pub fn context_window(&self) -> Option<u64> {
+        let model_id = self.status().loaded_model_id?;
+        Some(u64::from(
+            self.runtime_settings(&model_id).context_per_slot(),
+        ))
+    }
+
     pub fn save_runtime_settings(
         &self,
         model_id: &str,
@@ -168,6 +175,18 @@ impl LocalModelManager {
             return Err("Local model not found".to_string());
         }
         self.database.set_setting("local.selected_model", &id)
+    }
+
+    /// The stored rows, with no file I/O at all.
+    ///
+    /// The registry's list is right for the page that draws a model's size and
+    /// quantisation, because that is what it has to inspect the file for. A caller
+    /// that only needs a name -- Assist naming its model, the settings page while
+    /// the user is waiting -- must not pay for a `stat` and a header read per
+    /// model, so this returns the database rows and nothing more. `inspect` is
+    /// still what fills the header facts in; it is just not done here.
+    pub fn stored(&self) -> Vec<LocalModel> {
+        self.database.list_local_models().unwrap_or_default()
     }
 
     pub fn list(&self) -> Vec<LocalModel> {

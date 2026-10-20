@@ -404,12 +404,16 @@ impl AiRuntime {
     /// Turn one persisted selection into a requestable endpoint and model.
     /// A local selection fails unless its engine is actually running.
     ///
-    /// Shared by the two features that store a model choice the same way -- the
-    /// title chain and the sub-agent default -- so a local selection is turned
-    /// into a live endpoint in exactly one place. Two copies would be two answers
-    /// to "which engine is this model on", which is the kind of second opinion
-    /// that ends up disagreeing with the loader.
-    fn resolve_selection(
+    /// Shared by the features that store a model choice the same way -- the title
+    /// chain, the sub-agent default, the vision model and the assist watcher -- so
+    /// a local selection is turned into a live endpoint in exactly one place. Two
+    /// copies would be two answers to "which engine is this model on", which is
+    /// the kind of second opinion that ends up disagreeing with the loader.
+    ///
+    /// **A caller that must not disturb a running model has to be stricter than
+    /// this.** Resolving a local selection *loads* it, which evicts whatever model
+    /// is up; `assist` refuses to do that and asks [`LocalModelManager`] directly.
+    pub fn resolve_selection(
         &self,
         selection: &serde_json::Value,
     ) -> Result<(crate::ai::remote::types::Endpoint, String), String> {
@@ -435,18 +439,18 @@ impl AiRuntime {
             .get("endpointId")
             .and_then(serde_json::Value::as_str)
             .filter(|id| !id.trim().is_empty())
-            .ok_or("No title model selected")?;
+            .ok_or("No model selected")?;
         let endpoint = self
             .endpoints
             .get(endpoint_id)
-            .ok_or("The selected title provider no longer exists")?;
+            .ok_or("The selected provider no longer exists")?;
         let model = selection
             .get("model")
             .and_then(serde_json::Value::as_str)
             .filter(|model| !model.trim().is_empty())
             .map(str::to_string)
             .or_else(|| endpoint.models.first().cloned())
-            .ok_or("The selected title provider has no models")?;
+            .ok_or("The selected provider has no models")?;
         Ok((endpoint.clone(), model))
     }
 
@@ -657,6 +661,24 @@ impl AiRuntime {
         // A plain string preference, so it is read here rather than resolved into
         // an endpoint; it rides on the request the way `reasoning` does.
         let compaction = self.compaction();
+        let local_context_window = self.local_models.context_window();
+        let context_window = if is_local {
+            local_context_window
+        } else {
+            self.database
+                .model_capabilities(&endpoint.id, &model)
+                .ok()
+                .and_then(|capabilities| capabilities.context_length)
+                .and_then(|context| u64::try_from(context).ok())
+        };
+        let previous_prompt_tokens = session_id
+            .as_deref()
+            .and_then(|id| {
+                self.database
+                    .last_prompt_tokens(id, &endpoint.id, &model)
+                    .ok()
+            })
+            .flatten();
         // Shareable rather than `FnMut` so several sub-agents launched from this
         // run can each report through the one event path the frontend listens on.
         let emitter = self.clone();
@@ -703,6 +725,9 @@ impl AiRuntime {
             subagent_default,
             vision_default,
             compaction,
+            context_window,
+            local_context_window,
+            previous_prompt_tokens,
             // The top-level run may delegate; a sub-agent's own run passes false.
             true,
             on_event,
@@ -892,7 +917,7 @@ mod tests {
             .generate_title(&selections, "How do I center a div?")
             .await
             .expect_err("all choices unavailable");
-        assert_eq!(error, "The selected title provider no longer exists");
+        assert_eq!(error, "The selected provider no longer exists");
     }
 
     #[tokio::test]
@@ -907,7 +932,7 @@ mod tests {
             .generate_title(&selections, "How do I center a div?")
             .await
             .expect_err("all choices unavailable");
-        assert_eq!(error, "The selected title provider no longer exists");
+        assert_eq!(error, "The selected provider no longer exists");
     }
 
     /// The reply the user is watching must stay silent; a run in any other session, or

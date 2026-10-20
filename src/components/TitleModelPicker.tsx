@@ -4,6 +4,7 @@ import { MAX_TITLE_MODELS } from "../features/models/usePreferences";
 import type { ModelGroup } from "../features/models/useModelRegistry";
 import type { LocalModel, ModelSelection } from "../features/models/types";
 import { selectionId, useModelOptions } from "./ModelSelectionPicker";
+import { ANCHOR_ATTRIBUTE, FlashHighlight, MARKABLE_ATTRIBUTE } from "./SettingsSection";
 
 type TitleModelPickerProps = {
   /** Models in priority order. The first is tried first. */
@@ -11,16 +12,38 @@ type TitleModelPickerProps = {
   onChange: (models: ModelSelection[]) => void;
   groups: ModelGroup[];
   localModels: LocalModel[];
+  /**
+   * The row's own label and description.
+   *
+   * Defaulted to the title chain because that is the setting this control grew
+   * out of; Taste uses the same ordered-choice behaviour with its own words.
+   */
+  label?: string;
+  description?: string;
+  /** Most models the chain may hold. Defaults to the title chain's limit. */
+  max?: number;
+  /** The search anchor for this row, when it is one search can find. */
+  anchor?: string;
 };
 
 /**
- * Single-row control for the models that name new conversations.
+ * Single-row control for an ordered chain of models.
  *
  * The row states what the setting does; the panel is a searchable list where
  * each chosen model carries its position as a number. The number is the only
  * thing that conveys priority, so it earns its place on the right.
  */
-export default function TitleModelPicker({ models, onChange, groups, localModels }: TitleModelPickerProps) {
+export default function TitleModelPicker({
+  models,
+  onChange,
+  groups,
+  localModels,
+  label = "Title generation",
+  description = "Name new conversations after the first reply.",
+  max = MAX_TITLE_MODELS,
+  anchor,
+}: TitleModelPickerProps) {
+  const limit = Math.max(1, max);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const containerRef = useRef<HTMLDivElement>(null);
@@ -51,7 +74,7 @@ export default function TitleModelPicker({ models, onChange, groups, localModels
 
   // Position of each chosen model, so the list can show its order directly.
   const orderById = new Map(models.map((selection, index) => [selectionId(selection), index + 1]));
-  const isFull = models.length >= MAX_TITLE_MODELS;
+  const isFull = models.length >= limit;
 
   const toggle = (selection: ModelSelection) => {
     const id = selectionId(selection);
@@ -65,17 +88,17 @@ export default function TitleModelPicker({ models, onChange, groups, localModels
       ? models[0].model ?? localModels.find((model) => model.id === models[0].localModelId)?.name ?? "1 model"
       : `${models.length} models`;
 
-  // A row of the panel it sits in, not a panel of its own: the caller supplies
-  // the border, the surface and the divider, so this and the sub-agent row
-  // below it are drawn by the same rules.
+  // A flat row, not a panel of its own: the caller places it beside the sub-agent
+  // and vision rows, and every settings row is drawn by the same rules now.
   return (
-    <div ref={containerRef} className="flex min-h-[58px] items-center gap-3 px-4 py-3.5">
+    <div ref={containerRef} {...(anchor ? { [ANCHOR_ATTRIBUTE]: anchor, [MARKABLE_ATTRIBUTE]: "" } : {})} className="relative flex min-h-[58px] items-center gap-3 px-4 py-3.5">
+      {anchor && <FlashHighlight anchor={anchor} />}
       <div className="min-w-0 flex-1">
-        <h3 className="text-[13px]">Title generation</h3>
-        <p className="mt-0.5 text-[12px] leading-5 text-[var(--muted)]">Name new conversations after the first reply.</p>
+        <h3 className="text-[13px]">{label}</h3>
+        <p className="mt-0.5 text-[12px] leading-5 text-[var(--muted)]">{description}</p>
       </div>
       <div className="relative shrink-0">
-        <button type="button" onClick={() => setOpen((current) => !current)} aria-expanded={open} aria-label="Models used to generate session titles" className="inline-flex h-9 w-[150px] items-center justify-between gap-2 rounded-md border border-[var(--line)] bg-[var(--rail)] px-3 text-[13px] text-[var(--text)] transition-colors hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]">
+        <button type="button" onClick={() => setOpen((current) => !current)} aria-expanded={open} aria-label={`Models used for ${label}`} className="inline-flex h-9 w-[150px] items-center justify-between gap-2 rounded-md border border-[var(--line)] bg-[var(--rail)] px-3 text-[13px] text-[var(--text)] transition-colors hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]">
           <span className={`min-w-0 flex-1 truncate text-left ${models.length === 0 ? "text-[var(--quiet)]" : ""}`}>{triggerLabel}</span>
           <ChevronDown size={14} className="shrink-0 text-[var(--muted)]" />
         </button>
@@ -98,7 +121,7 @@ export default function TitleModelPicker({ models, onChange, groups, localModels
                   onClick={() => toggle(option.selection)}
                   disabled={!selected && isFull}
                   aria-pressed={selected}
-                  title={selected ? `Remove ${option.label} from position ${position}` : isFull ? `Only ${MAX_TITLE_MODELS} models are used` : `Use ${option.label} next`}
+                  title={selected ? `Remove ${option.label} from position ${position}` : isFull ? `Only ${limit} models are used` : `Use ${option.label} next`}
                   className="group flex min-h-9 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   {option.local && <Cpu size={14} className="shrink-0 text-[var(--quiet)]" />}
@@ -112,7 +135,7 @@ export default function TitleModelPicker({ models, onChange, groups, localModels
             {filtered.length === 0 && <p className="px-2 py-5 text-sm text-[var(--muted)]">{options.length ? "No models match that search." : "Add a provider or local model first."}</p>}
           </div>
           <div className="flex items-center justify-between gap-2 border-t border-[var(--line)] px-3 py-2 text-[11px] text-[var(--quiet)]">
-            <span>{isFull ? `Using ${MAX_TITLE_MODELS} of ${MAX_TITLE_MODELS}` : `${models.length} of ${MAX_TITLE_MODELS} used`}</span>
+            <span>{isFull ? `Using ${limit} of ${limit}` : `${models.length} of ${limit} used`}</span>
             {models.length > 0 && <button type="button" onClick={() => onChange([])} className="rounded px-1 hover:text-[var(--danger)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]">Clear</button>}
           </div>
         </div>}

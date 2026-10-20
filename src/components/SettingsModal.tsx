@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openFile } from "@tauri-apps/plugin-dialog";
-import { ArrowLeft, BookMarked, ChevronDown, ChevronRight, CircleHelp, Cpu, GripVertical, LoaderCircle, MoveRight, Palette, Pencil, Plug, Plus, Search, Server, Settings2, SlidersHorizontal, Sparkles, Trash2, X, Zap } from "lucide-react";
+import { ArrowLeft, BookMarked, Brain, ChevronDown, ChevronRight, Cpu, GripVertical, Lightbulb, LoaderCircle, MoveRight, Palette, Pencil, Plug, Plus, Search, Server, Settings2, SlidersHorizontal, Sparkles, Trash2, X, Zap } from "lucide-react";
 import { resolveTheme, type Appearance } from "../features/appearance/appearance";
 import AccentPicker from "./appearance/AccentPicker";
 import ThemePicker from "./appearance/ThemePicker";
@@ -12,14 +12,21 @@ import { engineLabel } from "./EnginePicker";
 import RuntimeSettingsPage, { type LocalRuntimeSettings } from "./RuntimeSettingsPage";
 import SkillsPage from "./SkillsPage";
 import McpSettingsPage from "./McpSettingsPage";
+import AssistSettingsPage from "./assist/AssistSettingsPage";
+import TasteSettingsPage from "./taste/TasteSettingsPage";
+import SettingsSearch, { pageForEntry } from "./settings/SettingsSearch";
+import { buildSettingsIndex, type SettingsEntry } from "./settings/settingsIndex";
+import type { SettingsPage } from "./settings/settingsPages";
+import { useAssist } from "../features/assist/useAssist";
+import { useTaste } from "../features/taste/useTaste";
 import SkillFormPage from "./skills/SkillFormPage";
 import TitleModelPicker from "./TitleModelPicker";
 import SingleModelPicker from "./ModelSelectionPicker";
-import { Segmented, SettingRow, SettingsSection, Toggle } from "./SettingsSection";
+import { ANCHOR_ATTRIBUTE, FlashHighlight, MARKABLE_ATTRIBUTE, SettingsPageTitle, SettingsSearchScope, SettingsSection, SETTINGS_HIGHLIGHT_EVENT } from "./SettingsSection";
+import { SettingRow, Segmented, Toggle } from "./SettingsSection";
 import { COMPACTION_LABELS, type Compaction, type Preferences } from "../features/models/usePreferences";
 import { formatBytes } from "../features/format/bytes";
 import type { Endpoint, LocalModel } from "../features/models/types";
-import type { Skill } from "../features/skills/types";
 import type { InstalledEngine } from "../features/models/useInstalledEngines";
 import { useClaimNotificationHost } from "../features/notifications/notificationHost";
 import type { Notify } from "../features/notifications/types";
@@ -41,43 +48,11 @@ function fileLabel(path: string): string {
   return path.replace(/^\\\\\?\\/, "");
 }
 
-/**
- * The line under "Settings" naming the page the reader is on.
- *
- * A function rather than the chained ternary it replaces: with a page per
- * provider, model, skill and engine the list outgrew a single expression, and a
- * `?:` chain that long stops being read.
- */
-function pageTitle(page: SettingsPage): string {
-  switch (page.view) {
-    case "form":
-      return page.endpoint ? "Edit provider" : "Add provider";
-    case "model":
-      return page.model.name;
-    case "skill":
-      return page.skill ? "Edit skill" : "New skill";
-    case "general":
-      return "General";
-    case "appearance":
-      return "Appearance";
-    case "preferences":
-      return "Preferences";
-    case "skills":
-      return "Skills";
-    case "mcp":
-      return "MCP servers";
-    case "local":
-      return "Local models";
-    case "engines":
-      return "Engines";
-    default:
-      return "Providers";
-  }
-}
-
 type EndpointDraft = { id: string; name: string; base_url: string; api_key: string; models: string[]; enabled: boolean };
 type SettingsModalProps = { open: boolean; onClose: () => void; onEndpointsChanged: () => void; onClearSessions: () => Promise<number>; preferences: Preferences; onPreferencesChange: (preferences: Preferences) => void; appearance: Appearance; onAppearanceChange: (appearance: Appearance) => void; notify: Notify };
-type SettingsPage = { view: "providers" } | { view: "local" } | { view: "engines" } | { view: "general" } | { view: "appearance" } | { view: "preferences" } | { view: "skills" } | { view: "mcp" } | { view: "skill"; skill: Skill | null } | { view: "model"; model: LocalModel } | { view: "form"; endpoint: Endpoint | null };
+// The page union lives in `settings/settingsPages.ts` so the search index can name a page
+// without importing this modal. Re-exported here for the components that already imported it.
+export type { SettingsPage } from "./settings/settingsPages";
 
 type GeneralSettings = {
   instructions: string;
@@ -129,6 +104,15 @@ const blankEndpoint = (): EndpointDraft => ({ id: crypto.randomUUID(), name: "",
  * and above what a click produces.
  */
 const DRAG_THRESHOLD = 4;
+
+/**
+ * How long a row a search landed on stays marked.
+ *
+ * Long enough to find with the eye after a page change, short enough that it is gone by the
+ * time the row is being read rather than looked for. The page title keeps the colour for
+ * the same time, so the two agree about what "here" means.
+ */
+const HIGHLIGHT_MS = 2000;
 
 export default function SettingsModal({ open, onClose, onEndpointsChanged, onClearSessions, preferences, onPreferencesChange, appearance, onAppearanceChange, notify }: SettingsModalProps) {
   // This dialog is the app's only `showModal()` window, and the browser paints
@@ -213,6 +197,31 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
   const [forgetting, setForgetting] = useState(false);
   const [instructionExampleIndex, setInstructionExampleIndex] = useState(0);
   const [page, setPage] = useState<SettingsPage>({ view: "providers" });
+  /**
+   * Assist's record and Taste's record, read by the *modal* rather than by their pages.
+   *
+   * The dialog outlives the page: it is mounted while open and the page is only the
+   * selected section, so a read started here runs while the user is still clicking around
+   * in another section -- before the Assist or Taste click that would otherwise be the
+   * first moment the read could begin, and that click is exactly when they are waiting.
+   * Mounting the hook in the page instead meant the "Reading settings…" placeholder was
+   * on screen for the whole read every single visit.
+   *
+   * Both are always enabled: `enabled` is not about whether the feature is on, it is
+   * about whether the hook is subscribed at all, and "the user may look at this page" is
+   * the answer here.
+   */
+  const assistStore = useAssist(open);
+  const tasteStore = useTaste(open);
+  /**
+   * The row a search result landed on, highlighted for a moment.
+   *
+   * Search exists because a settings window with three groups is still one where a user
+   * has to guess which page owns a row. Opening the right page is half the answer; the
+   * other half is showing *where* on the page, so the match fades in and out rather than
+   * leaving them to scan. `null` is ordinary navigation.
+   */
+  const [highlight, setHighlight] = useState<{ anchor: string; token: number } | null>(null);
   const [draft, setDraft] = useState<EndpointDraft>(blankEndpoint);
   const [showKey, setShowKey] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -232,6 +241,53 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
     .filter((endpoint) => endpoint.enabled)
     .map((endpoint) => ({ endpoint, models: endpoint.models }))
     .filter((group) => group.models.length > 0);
+
+  /**
+   * Every row a search can find, grouped by the page that owns it.
+   *
+   * Kept in `settings/settingsIndex.ts` rather than inline because it is a list that has to
+   * be kept in step with the pages by hand either way -- the pages are JSX, not data -- and
+   * a list next to the JSX is one nobody can read while editing them. It is built on each
+   * render and is cheap: plain objects, memoised nothing, and no read of any kind.
+   */
+  const searchEntries: SettingsEntry[] = buildSettingsIndex({
+    hasBrowserProfile: Boolean(browserProfile?.exists),
+  });
+
+  /**
+   * Navigates to a search result, then marks the row it names.
+   *
+   * The token is what makes landing on the same row twice still restart the mark: a
+   * boolean would already be true, and a row that did not flash the second time reads as a
+   * click that did nothing.
+   */
+  const openSearchResult = (entry: SettingsEntry) => {
+    setPage(pageForEntry(entry));
+    setHighlight({ anchor: entry.anchor, token: Date.now() });
+  };
+
+  // The mark is drawn by the page, not here: `FlashHighlight` listens for this event and
+  // sets the attribute that the stylesheet animates. Announcing it after paint is what
+  // lets the page that was just selected find its own row; before paint there would be
+  // nothing to mark yet.
+  useEffect(() => {
+    if (!highlight) return;
+    let cleared: number | undefined;
+    const frame = requestAnimationFrame(() => {
+      const anchor = highlight.anchor;
+      document
+        .querySelector(`[${ANCHOR_ATTRIBUTE}="${CSS.escape(anchor)}"]`)
+        ?.scrollIntoView({ block: "center", behavior: "smooth" });
+      window.dispatchEvent(new CustomEvent(SETTINGS_HIGHLIGHT_EVENT, { detail: { anchor } }));
+      // Cleared one beat after the mark's own lifetime, so a repeat can always start a
+      // fresh animation rather than arriving on a state that never changed.
+      cleared = window.setTimeout(() => setHighlight(null), HIGHLIGHT_MS + 100);
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      window.clearTimeout(cleared);
+    };
+  }, [highlight]);
 
   /**
    * Local models filed under the engine that will run them.
@@ -683,37 +739,58 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
       className="m-0 h-dvh w-dvw max-h-none max-w-none overflow-hidden border-0 bg-transparent p-0 text-[var(--text)] backdrop:bg-black/65"
     >
       <div className="mx-auto flex h-full w-full max-w-[1000px] flex-col overflow-hidden border-x border-[var(--line)] bg-[var(--page)] shadow-2xl sm:my-[6vh] sm:h-[88vh] sm:rounded-lg sm:border">
-        <header className="flex min-h-[60px] items-center justify-between border-b border-[var(--line)] px-4 sm:px-6">
-          <div className="flex items-center gap-2.5">
-            {isSubPage && <button type="button" onClick={() => setPage(backTarget)} className="grid size-8 place-items-center rounded-md text-[var(--muted)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label={backLabel}><ArrowLeft size={16} /></button>}
-            <div><h1 id="settings-title" className="text-[13px] font-semibold tracking-tight">Settings</h1><p className="text-[11px] text-[var(--quiet)]">{pageTitle(page)}</p></div>
+        {/* No hairline under the header. The page's own title band draws one, and the two
+            together read as a double line with a strip of empty background between them --
+            which is what made General, Appearance, Assist and Taste look framed twice. The
+            band is the separator; the header is only for the search field and the close
+            button. */}
+        <header className="flex min-h-[60px] items-center justify-between px-4 sm:px-6">
+          <div className="flex min-w-0 flex-1 items-center gap-2.5">
+            {isSubPage && <button type="button" onClick={() => setPage(backTarget)} className="grid size-8 place-items-center rounded-md text-[var(--muted)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label={backLabel} aria-labelledby={undefined}><ArrowLeft size={16} /></button>}
+            {/* The search field takes the place the static "Settings / General" label
+                used to hold. A window with eleven sections is one where a reader has to
+                guess which page owns a row, and a title that only repeated the page they
+                already clicked answered a question nobody asked. The page's own name is
+                on the page, under its heading. */}
+            <SettingsSearch entries={searchEntries} onOpen={openSearchResult} />
           </div>
           <button type="button" onClick={onClose} className="grid size-8 place-items-center rounded-md text-[var(--muted)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label="Close settings"><X size={17} /></button>
         </header>
 
         <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
-          <nav aria-label="Settings sections" className="flex shrink-0 gap-1 overflow-x-auto border-b border-[var(--line)] bg-[var(--rail)] px-2.5 py-2 sm:w-[200px] sm:flex-col sm:gap-0.5 sm:overflow-visible sm:border-b-0 sm:border-r sm:py-3">
+          {/* No bottom hairline in the stacked layout either: the title band already draws
+              one directly under it, and two rules a few pixels apart is the duplicate. */}
+          <nav aria-label="Settings sections" className="flex shrink-0 gap-1 overflow-x-auto bg-[var(--rail)] px-2.5 py-2 sm:w-[200px] sm:flex-col sm:gap-0.5 sm:overflow-visible sm:border-r sm:border-[var(--line)] sm:py-3">
             <p className="hidden px-2.5 pb-1.5 pt-1 text-[11px] font-medium text-[var(--quiet)] sm:block">Application</p>
-            <button type="button" onClick={() => setPage({ view: "general" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "general" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><SlidersHorizontal size={16} />General</button>
-            <button type="button" onClick={() => setPage({ view: "appearance" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "appearance" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Palette size={16} />Appearance</button>
-            <button type="button" onClick={() => setPage({ view: "preferences" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "preferences" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Sparkles size={16} />Preferences</button>
-            <button type="button" onClick={() => setPage({ view: "skills" })} className={`mt-1 flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "skills" || page.view === "skill" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><BookMarked size={16} />Skills</button>
-            <button type="button" onClick={() => setPage({ view: "mcp" })} className={`mt-1 flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "mcp" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Plug size={16} />MCP</button>
+            <button type="button" data-settings-nav="general" aria-label="General" onClick={() => setPage({ view: "general" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "general" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><SlidersHorizontal size={16} />General</button>
+            <button type="button" data-settings-nav="appearance" aria-label="Appearance" onClick={() => setPage({ view: "appearance" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "appearance" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Palette size={16} />Appearance</button>
+            <button type="button" data-settings-nav="preferences" aria-label="Preferences" onClick={() => setPage({ view: "preferences" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "preferences" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Sparkles size={16} />Preferences</button>
+            {/* The assistant's own surfaces: what it does (Assist), what it can load
+                (Skills) and what it can reach (MCP). They were in Application, where a
+                reader looking for "where do I change the browser" found them mixed in
+                with the theme picker. */}
+            <p className="hidden px-2.5 pb-1.5 pt-5 text-[11px] font-medium text-[var(--quiet)] sm:block">Assistant</p>
+            <button type="button" data-settings-nav="assist" aria-label="Assist" onClick={() => setPage({ view: "assist" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "assist" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Lightbulb size={16} />Assist</button>
+            <button type="button" data-settings-nav="taste" aria-label="Taste" onClick={() => setPage({ view: "taste" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "taste" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Brain size={16} />Taste</button>
+            <button type="button" data-settings-nav="skills" aria-label="Skills" onClick={() => setPage({ view: "skills" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "skills" || page.view === "skill" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><BookMarked size={16} />Skills</button>
+            <button type="button" data-settings-nav="mcp" aria-label="MCP servers" onClick={() => setPage({ view: "mcp" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "mcp" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Plug size={16} />MCP</button>
             <p className="hidden px-2.5 pb-1.5 pt-5 text-[11px] font-medium text-[var(--quiet)] sm:block">Models</p>
-            <button type="button" onClick={() => setPage({ view: "providers" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "providers" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Server size={16} />Providers</button>
-            <button type="button" onClick={() => setPage({ view: "local" })} className={`mt-1 flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "local" || page.view === "model" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Cpu size={16} />Local</button>
-            <button type="button" onClick={() => setPage({ view: "engines" })} className={`mt-1 flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "engines" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Zap size={16} />Engines</button>
-            <div className="mt-auto flex items-start gap-1.5 px-2.5 pb-1 pt-4 text-[11px] leading-4 text-[var(--quiet)]"><CircleHelp size={13} className="mt-px shrink-0" /><span>Keys stay on this device.</span></div>
+            <button type="button" data-settings-nav="providers" aria-label="Providers" onClick={() => setPage({ view: "providers" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "providers" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Server size={16} />Providers</button>
+            <button type="button" data-settings-nav="local" aria-label="Local models" onClick={() => setPage({ view: "local" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "local" || page.view === "model" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Cpu size={16} />Local</button>
+            <button type="button" data-settings-nav="engines" aria-label="Engines" onClick={() => setPage({ view: "engines" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "engines" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Zap size={16} />Engines</button>
           </nav>
 
           <div className="min-w-0 flex-1 overflow-y-auto">
             <div className="mx-auto max-w-[760px] px-5 py-6 sm:px-9 sm:py-8">
-              {page.view === "providers" ? <>
-                <div className="mb-6 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-5">
-                  <h2 className="text-[17px] font-semibold tracking-tight">Providers</h2>
-                  <button type="button" onClick={openAdd} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 text-[13px] font-medium text-[var(--text)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><Plus size={15} />Add provider</button>
-                </div>
-                {endpoints.length === 0 ? <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-4 py-7"><p className="text-sm text-[var(--muted)]">No providers connected.</p><p className="mt-1 text-xs text-[var(--quiet)]">Add an endpoint to discover models and use them in chat.</p></div> : <div className="divide-y divide-[var(--line)] overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--panel)]">
+              {/* No `key`: a search result on the page already open must not remount the
+                  scope, or the dim it is about to set is thrown away with the old node. */}
+              <SettingsSearchScope>
+              {page.view === "assist" ? <AssistSettingsPage notify={notify} store={assistStore} groups={providerModelGroups} localModels={localModels} /> : page.view === "taste" ? <TasteSettingsPage notify={notify} store={tasteStore} groups={providerModelGroups} localModels={localModels} /> : page.view === "providers" ? <>
+                <SettingsPageTitle>
+                  <h2 className="text-[17px] font-semibold tracking-tight"><FlashHighlight anchor="providers.list" />Providers</h2>
+                  <button type="button" {...{ [ANCHOR_ATTRIBUTE]: "providers.add" }} onClick={openAdd} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 text-[13px] font-medium text-[var(--text)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><FlashHighlight anchor="providers.add" /><Plus size={15} />Add provider</button>
+                </SettingsPageTitle>
+                {endpoints.length === 0 ? <div className="px-4 py-7"><p className="text-sm text-[var(--muted)]">No providers connected.</p><p className="mt-1 text-xs text-[var(--quiet)]">Add an endpoint to discover models and use them in chat.</p></div> : <div className="divide-y divide-[var(--line)]">
                   {endpoints.map((endpoint) => {
                     const expanded = expandedProviders.includes(endpoint.id);
                     // Both lists are drawn, switched-off ones last. They used to
@@ -749,10 +826,10 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                   })}
                 </div>}
               </> : page.view === "engines" ? <EnginesSettingsPage onChanged={() => { onEndpointsChanged(); void refreshEngines(); }} notify={notify} /> : page.view === "local" ? <>
-                <div className="mb-6 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-5">
-                  <h2 className="text-[17px] font-semibold tracking-tight">Local models</h2>
-                  <button type="button" onClick={() => void addLocalModel()} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 text-[13px] font-medium text-[var(--text)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><Plus size={15} />Add models</button>
-                </div>
+                <SettingsPageTitle>
+                  <h2 className="text-[17px] font-semibold tracking-tight"><FlashHighlight anchor="local.list" />Local models</h2>
+                  <button type="button" {...{ [ANCHOR_ATTRIBUTE]: "local.add" }} onClick={() => void addLocalModel()} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 text-[13px] font-medium text-[var(--text)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><FlashHighlight anchor="local.add" /><Plus size={15} />Add models</button>
+                </SettingsPageTitle>
                 {/* Only while a model is armed. The move is a mode, and a mode
                     with no visible state is one the user cannot tell they are
                     in -- or get out of. */}
@@ -762,7 +839,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                     Moving {pickedModel.name}. Choose an engine below, or press Escape to cancel.
                   </p>
                 )}
-                {localModels.length === 0 ? <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-4 py-7"><p className="text-sm text-[var(--muted)]">No local models added.</p><p className="mt-1 text-xs text-[var(--quiet)]">Choose a GGUF file to register its path for local inference.</p></div> : <div className="divide-y divide-[var(--line)] rounded-lg border border-[var(--line)] bg-[var(--panel)]">
+                {localModels.length === 0 ? <div className="px-4 py-7"><p className="text-sm text-[var(--muted)]">No local models added.</p><p className="mt-1 text-xs text-[var(--quiet)]">Choose a GGUF file to register its path for local inference.</p></div> : <div className="divide-y divide-[var(--line)]">
                   {/* Grouped by engine, the same shape the providers page uses.
                       The group is the engine, not the model: a model is run by one
                       engine, so grouping by it answers the question someone
@@ -887,7 +964,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                   </article>)}
                 </div>}
               </> : page.view === "model" ? <>
-                <div className="mb-5"><h2 className="text-[17px] font-semibold tracking-tight">{page.model.name}</h2></div>
+                <SettingsPageTitle><h2 className="text-[17px] font-semibold tracking-tight">{page.model.name}</h2></SettingsPageTitle>
                 <RuntimeSettingsPage
                   key={page.model.id}
                   modelId={page.model.id}
@@ -910,9 +987,10 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                     here worth interrupting for, and `saveLocalRuntimeSettings`
                     reports it. */}
               </> : page.view === "appearance" ? <>
-                <div className="mb-6 border-b border-[var(--line)] pb-5"><h2 className="text-[17px] font-semibold tracking-tight">Appearance</h2></div>
+                <SettingsPageTitle><h2 className="text-[17px] font-semibold tracking-tight">Appearance</h2></SettingsPageTitle>
                 <SettingsSection title="Theme">
                   <SettingRow
+                    anchor="appearance.theme"
                     label="Theme"
                     description="System follows whatever your operating system is set to."
                     stacked
@@ -922,6 +1000,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
 
                 <SettingsSection title="Accent">
                   <SettingRow
+                    anchor="appearance.accent"
                     label="Accent colour"
                     // Says the one thing that is not obvious from the swatches: a
                     // custom colour is not used as-is where text sits on it, so a
@@ -932,9 +1011,10 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                   />
                 </SettingsSection>
               </> : page.view === "general" ? <>
-                <div className="mb-6 border-b border-[var(--line)] pb-5"><h2 className="text-[17px] font-semibold tracking-tight">General</h2></div>
+                <SettingsPageTitle><h2 className="text-[17px] font-semibold tracking-tight">General</h2></SettingsPageTitle>
                 <SettingsSection title="Instructions">
                   <SettingRow
+                    anchor="general.instructions"
                     label="Instructions for ProjectZ"
                     description="Kept in mind whenever ProjectZ generates a message."
                     stacked
@@ -944,16 +1024,19 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
 
                 <SettingsSection title="Response">
                   <SettingRow
+                    anchor="general.notifications"
                     label="Response completions"
                     description="Get notified when ProjectZ has finished a response. Useful for long-running tasks."
                     control={<Toggle label="Notify when a response is complete" checked={generalSettings.responseNotifications} onChange={(responseNotifications) => updateGeneralSettings({ ...generalSettings, responseNotifications })} />}
                   />
                   <SettingRow
+                    anchor="general.metrics"
                     label="Show token metrics"
                     description="Display prompt, completion, and generation figures under each reply."
                     control={<Toggle label="Show token metrics" checked={generalSettings.showMetrics} onChange={(showMetrics) => updateGeneralSettings({ ...generalSettings, showMetrics })} />}
                   />
                   <SettingRow
+                    anchor="general.sendWith"
                     label="Send with"
                     description="Which key sends the draft. Hold the other modifier to add a line break instead."
                     control={<Segmented label="Send with" value={generalSettings.sendWith} options={["Enter", "Ctrl + Enter"]} onChange={(sendWith) => updateGeneralSettings({ ...generalSettings, sendWith })} />}
@@ -962,6 +1045,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
 
                 <SettingsSection title="Browser">
                   <SettingRow
+                    anchor="general.browserIdle"
                     label="Close when idle"
                     description="How long the browser the agent drives is kept after the last page it opened. A shorter time means the next browse starts it again; a longer one leaves a window open behind everything else."
                     control={
@@ -980,6 +1064,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                     }
                   />
                   <SettingRow
+                    anchor="general.browserProfile"
                     label="Browser profile"
                     description={
                       browserProfile
@@ -996,31 +1081,28 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
 
                 <SettingsSection title="Sessions">
                   <SettingRow
+                    anchor="general.clearSessions"
                     label="Clear all sessions"
                     description="Delete every conversation on this device. This cannot be undone."
                     control={<button type="button" disabled={clearingSessions} onClick={() => { setFormError(""); setConfirmClear(true); }} className="min-h-9 shrink-0 rounded-lg border border-[var(--line)] px-3 text-[13px] text-[var(--muted)] transition-colors hover:border-[var(--danger)] hover:bg-[var(--raised)] hover:text-[var(--danger)] disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]">Clear…</button>}
                   />
                 </SettingsSection>
               </> : page.view === "preferences" ? <>
-                <div className="mb-6 border-b border-[var(--line)] pb-5"><h2 className="text-[17px] font-semibold tracking-tight">Preferences</h2></div>
-                {/* Both model choices live in one panel, and the picker draws a
-                    row shaped exactly like the one below it. They are the same
-                    kind of setting -- a model choice for a background task -- and
-                    two different row treatments for one kind of thing is what
-                    makes a page look assembled rather than designed. */}
-                {/* Not `overflow-hidden`: the pickers below open a popover
-                    anchored inside this panel, and clipping the panel to round
-                    its corners would clip that popover with it. The rows here
-                    have no full-bleed background of their own, so nothing needs
-                    the clipping the corners would otherwise require. */}
-                <div className="divide-y divide-[var(--line)] rounded-lg border border-[var(--line)] bg-[var(--panel)]">
-                  <TitleModelPicker
-                    models={preferences.sessionTitleModels}
-                    onChange={(sessionTitleModels) => { setFormError(""); onPreferencesChange({ ...preferences, sessionTitleModels }); }}
-                    groups={providerModelGroups}
-                    localModels={localModels}
-                  />
-                  <div className="flex min-h-[58px] items-center gap-3 px-4 py-3.5">
+                <SettingsPageTitle><h2 className="text-[17px] font-semibold tracking-tight">Preferences</h2></SettingsPageTitle>
+                {/* Both model choices are the same kind of setting -- a model
+                    for a background task -- so they are drawn by the same flat
+                    row rules as every `SettingsSection`; there is no panel here
+                    to clip the pickers' popovers either. */}
+                <div className="divide-y divide-[var(--line)]">
+                  <div className="[&>*:first-child]:!border-0" {...{ [ANCHOR_ATTRIBUTE]: "preferences.titleModels", [MARKABLE_ATTRIBUTE]: "" }}>
+                    <TitleModelPicker
+                      models={preferences.sessionTitleModels}
+                      onChange={(sessionTitleModels) => { setFormError(""); onPreferencesChange({ ...preferences, sessionTitleModels }); }}
+                      groups={providerModelGroups}
+                      localModels={localModels}
+                    />
+                  </div>
+                  <div className="flex min-h-[58px] items-center gap-3 px-4 py-3.5" {...{ [ANCHOR_ATTRIBUTE]: "preferences.subagentModel", [MARKABLE_ATTRIBUTE]: "" }}>
                     <div className="min-w-0 flex-1">
                       <h3 className="text-[13px]">Sub-agent model</h3>
                       <p className="mt-0.5 text-[12px] leading-5 text-[var(--muted)]">The model spawned agents run on. Defaults to whatever the chat is using.</p>
@@ -1034,7 +1116,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                       label="Default sub-agent model"
                     />
                   </div>
-                  <div className="flex min-h-[58px] items-center gap-3 px-4 py-3.5">
+                  <div className="flex min-h-[58px] items-center gap-3 px-4 py-3.5" {...{ [ANCHOR_ATTRIBUTE]: "preferences.visionModel", [MARKABLE_ATTRIBUTE]: "" }}>
                     <div className="min-w-0 flex-1">
                       <h3 className="text-[13px]">Vision model</h3>
                       <p className="mt-0.5 text-[12px] leading-5 text-[var(--muted)]">The model an image is shown to when a file is read. Leave off and images cannot be read.</p>
@@ -1052,6 +1134,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
 
                 <SettingsSection title="Context">
                   <SettingRow
+                    anchor="preferences.compaction"
                     label="Context compaction"
                     description="How ProjectZ trims a long conversation before sending it. Off keeps everything; Normal elides old tool output; Fast also drops older turns."
                     control={
@@ -1072,7 +1155,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                   />
                 </SettingsSection>
               </> : page.view === "skills" ? <SkillsPage notify={notify} onOpenForm={(skill) => setPage({ view: "skill", skill })} /> : page.view === "mcp" ? <McpSettingsPage notify={notify} /> : page.view === "skill" ? <SkillFormPage key={page.skill?.id ?? "new"} skill={page.skill} onSaved={() => setPage({ view: "skills" })} onCancel={() => setPage({ view: "skills" })} notify={notify} /> : <>
-                <div className="mb-6 border-b border-[var(--line)] pb-5"><h2 className="text-[17px] font-semibold tracking-tight">{page.endpoint ? "Edit provider" : "Add provider"}</h2></div>
+                <SettingsPageTitle><h2 className="text-[17px] font-semibold tracking-tight">{page.endpoint ? "Edit provider" : "Add provider"}<FlashHighlight anchor="providers.add" /></h2></SettingsPageTitle>
                 <form onSubmit={(event) => void saveEndpoint(event)} className="max-w-xl space-y-4">
                   <label className="block text-sm text-[var(--muted)]">Provider name<input ref={nameRef} required value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} className="mt-1.5 h-10 w-full rounded-md border border-[var(--line)] bg-[var(--rail)] px-3 text-[13px] text-[var(--text)] outline-none placeholder:text-[var(--quiet)] focus:border-[var(--accent)]" placeholder="e.g. Local Ollama" /></label>
                   <label className="block text-sm text-[var(--muted)]">Base URL<input type="url" required value={draft.base_url} onChange={(event) => setDraft({ ...draft, base_url: event.target.value })} className="mt-1.5 h-10 w-full rounded-md border border-[var(--line)] bg-[var(--rail)] px-3 text-[13px] text-[var(--text)] outline-none placeholder:text-[var(--quiet)] focus:border-[var(--accent)]" placeholder="https://api.example.com/v1" /></label>
@@ -1090,6 +1173,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                   </div>
                 </form>
               </>}
+              </SettingsSearchScope>
             </div>
           </div>
         </div>

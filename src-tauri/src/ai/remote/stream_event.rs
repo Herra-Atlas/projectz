@@ -69,7 +69,7 @@ pub fn parse_chunk(value: &Value, tool_calls: &mut StreamedToolCalls) -> Option<
 ///
 /// Returns `None` rather than zero when absent, so "the provider reported no
 /// cache" is never mistaken for "the provider cached nothing".
-fn cached_tokens(value: &Value) -> Option<u64> {
+pub(crate) fn cached_tokens(value: &Value) -> Option<u64> {
     [
         "/usage/prompt_tokens_details/cached_tokens",
         "/usage/cached_tokens",

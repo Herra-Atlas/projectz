@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>ProjectZ Assist — settings</title>
+    <link rel="stylesheet" href="ui.css" />
+    <style>
+      /*
+       * A nav on the left and one section at a time on the right.
+       *
+       * This page used to be one long column, and every setting it grew was another screenful
+       * between a reader and the one they came for. Sections are switched rather than scrolled
+       * to, because the page is opened to find one row -- and the open section is kept in the
+       * URL hash, so a reload and a bookmark both land back on it.
+       */
+      .shell {
+        display: grid; grid-template-columns: 186px minmax(0, 1fr); gap: 32px;
+        max-width: 880px; margin: 0 auto; padding: 34px 24px 64px;
+      }
+      nav { position: sticky; top: 34px; align-self: start; }
+      nav h1 { margin: 0 0 3px; }
+      nav .where { display: flex; align-items: center; gap: 8px; margin: 0 0 20px; color: var(--quiet); font-size: 11.5px; }
+      nav .tabs { display: grid; gap: 2px; }
+      nav button {
+        display: block; width: 100%; text-align: left;
+        border: 0; background: transparent; color: var(--muted);
+        padding: 7px 10px; border-radius: 8px; font-size: 12.5px;
+      }
+      nav button:hover { background: var(--raise); color: var(--ink); }
+      nav button[aria-current="true"] { background: var(--raise); color: var(--ink); font-weight: 600; }
+
+      main > section { display: none; }
+      main > section[data-open] { display: block; }
+      h2.group { padding: 0 0 9px 2px; margin-top: 26px; }
+      h2.group:first-child { margin-top: 0; }
+      .lede { margin: 0 0 16px; max-width: 58ch; }
+      .list { border-top: 1px solid var(--line); }
+      .list .row:first-child { border-top: 0; }
+      .list .host { display: flex; align-items: center; gap: 10px; }
+      .add { display: flex; gap: 8px; padding: 11px 14px; border-top: 1px solid var(--line); }
+      .add input { flex: 1; }
+      .note { margin-top: 10px; padding: 0 2px; color: var(--quiet); font-size: 11.5px; }
+      .note[hidden] { display: none; }
+      .note[data-warning="true"] { color: var(--accent); }
+      /* What a card will look like, drawn with the same mix the content script paints: the
+         number means nothing until it has been seen over something. */
+      .sample { display: flex; align-items: center; gap: 12px; }
+      .sample .plate {
+        width: 116px; padding: 6px 9px; border-radius: 9px; border: 1px solid var(--line);
+        background: color-mix(in srgb, var(--panel) calc(var(--projectz-solid, 0.88) * 100%), transparent);
+        box-shadow: 0 4px 14px rgb(0 0 0 / 0.14); font-size: 11.5px; color: var(--ink);
+      }
+      input[type="range"] { width: 132px; accent-color: var(--accent); padding: 0; background: transparent; border: 0; }
+      footer { margin-top: 36px; color: var(--quiet); font-size: 11.5px; }
+      kbd { font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
+      @media (max-width: 720px) {
+        .shell { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+        nav { position: static; }
+        nav .tabs { grid-auto-flow: column; grid-auto-columns: max-content; overflow-x: auto; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <nav>
+        <h1>Assist</h1>
+        <p class="where status" id="status" data-state="waiting">
+          <span class="dot"></span><span id="statusText">Checking…</span>
+        </p>
+        <div class="tabs" id="tabs">
+          <button type="button" data-section="reading">Reading</button>
+          <button type="button" data-section="sending">What is sent</button>
+          <button type="button" data-section="answers">Answers</button>
+          <button type="button" data-section="connection">Connection</button>
+        </div>
+      </nav>
+
+      <main>
+        <section id="reading">
+          <h2 class="group">Reading</h2>
+          <p class="lede">
+            What this browser reads on its own, and what it leaves alone. Whether an answer is
+            worth giving, which model gives it and how often it may — all of that lives in
+            ProjectZ, not here.
+          </p>
+          <div class="panel">
+            <div class="row">
+              <div class="label">
+                <strong>Read pages as you browse</strong>
+                <span>Off means nothing is read until you press Read in the popup.</span>
+              </div>
+              <button id="auto" class="switch" role="switch" aria-checked="true" aria-label="Read pages as you browse"></button>
+            </div>
+            <div class="row">
+              <div class="label">
+                <strong>Wait for the page to settle</strong>
+                <span>A page that is still loading or animating is not read until it stops.</span>
+              </div>
+              <div class="segmented" id="settle" role="group" aria-label="Wait for the page to settle">
+                <button type="button" data-value="400">Briefly</button>
+                <button type="button" data-value="900">A moment</button>
+                <button type="button" data-value="2000">Longer</button>
+              </div>
+            </div>
+            <div class="row">
+              <div class="label">
+                <strong>Read local files</strong>
+                <span>Pages opened with <code>file://</code>. Off unless you ask for it here.</span>
+              </div>
+              <button id="files" class="switch" role="switch" aria-checked="false" aria-label="Read local files"></button>
+            </div>
+          </div>
+          <p class="note" id="fileGrant" hidden></p>
+          <p class="note">
+            Only <code>http</code>, <code>https</code> and — if allowed above — local files are
+            ever read. Browser pages, extension pages and devtools are not pages, and assist
+            never asks for them.
+          </p>
+
+          <h2 class="group">Sites left alone</h2>
+          <div class="panel">
+            <div class="list" id="sites"></div>
+            <div class="add">
+              <input id="host" type="text" spellcheck="false" placeholder="example.com" aria-label="Site to leave alone" />
+              <button id="add" type="button">Add</button>
+            </div>
+          </div>
+          <p class="note">
+            A site here is never read. The popup's switch adds the site you are on, which is
+            usually faster.
+          </p>
+        </section>
+
+        <section id="sending">
+          <h2 class="group">What is sent</h2>
+          <p class="lede">
+            How much of a page may cross the wire on one look. These are this browser's own
+            limits: they bound a request before ProjectZ ever sees it, which is what a page that
+            changes constantly needs.
+          </p>
+          <div class="panel">
+            <div class="row">
+              <div class="label">
+                <strong>Blocks in one look</strong>
+                <span>The most text blocks sent at once. What is near the screen is kept first.</span>
+              </div>
+              <input id="maxBlocks" type="number" min="10" max="120" step="5" style="width: 92px" aria-label="Blocks in one look" />
+            </div>
+            <div class="row">
+              <div class="label">
+                <strong>Longest block</strong>
+                <span>Characters of one block that may be sent. The rest is cut.</span>
+              </div>
+              <input id="maxBlockChars" type="number" min="200" max="2000" step="50" style="width: 92px" aria-label="Longest block in characters" />
+            </div>
+          </div>
+          <p class="note" id="appLimits">ProjectZ's own limits are read from the app.</p>
+          <p class="note">
+            A page whose text has not changed since the last look is not sent again — a request is
+            what a look costs, and the same page has the same answer. <em>Read this page now</em>
+            in the popup sends it regardless.
+          </p>
+        </section>
+
+        <section id="answers">
+          <h2 class="group">Answers</h2>
+          <p class="lede">
+            An answer is drawn in the page, beside the text it answers. Nothing here changes what
+            is answered — only how it looks.
+          </p>
+          <div class="panel">
+            <div class="row">
+              <div class="label">
+                <strong>How an answer is drawn</strong>
+                <span id="styleHint">A card beside the text it answers.</span>
+              </div>
+              <div class="segmented" id="style" role="group" aria-label="How an answer is drawn">
+                <button type="button" data-value="card">Card</button>
+                <button type="button" data-value="inline">Beside the text</button>
+              </div>
+            </div>
+            <div class="row" id="placementRow">
+              <div class="label">
+                <strong>Where a card goes</strong>
+                <span>It sits over the block it answers when there is room; this is where it goes when there is not.</span>
+              </div>
+              <div class="segmented" id="card" role="group" aria-label="Where a card goes">
+                <button type="button" data-value="auto">Nearest</button>
+                <button type="button" data-value="above">Above</button>
+                <button type="button" data-value="below">Below</button>
+              </div>
+            </div>
+            <div class="row" id="opacityRow">
+              <div class="label">
+                <strong>Solid enough to read</strong>
+                <span>How much of the page shows through a card.</span>
+              </div>
+              <div class="sample">
+                <input id="opacity" type="range" min="0.6" max="1" step="0.02" aria-label="How solid a card is" />
+                <span class="plate" id="opacitySample"><b>3.14159</b> · math</span>
+              </div>
+            </div>
+            <div class="row" id="hideAfterRow">
+              <div class="label">
+                <strong>Leave on its own after</strong>
+                <span>Seconds. Zero keeps a card until you click it away.</span>
+              </div>
+              <input id="hideAfter" type="number" min="0" max="120" style="width: 82px" aria-label="Seconds before a card leaves" />
+            </div>
+          </div>
+          <p class="note">
+            Clicking an answer dismisses it, in both styles. <kbd>Esc</kbd> is not needed: an
+            answer never takes focus.
+          </p>
+        </section>
+
+        <section id="connection">
+          <h2 class="group">Connection</h2>
+          <p class="lede">
+            Where ProjectZ is, and the token that proves this extension is the one it paired
+            with. All of it is handed over by the app's own page — pairing by hand is the
+            fallback.
+          </p>
+          <div class="panel">
+            <div class="row">
+              <div class="label">
+                <strong>ProjectZ</strong>
+                <span id="connection">Checking…</span>
+              </div>
+              <button id="setup" type="button">Open its page</button>
+            </div>
+            <div class="row">
+              <div class="label">
+                <strong>Port</strong>
+                <span>The port the app listens on. 43128 unless something else took it.</span>
+              </div>
+              <input id="port" type="number" min="1" max="65535" style="width: 110px" aria-label="Port" />
+            </div>
+            <div class="row">
+              <div class="label">
+                <strong>Pairing token</strong>
+                <span>Handed over automatically by the app's page. Only paste it here if that did not work.</span>
+              </div>
+            </div>
+            <div class="add">
+              <input id="token" type="text" spellcheck="false" placeholder="Pairing token" aria-label="Pairing token" />
+              <button id="pair" class="primary" type="button">Pair</button>
+            </div>
+          </div>
+          <p class="note" id="version"></p>
+        </section>
+
+        <footer>
+          <p>
+            Assist answers what it is sure about and stays quiet otherwise. The master switch is
+            in ProjectZ, and in the tray: turn it off and nothing is read.
+          </p>
+        </footer>
+      </main>
+    </div>
+
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

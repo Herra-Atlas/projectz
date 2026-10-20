@@ -466,6 +466,83 @@ select:focus {
   background-color: var(--line-strong);
 }
 
+/* The section under a page title has no top rule and no top margin: the title band
+   already draws the hairline, and repeating it a few pixels lower is the double line
+   that made General, Appearance, Assist and Taste look framed twice. Later sections
+   keep their fading rule, which is their only separator. */
+[data-settings-title] + .settings-section {
+  margin-top: 0;
+}
+
+[data-settings-title] + .settings-section .settings-section-rule {
+  display: none;
+}
+
+/* ---------- A setting a search result landed on ----------
+
+   `FlashHighlight` puts `data-highlight-mark` on the element the result names and
+   removes it two seconds later; the whole effect is CSS from there.
+
+   **The words turn accent, the block does not tint.** A filled block reads as a
+   selected row, competes with the row's own divider, and stops looking like a
+   setting. The accent on the text is unambiguous and does not fight the layout.
+   Only text-bearing children are recoloured, so a toggle or a picker sitting in
+   the same row keeps its own colours.
+
+   **Everything on the page that is not the answer dims.** The page is told it is
+   looking for something, so the rest recedes for the same two seconds: every
+   marking target without the mark drops to 45%. The marked element is explicitly
+   held at full opacity so an ancestor's dimming cannot reach it.
+*/
+
+[data-highlight-mark] :is(p, span, h2, h3, h4, label) {
+  color: var(--accent);
+  animation: settings-mark-out 2s ease-out forwards;
+}
+
+[data-settings-title][data-highlight-mark] {
+  border-bottom-color: var(--accent);
+  animation: settings-title-mark-out 2s ease-out forwards;
+}
+
+/* Holds the accent for the first second, then takes it back. A mark that faded as
+   fast as it appeared read as a hover rather than as an answer. */
+@keyframes settings-mark-out {
+  0%,
+  50% {
+    color: var(--accent);
+  }
+  100% {
+    /* `inherit` rather than a token: individual rows use `--text`, `--muted` and
+       `--quiet` for different lines, and each should return to its own colour. */
+    color: inherit;
+  }
+}
+
+@keyframes settings-title-mark-out {
+  0%,
+  50% {
+    border-bottom-color: var(--accent);
+  }
+  100% {
+    border-bottom-color: var(--line);
+  }
+}
+
+/* The dim. `.settings-search-mode` is on the page while a search result's mark is
+   up, and comes off with the mark -- so this is transient, never a preference. */
+.settings-search-mode [data-settings-markable]:not([data-highlight-mark]) {
+  opacity: 0.4;
+  transition: opacity 160ms ease;
+}
+
+/* The page's own heading stays legible: the dim is about finding a setting *in* the
+   list, and fading the title of the page the user just opened reads as the window
+   being disabled. */
+.settings-search-mode [data-settings-title] {
+  opacity: 1;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

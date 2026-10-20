@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>ProjectZ Assist</title>
+    <link rel="stylesheet" href="ui.css" />
+    <style>
+      body { width: 320px; }
+      header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 14px; }
+      .state { padding: 0 14px 8px; color: var(--muted); font-size: 12px; }
+      .state.status + .usage { margin-top: -6px; }
+      .usage { padding: 0 14px 12px; color: var(--quiet); font-size: 11.5px; }
+      .note { padding: 0 14px 12px; color: var(--accent); font-size: 11.5px; }
+      .actions { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--line); }
+      .actions .spacer { flex: 1; }
+      section { margin-top: 10px; }
+      section > h2 { padding: 0 14px 8px; }
+      .pair { display: flex; gap: 8px; padding: 0 14px 12px; }
+      .pair input { flex: 1; }
+      footer { display: flex; align-items: center; gap: 4px; padding: 8px 10px; border-top: 1px solid var(--line); }
+      footer .spacer { flex: 1; }
+      .error { padding: 0 14px 10px; color: var(--accent); font-size: 11.5px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Assist</h1>
+      <button id="power" class="switch" role="switch" aria-checked="false" aria-label="Assist"></button>
+    </header>
+
+    <p class="state status" id="state"><span class="dot"></span><span id="stateText">Checking…</span></p>
+    <!-- What this hour has cost, in the app's own figures. The ceiling is the app's and is
+         only ever read here: a limit the browser could set is a limit a browser could lift. -->
+    <p class="usage" id="usage"></p>
+    <p class="note" id="note" hidden></p>
+
+    <div class="rows">
+      <div class="row">
+        <div class="label">
+          <strong>Read this page now</strong>
+          <span id="readHint">Look at the page on screen, now, without waiting for it to settle.</span>
+        </div>
+        <button id="read" type="button">Read</button>
+      </div>
+      <div class="row" id="siteRow">
+        <div class="label">
+          <strong id="siteLabel">Read on this site</strong>
+          <span>Turn a site off and nothing on it is ever read.</span>
+        </div>
+        <button id="site" class="switch" role="switch" aria-checked="true" aria-label="Read on this site"></button>
+      </div>
+    </div>
+
+    <section id="pairing" hidden>
+      <h2>Not paired yet</h2>
+      <p class="hint">
+        Open the app's own page — it hands over the extension and pairs it in one step. This
+        field is only for pairing by hand.
+      </p>
+      <div class="pair">
+        <input id="token" type="text" spellcheck="false" placeholder="Pairing token" aria-label="Pairing token" />
+        <button id="pair" class="primary" type="button">Pair</button>
+      </div>
+      <div class="pair">
+        <input id="port" type="number" min="1" max="65535" aria-label="Port" />
+      </div>
+    </section>
+
+    <p class="error" id="error" hidden></p>
+
+    <footer>
+      <button id="setup" class="quiet" type="button">Open ProjectZ's page</button>
+      <span class="spacer"></span>
+      <button id="settings" class="quiet" type="button">Settings</button>
+    </footer>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

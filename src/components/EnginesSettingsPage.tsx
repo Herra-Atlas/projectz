@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ChevronDown, ChevronRight, Download, Link2, LoaderCircle, RefreshCw, Trash2, Zap } from "lucide-react";
 import type { Notify } from "../features/notifications/types";
+import { ANCHOR_ATTRIBUTE, FlashHighlight, SettingsPageTitle } from "./SettingsSection";
 
 type Engine = {
   id: string;
@@ -267,12 +268,12 @@ export default function EnginesSettingsPage({ onChanged, notify }: EnginesSettin
 
   return (
     <section>
-      <div className="mb-6 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-5">
-        <h2 className="text-[17px] font-semibold tracking-tight">Engines</h2>
-        <button type="button" onClick={() => void loadEngines(true)} disabled={refreshing || loading} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-[var(--line)] px-3 text-[13px] text-[var(--muted)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><RefreshCw size={14} className={refreshing ? "animate-spin" : ""} />Refresh catalog</button>
-      </div>
+      <SettingsPageTitle>
+        <h2 className="text-[17px] font-semibold tracking-tight" {...{ [ANCHOR_ATTRIBUTE]: "engines.list" }}>Engines</h2>
+        <button type="button" onClick={() => void loadEngines(true)} disabled={refreshing || loading} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-[var(--line)] px-3 text-[13px] text-[var(--muted)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><RefreshCw size={14} className={refreshing ? "animate-spin" : ""} /><FlashHighlight anchor="engines.list" />Refresh catalog</button>
+      </SettingsPageTitle>
 
-      <div className="divide-y divide-[var(--line)] overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--panel)]">
+      <div className="divide-y divide-[var(--line)]">
         <article>
           <div className="flex min-h-[68px] items-center gap-2 px-4 py-3">
             <button type="button" onClick={() => setExpanded((current) => !current)} aria-expanded={expanded} aria-label={`${expanded ? "Collapse" : "Expand"} llama.cpp Vulkan engines`} title={`${expanded ? "Collapse" : "Expand"} llama.cpp Vulkan engines`} className="grid size-9 shrink-0 place-items-center rounded-md text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><Zap size={16} /></button>

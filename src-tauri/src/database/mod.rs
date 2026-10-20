@@ -15,6 +15,7 @@ pub mod bundled_skills;
 pub mod jobs;
 pub mod skills;
 pub mod statistics;
+pub mod taste;
 pub mod transcripts;
 pub mod workspaces;
 
@@ -28,7 +29,7 @@ pub struct Database {
 /// both refer to this, so adding a migration is one edit here plus one in
 /// `migrate`. Before this existed, each new migration silently broke a test that
 /// had hardcoded the old number.
-pub const LATEST_SCHEMA_VERSION: i64 = 15;
+pub const LATEST_SCHEMA_VERSION: i64 = 17;
 
 /// The current time as UTC ISO-8601, the format every timestamp uses.
 ///
@@ -582,6 +583,61 @@ impl Database {
         tx.commit().map_err(|error| error.to_string())
     }
 
+    /// The session row as JSON, in the shape `save_chat_session` takes back.
+    ///
+    /// Used when a change originates on this side -- today the manual compaction
+    /// `/compact` -- and the whole row has to be handed to the one save path rather than a
+    /// second writer being written beside it. The rollups and the metadata are read as
+    /// stored, so a save that only changed the messages changes nothing else.
+    pub fn session_record(&self, session_id: &str) -> Result<serde_json::Value, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let mut record = connection
+            .query_row(
+                "SELECT id,title,created_at,updated_at,model_id,provider_id,metadata_json FROM sessions WHERE id=?1",
+                [session_id],
+                |row| {
+                    Ok(serde_json::json!({
+                        "id": row.get::<_, String>(0)?,
+                        "title": row.get::<_, String>(1)?,
+                        "createdAt": row.get::<_, String>(2)?,
+                        "updatedAt": row.get::<_, String>(3)?,
+                        "modelId": row.get::<_, Option<String>>(4)?,
+                        "providerId": row.get::<_, Option<String>>(5)?,
+                        "metadataJson": row.get::<_, Option<String>>(6)?,
+                    }))
+                },
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("Session '{session_id}' was not found"))?;
+        // The metadata blob carries the pin, the mode and the permission; they are the
+        // frontend's fields and are copied through untouched rather than re-derived.
+        if let Some(metadata) = record
+            .get("metadataJson")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        {
+            if let Some(object) = record.as_object_mut() {
+                object.remove("metadataJson");
+                for key in [
+                    "pinned",
+                    "renamed",
+                    "renamedByUser",
+                    "dotColor",
+                    "mode",
+                    "permission",
+                    "kind",
+                    "parentSessionId",
+                ] {
+                    if let Some(value) = metadata.get(key) {
+                        object.insert(key.to_string(), value.clone());
+                    }
+                }
+            }
+        }
+        Ok(record)
+    }
+
     pub fn save_chat_session(&self, session: &serde_json::Value) -> Result<(), String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let tx = connection
@@ -918,6 +974,16 @@ impl Database {
         // before the label. Swapping them filters on `since = "month"`, which
         // matches nothing and makes the page look empty.
         statistics::build_report(&connection, since, range, bucket_sql)
+    }
+
+    /// Records what one assist request cost.
+    ///
+    /// A thin passthrough rather than the watcher reaching for a connection of its own: the
+    /// one lock over the connection lives here, and a second path to it would be a second
+    /// place that can hold it while something else wants it.
+    pub fn record_assist_usage(&self, usage: &statistics::AssistUsage) -> Result<(), String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        statistics::record_assist_usage(&connection, usage)
     }
 
     /// Stores what each model of a provider can do.
@@ -1605,6 +1671,103 @@ fn migrate(connection: &mut Connection) -> Result<(), String> {
         // real type keep it.
         tx.execute_batch(&format!(
             "UPDATE skills SET type='unorganized' WHERE type IS NULL OR TRIM(type)='';
+             PRAGMA user_version={LATEST_SCHEMA_VERSION};"
+        ))
+        .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+    }
+    // What assist spent.
+    //
+    // A table of its own rather than a row on `sessions`, because an assist answer is not a
+    // conversation: it has no transcript, it is never opened, and folding it into the
+    // session rollups would make "conversations" count something that is not one. One row
+    // per request that reached a model, so the statistics page can report assist's tokens
+    // beside everything else's -- and by model, which is the only way to answer "what is
+    // this feature costing me, and on what".
+    if version < 16 {
+        let tx = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        tx.execute_batch(&format!(
+            "CREATE TABLE IF NOT EXISTS assist_usage (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 created_at TEXT NOT NULL,
+                 model_id TEXT NOT NULL,
+                 provider_id TEXT NOT NULL DEFAULT '',
+                 -- Nullable with no default, like `messages.cached_tokens`: NULL is how a
+                 -- row records that the provider reported no cache figure, and a default of
+                 -- zero would turn an unknown into a fact.
+                 prompt_tokens INTEGER,
+                 completion_tokens INTEGER,
+                 cached_tokens INTEGER,
+                 -- How much the page offered and how much came back, so the figures can be
+                 -- read as three cards from twenty-four blocks rather than as a bare count.
+                 blocks INTEGER NOT NULL DEFAULT 0,
+                 cards INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE INDEX IF NOT EXISTS idx_assist_usage_at ON assist_usage(created_at);
+             PRAGMA user_version={LATEST_SCHEMA_VERSION};"
+        ))
+        .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+    }
+    // What ProjectZ has learned about the user, and what each learning run did.
+    //
+    // Three tables rather than a settings blob: the profile has a hard size cap
+    // but an unknown lifetime, and the run history is the thing a future monthly
+    // review reads. A JSON value would be rewritten whole on every run, which is
+    // exactly the shape that makes an interrupted write lose everything.
+    //
+    // `taste_items.id` is written by the learner rather than assigned here,
+    // because an id is an address the model edits by. `AUTOINCREMENT` is still
+    // declared so a caller that inserts without one cannot collide with the ids
+    // already in use.
+    if version < 17 {
+        let tx = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        tx.execute_batch(&format!(
+            "CREATE TABLE IF NOT EXISTS taste_items (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 section TEXT NOT NULL,
+                 text TEXT NOT NULL,
+                 confidence REAL NOT NULL DEFAULT 0.7,
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL,
+                 last_seen_at TEXT NOT NULL
+             );
+             -- The profile is read in id order for a stable prompt prefix.
+             CREATE INDEX IF NOT EXISTS idx_taste_items_id ON taste_items(id);
+
+             -- How far each conversation has been read, not how far a run got.
+             -- A batch that succeeded advances its own sessions and nothing else,
+             -- so a failed run never makes the next one re-read work it paid for.
+             CREATE TABLE IF NOT EXISTS taste_sessions (
+                 session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+                 last_ordinal INTEGER NOT NULL,
+                 updated_at TEXT NOT NULL
+             );
+
+             -- One row per run: the report, the rendered profile, and the figures.
+             CREATE TABLE IF NOT EXISTS taste_runs (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 started_at TEXT NOT NULL,
+                 finished_at TEXT,
+                 status TEXT NOT NULL,
+                 reason TEXT,
+                 model_id TEXT,
+                 provider_id TEXT,
+                 sessions_read INTEGER NOT NULL DEFAULT 0,
+                 messages_read INTEGER NOT NULL DEFAULT 0,
+                 prompt_tokens INTEGER,
+                 completion_tokens INTEGER,
+                 added INTEGER NOT NULL DEFAULT 0,
+                 updated INTEGER NOT NULL DEFAULT 0,
+                 removed INTEGER NOT NULL DEFAULT 0,
+                 report TEXT,
+                 document TEXT
+             );
+             CREATE INDEX IF NOT EXISTS idx_taste_runs_started ON taste_runs(started_at DESC);
              PRAGMA user_version={LATEST_SCHEMA_VERSION};"
         ))
         .map_err(|error| error.to_string())?;
@@ -2388,6 +2551,55 @@ mod tests {
         // Session rollups must match the sum of the messages.
         assert_eq!(loaded[0]["promptTokens"], 30);
         assert_eq!(loaded[0]["completionTokens"], 35);
+        assert_eq!(
+            connection
+                .last_prompt_tokens("s1", "openai", "gpt")
+                .unwrap(),
+            Some(20)
+        );
+        assert_eq!(
+            connection.last_prompt_tokens("s1", "other", "gpt").unwrap(),
+            None
+        );
+    }
+
+    /// The record `/compact` hands back to `save_chat_session` must carry everything the
+    /// session row already holds -- otherwise a compaction would reset the pin, the mode
+    /// and the permission on a conversation that had all three set.
+    #[test]
+    fn a_session_record_round_trips_its_header() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate(&mut connection).unwrap();
+        let database = Database {
+            connection: Mutex::new(connection),
+        };
+        database
+            .save_chat_session(&serde_json::json!({
+                "id": "s1", "title": "Kept", "createdAt": "2026-10-01T10:00:00.000Z",
+                "updatedAt": "2026-10-01T10:00:05.000Z",
+                "pinned": true, "mode": "agent", "permission": "full",
+                "messages": [
+                    {"role": "user", "content": "one"},
+                    {"role": "assistant", "content": "two"}
+                ]
+            }))
+            .unwrap();
+
+        let record = database.session_record("s1").unwrap();
+        assert_eq!(record["title"], "Kept");
+        assert_eq!(record["pinned"], true);
+        assert_eq!(record["mode"], "agent");
+        assert_eq!(record["permission"], "full");
+
+        // Saved back with fewer messages, the header is undisturbed.
+        let mut record = record;
+        record["messages"] = serde_json::json!([{"role": "user", "content": "one"}]);
+        record["updatedAt"] = serde_json::json!("2026-10-01T10:00:06.000Z");
+        database.save_chat_session(&record).unwrap();
+        let reloaded = database.session_record("s1").unwrap();
+        assert_eq!(reloaded["pinned"], true);
+        assert_eq!(reloaded["mode"], "agent");
+        assert_eq!(database.list_session_messages("s1").unwrap().len(), 1);
     }
 
     /// A shrinking transcript must remove only the trailing rows, not the whole

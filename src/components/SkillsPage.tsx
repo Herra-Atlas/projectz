@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { LoaderCircle, Plus } from "lucide-react";
 import type { Notify } from "../features/notifications/types";
 import type { Skill } from "../features/skills/types";
+import { ANCHOR_ATTRIBUTE, FlashHighlight, MARKABLE_ATTRIBUTE, SettingsPageTitle } from "./SettingsSection";
 import SkillCard from "./skills/SkillCard";
 import SkillDeleteDialog from "./skills/SkillDeleteDialog";
 import SkillsEmptyState from "./skills/SkillsEmptyState";
@@ -78,16 +79,17 @@ export default function SkillsPage({
 
   return (
     <div>
-      <div className="mb-6 flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] pb-5">
+      <SettingsPageTitle>
         <h2 className="text-[17px] font-semibold tracking-tight">Skills</h2>
         <button
           type="button"
+          {...{ [ANCHOR_ATTRIBUTE]: "skills.list", [MARKABLE_ATTRIBUTE]: "" }}
           onClick={() => onOpenForm(null)}
           className="inline-flex min-h-9 shrink-0 items-center gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 text-[13px] font-medium text-[var(--text)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
         >
-          <Plus size={15} />New skill
+<FlashHighlight anchor="skills.list" /><Plus size={15} />New skill
         </button>
-      </div>
+      </SettingsPageTitle>
 
       {loading ? (
         <p className="flex items-center gap-2 text-sm text-[var(--muted)]">

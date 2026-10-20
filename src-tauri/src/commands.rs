@@ -28,6 +28,66 @@ pub fn ai_cancel_chat(runtime: State<'_, AiRuntime>, run_id: String) {
     runtime.cancel_chat(&run_id);
 }
 
+/// Compacts a stored conversation now, at the user's request -- the composer's `/compact`.
+///
+/// **The stored transcript, not a request copy.** The automatic pass in
+/// `ai::remote::client` trims what one reply sends and leaves the database alone; this is
+/// the other door -- a user who knows the conversation is too long asks for the same trim
+/// to be written down, so the rows they see are what the model will be sent. It applies the
+/// same elision, at the same mode, and leaves a hidden notice in the transcript the way the
+/// automatic pass leaves one in the run.
+///
+/// Returns the messages to draw, or `Err` with a reason the composer can show plainly.
+#[tauri::command]
+pub async fn ai_compact_session(
+    database: State<'_, std::sync::Arc<crate::database::Database>>,
+    session_id: String,
+) -> Result<Vec<crate::ai::types::ChatMessage>, String> {
+    use crate::ai::compact::Compaction;
+
+    // The mode is the stored preference, read here rather than passed in: a command is not
+    // a second place a setting lives, and the user asking to compact means "do what you
+    // would do", not "do something the next reply will not".
+    let stored: Option<serde_json::Value> = database.setting("app.preferences");
+    let mode = Compaction::parse(
+        stored
+            .as_ref()
+            .and_then(|value| value.get("compaction"))
+            .and_then(serde_json::Value::as_str),
+    );
+    if mode == Compaction::Off {
+        return Err("Context compaction is off. Turn it on in Settings → Preferences.".into());
+    }
+
+    // Messages are stored as the frontend's own JSON -- the same shape `ChatMessage` is
+    // deserialised from -- so the compactor is handed them directly and they go back
+    // through the one save path rather than a second writer.
+    let mut messages = database
+        .list_session_messages(&session_id)
+        .map_err(|error| error.to_string())?;
+    let outcome = crate::ai::compact::apply_to_history(&mut messages, mode);
+    if outcome.removed == 0 {
+        return Ok(Vec::new());
+    }
+    // The session's own record is written back with the compacted messages, so the header,
+    // the pin, the mode and the rollups stay exactly as the frontend left them.
+    let mut record = database.session_record(&session_id)?;
+    if let Some(object) = record.as_object_mut() {
+        object.insert(
+            "messages".into(),
+            serde_json::Value::Array(messages.clone()),
+        );
+    }
+    database
+        .save_chat_session(&record)
+        .map_err(|error| error.to_string())?;
+    info!(session_id = %session_id, removed = outcome.removed, mode = %outcome.mode, "conversation compacted");
+    Ok(messages
+        .into_iter()
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .collect())
+}
+
 /// Re-points the level a reply in flight decides at.
 ///
 /// The composer stays live while a reply streams, so a level picked there has to
@@ -98,6 +158,132 @@ pub async fn ai_generate_title(
     runtime.generate_title(&selections, &prompt).await
 }
 
+/// Everything the Taste settings page draws.
+#[tauri::command]
+pub fn taste_status(taste: State<'_, crate::taste::Taste>) -> crate::taste::TasteStatus {
+    taste.status()
+}
+
+/// Writes the taste record and returns what was stored.
+#[tauri::command]
+pub fn taste_save_settings(
+    app: AppHandle,
+    taste: State<'_, crate::taste::Taste>,
+    settings: crate::taste::TasteSettings,
+) -> Result<crate::taste::TasteSettings, String> {
+    taste.save(&app, &settings)
+}
+
+/// Runs a learning pass now, whether or not the schedule says so.
+#[tauri::command]
+pub async fn taste_run_now(
+    app: AppHandle,
+    runtime: State<'_, AiRuntime>,
+    taste: State<'_, crate::taste::Taste>,
+) -> Result<crate::taste::TasteRunView, String> {
+    taste.run_now(&app, &runtime).await
+}
+
+/// The last runs, newest first.
+#[tauri::command]
+pub fn taste_runs(
+    taste: State<'_, crate::taste::Taste>,
+    limit: Option<i64>,
+) -> Vec<crate::taste::TasteRunView> {
+    taste.runs(limit.unwrap_or(20))
+}
+
+/// Rewrites one learned fact.
+#[tauri::command]
+pub fn taste_update_item(
+    app: AppHandle,
+    taste: State<'_, crate::taste::Taste>,
+    id: i64,
+    text: String,
+) -> Result<crate::taste::TasteStatus, String> {
+    taste.update_item(&app, id, &text)
+}
+
+/// Deletes one learned fact.
+#[tauri::command]
+pub fn taste_delete_item(
+    app: AppHandle,
+    taste: State<'_, crate::taste::Taste>,
+    id: i64,
+) -> Result<crate::taste::TasteStatus, String> {
+    taste.delete_item(&app, id)
+}
+
+/// Forgets the learned profile and how far each conversation was read.
+#[tauri::command]
+pub fn taste_reset(
+    app: AppHandle,
+    taste: State<'_, crate::taste::Taste>,
+) -> Result<crate::taste::TasteStatus, String> {
+    taste.reset(&app)
+}
+
+/// The Assist record and its derived bounds, without live bridge or model state.
+///
+/// The settings page's fast path: it can draw every control from this answer
+/// while the slower full status is still reading the local model list.
+#[tauri::command]
+pub fn assist_settings(
+    assist: State<'_, crate::assist::Assist>,
+) -> crate::assist::AssistSettingsView {
+    assist.settings_view()
+}
+
+/// Everything the Assist settings page and the tray item draw.
+///
+/// Also brings the tray item into step with the stored record. The item is built
+/// during setup, before the database has been migrated on a first launch, so this
+/// is where it converges on the truth rather than staying at whatever the default
+/// happened to be.
+///
+/// **Cheap by construction.** The only expensive thing this used to do was name the chosen
+/// local model through `LocalModelManager::list`, which stats every model file and reads
+/// its GGUF header. It now reads the stored rows (`stored`), because a name needs a row and
+/// not a file -- so the bridge, the budget and the database lock are all this touches. The
+/// page also no longer waits here: the modal reads the record when the dialog opens.
+#[tauri::command]
+pub fn assist_status(
+    app: AppHandle,
+    runtime: State<'_, AiRuntime>,
+    assist: State<'_, crate::assist::Assist>,
+) -> crate::assist::AssistStatus {
+    let status = assist.status(&runtime);
+    crate::sync_assist_toggle(&app, status.enabled);
+    status
+}
+
+/// Writes the assist record, clamped, and answers with what was stored.
+#[tauri::command]
+pub fn assist_save_settings(
+    app: AppHandle,
+    assist: State<'_, crate::assist::Assist>,
+    settings: crate::assist::AssistSettings,
+) -> Result<crate::assist::AssistSettings, String> {
+    let saved = assist.save(&settings)?;
+    crate::sync_assist_toggle(&app, saved.enabled);
+    Ok(saved)
+}
+
+/// Moves the one switch the tray, Settings and the extension all read.
+///
+/// The same call the tray's own item makes, so the three doors cannot drift: each
+/// of them ends up writing the record and announcing it from this one place.
+#[tauri::command]
+pub fn assist_set_enabled(
+    app: AppHandle,
+    runtime: State<'_, AiRuntime>,
+    assist: State<'_, crate::assist::Assist>,
+    enabled: bool,
+) -> Result<crate::assist::AssistStatus, String> {
+    assist.set_enabled(&app, enabled)?;
+    Ok(assist.status(&runtime))
+}
+
 #[tauri::command]
 pub async fn database_initialize(
     app: AppHandle,
@@ -108,6 +294,9 @@ pub async fn database_initialize(
         serde_json::json!({"phase":"database","message":"Checking database","progress":12}),
     );
     runtime.database().initialize()?;
+    // The taste tables exist only once the migration has run, so the prompt cache
+    // primed during setup could not have read them. Prime it again now.
+    crate::taste::refresh_prompt_cache(&runtime.database());
     let legacy_data_dir = dirs::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("projectz");

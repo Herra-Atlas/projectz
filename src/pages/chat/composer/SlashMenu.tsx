@@ -37,6 +37,10 @@ export default function SlashMenu({
           aria-selected={index === activeIndex}
           aria-disabled={command.disabled}
           disabled={command.disabled}
+          // **Down runs it, click does not.** The press is what completes the choice and
+          // moves focus back to the field, so the pointer-up lands on the textarea with no
+          // button under it -- and a `click` never fires. Choosing from the menu therefore
+          // has to happen here, or a pick silently does nothing.
           onMouseDown={(event) => {
             event.preventDefault();
             if (command.disabled) return;

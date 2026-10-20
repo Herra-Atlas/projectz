@@ -22,7 +22,7 @@
 //! and the database tests still use it, and a second full-read implementation
 //! would be a second thing to keep correct.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
 use super::Database;
@@ -106,6 +106,35 @@ impl Database {
     pub fn list_session_messages(&self, session_id: &str) -> Result<Vec<Value>, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         Self::read_messages(&connection, session_id)
+    }
+
+    pub fn last_prompt_tokens(
+        &self,
+        session_id: &str,
+        provider_id: &str,
+        model_id: &str,
+    ) -> Result<Option<u64>, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let latest = connection
+            .query_row(
+                "SELECT provider_id, model_id, prompt_tokens FROM messages WHERE session_id=?1 AND role='assistant' ORDER BY ordinal DESC LIMIT 1",
+                [session_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        Ok(latest
+            .filter(|(provider, model, _)| {
+                provider.as_deref() == Some(provider_id) && model.as_deref() == Some(model_id)
+            })
+            .and_then(|(_, _, tokens)| tokens)
+            .and_then(|tokens| u64::try_from(tokens).ok()))
     }
 
     /// The `messages` query, shared by the per-session read and the full read so

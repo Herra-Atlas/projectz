@@ -40,6 +40,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Mutex, MutexGuard,
 };
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::{
@@ -62,6 +63,17 @@ pub const BROWSER_PAGE_EVENT: &str = "panel-browser-page";
 /// the panel should be answered by the same engine `search_web` uses, or the two
 /// features disagree about what the web says about a query.
 pub const SEARCH_ENGINE: &str = "https://duckduckgo.com/html/?q=";
+
+/// The query parameter used to force a fresh load from a local server.
+///
+/// **Localhost is the one place the webview's cache is wrong more often than it is
+/// right.** A dev server changes its output without changing its URL, and the
+/// webview's document cache (or a service worker left by an earlier version of the
+/// site) can serve yesterday's page after the server is something else entirely.
+/// A unique query parameter makes the request a different URL, which is what
+/// bypasses both. It is stripped again before the address bar and history see it,
+/// so the user never has to know it exists.
+const REFRESH_PARAM: &str = "__projectz_refresh";
 
 /// One entry in the browser's tab strip.
 #[derive(Clone, Debug, Serialize)]
@@ -491,6 +503,63 @@ fn scheme_is_allowed(url: &Url) -> bool {
     matches!(url.scheme(), "http" | "https" | "file")
 }
 
+/// Whether a page is served from this machine.
+///
+/// Only loopback is cache-busted. A public site's cache is doing its job, and
+/// changing every address the user types would defeat it -- and change what
+/// servers and analytics see.
+fn is_loopback(url: &Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host == "127.0.0.1"
+            || host == "::1"
+            || host == "[::1]"
+    })
+}
+
+/// Adds a unique parameter to a loopback URL, leaving everything else untouched.
+///
+/// The parameter is appended rather than replacing the query, so a dev server's
+/// own `?route=...` survives. A fragment stays after the query, which is where a
+/// browser expects it.
+fn with_cache_bust(url: &Url) -> Url {
+    if !is_loopback(url) {
+        return url.clone();
+    }
+    let mut next = url.clone();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or_default();
+    next.query_pairs_mut()
+        .append_pair(REFRESH_PARAM, &nonce.to_string());
+    next
+}
+
+/// Removes the cache-busting parameter from a URL the webview reports.
+///
+/// The load is the only place the parameter is needed. History, the address bar
+/// and the tab strip all receive the clean address, so navigating to the same
+/// page twice does not leave two entries that differ by a timestamp.
+fn without_cache_bust(value: &str) -> String {
+    let Ok(mut url) = Url::parse(value) else {
+        return value.to_string();
+    };
+    if !url.query_pairs().any(|(key, _)| key == REFRESH_PARAM) {
+        return value.to_string();
+    }
+    let kept: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| key != REFRESH_PARAM)
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.set_query(None);
+    if !kept.is_empty() {
+        url.query_pairs_mut().extend_pairs(kept);
+    }
+    url.to_string()
+}
+
 /// Percent-encodes a search phrase for a query string.
 fn urlencode(input: &str) -> String {
     let mut encoded = String::with_capacity(input.len());
@@ -515,7 +584,7 @@ fn urlencode(input: &str) -> String {
 pub async fn panel_browser_navigate(app: AppHandle, url: String) -> Result<BrowserState, String> {
     let target = resolve_input(&url)?;
     if let Some(webview) = app.get_webview(BROWSER_LABEL) {
-        navigate(&webview, target)?;
+        navigate(&webview, with_cache_bust(&target))?;
         let state = current_state(&app);
         emit_state(&app, &state);
         return Ok(state);
@@ -571,7 +640,7 @@ pub async fn panel_browser_open_tab(
     };
     match &target {
         Some(target) => {
-            navigate(&webview, target.clone())?;
+            navigate(&webview, with_cache_bust(target))?;
         }
         None => {
             // An empty tab shows the DOM empty state ("Open a page"), so the
@@ -612,7 +681,7 @@ pub async fn panel_browser_select_tab(app: AppHandle, id: u64) -> Result<Browser
     } else {
         match Url::parse(&target) {
             Ok(url) => {
-                let _ = navigate(&webview, url);
+                let _ = navigate(&webview, with_cache_bust(&url));
             }
             Err(error) => {
                 tracing::debug!(url = %target, error = %error, "browser tab entry is not a url")
@@ -685,7 +754,7 @@ async fn open_link_tab(app: AppHandle, input: String, generation: u64) -> Result
         tabs.open_on(target.as_str());
         emit_state(&app, &tabs.state());
     }
-    navigate(&webview, target)
+    navigate(&webview, with_cache_bust(&target))
 }
 
 /// Creates the webview onto a page, opening the first tab for it.
@@ -704,10 +773,13 @@ fn create_browser(app: &AppHandle, target: Url) -> Result<BrowserState, String> 
         .try_state::<Browser>()
         .map(|browser| browser.generation.load(Ordering::SeqCst))
         .unwrap_or_default();
+    // The seed keeps the clean address; the first load is cache-busted when the
+    // page is local. `on_page_load` strips the parameter before history sees it.
+    let load = with_cache_bust(&target);
     // Off-screen at 1x1 until the frontend reports the container's real geometry.
     // A webview created at 0,0 with a guessed size would be visible for the frame
     // between creation and the first measurement, sitting over the chat.
-    let builder = WebviewBuilder::new(BROWSER_LABEL, WebviewUrl::External(target.clone()))
+    let builder = WebviewBuilder::new(BROWSER_LABEL, WebviewUrl::External(load))
         // Zoom keys, because a page that cannot be zoomed is unreadable for some
         // people and it costs one line. This webview is a document viewer rather
         // than a general-purpose browser, so nothing else from a browser's chrome
@@ -806,7 +878,8 @@ fn on_page_load<R: Runtime>(webview: Webview<R>, payload: PageLoadPayload<'_>) {
         return;
     }
 
-    let url = payload.url().to_string();
+    // The address bar, history and tab strip never see the cache-busting nonce.
+    let url = without_cache_bust(&payload.url().to_string());
 
     if url == "about:blank" {
         // Parking navigations (`about:blank` on empty tabs) are not history.
@@ -942,6 +1015,17 @@ pub async fn panel_browser_reload(app: AppHandle) -> Result<BrowserState, String
             }
             let state = tabs.state();
             emit_state(&app, &state);
+        }
+    }
+    // A reload of a local page is the other place stale content appears. The
+    // webview's own reload consults its cache, so a dev server that changed
+    // without changing its URL would still show the old document. Navigating to
+    // the same address with a fresh nonce is what actually asks the server again.
+    let state = current_state(&app);
+    if let Ok(url) = Url::parse(&state.url) {
+        if is_loopback(&url) {
+            let _ = navigate(&webview, with_cache_bust(&url));
+            return Ok(current_state(&app));
         }
     }
     let _ = webview.reload();
@@ -1286,5 +1370,36 @@ mod tests {
         history.push(url.as_str());
         assert!(!history.can_go_back());
         assert_eq!(history.current(), url.as_str());
+    }
+
+    /// A dev server changes its output without changing its URL. The nonce makes
+    /// the load a different request; the address bar and history still receive the
+    /// clean address.
+    #[test]
+    fn a_local_page_is_loaded_with_a_fresh_nonce_and_reported_clean() {
+        let url = resolve_input("localhost:8000").expect("url");
+        let loaded = with_cache_bust(&url);
+        assert!(loaded.as_str().contains(REFRESH_PARAM), "{loaded}");
+        assert_eq!(without_cache_bust(loaded.as_str()), url.as_str());
+
+        let with_parts = resolve_input("http://127.0.0.1:8000/app?tab=one#top").expect("url");
+        let loaded = with_cache_bust(&with_parts);
+        assert!(loaded.as_str().contains("tab=one"), "{loaded}");
+        assert!(loaded.as_str().contains("#top"), "{loaded}");
+        assert_eq!(without_cache_bust(loaded.as_str()), with_parts.as_str());
+    }
+
+    /// A public site's cache is doing what it should. Changing every address the
+    /// user types would defeat it and change what servers see.
+    #[test]
+    fn a_public_address_is_not_cache_busted() {
+        let url = resolve_input("example.com/docs").expect("url");
+        assert_eq!(with_cache_bust(&url), url);
+        assert_eq!(without_cache_bust(url.as_str()), url.as_str());
+        // A URL that never had the parameter is returned byte for byte.
+        assert_eq!(
+            without_cache_bust("https://example.com/a?b=c"),
+            "https://example.com/a?b=c"
+        );
     }
 }
