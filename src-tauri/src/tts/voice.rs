@@ -23,11 +23,6 @@ pub fn install_dir() -> PathBuf {
     voice_root().join("piper")
 }
 
-/// Where a voice added by hand is copied to.
-pub fn local_dir() -> PathBuf {
-    models_root().join("tts").join("local")
-}
-
 /// One voice, as the settings page lists it.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -159,12 +154,8 @@ fn from_model(model: &Path) -> Result<Voice, String> {
 
 /// The row a page draws for one model file, or nothing if it cannot be read.
 ///
-/// Public because adding a voice by hand has to answer with the row it created,
-/// and the rules for reading a voice's rate belong here rather than in a command.
-pub fn describe(model: &Path) -> Option<VoiceEntry> {
-    entry_for(model)
-}
-
+/// The rules for reading a voice's rate belong here rather than in a command, so
+/// the list and any future caller agree on what a voice is.
 fn entry_for(model: &Path) -> Option<VoiceEntry> {
     let config = model.with_extension("onnx.json");
     let sample_rate = sample_rate_from(&config).ok()?;

@@ -1460,11 +1460,36 @@ pub fn local_path_exists(path: String) -> bool {
 pub fn local_runtime_settings_save(
     runtime: State<'_, AiRuntime>,
     model_id: String,
-    settings: crate::ai::local::LocalRuntimeSettings,
+    mut settings: crate::ai::local::LocalRuntimeSettings,
 ) -> Result<crate::ai::local::LocalRuntimeSettings, String> {
+    // The app has to know where its server is and which model it loaded, so a
+    // custom list may not touch those four flags. Caught here rather than when the
+    // server fails to answer, where the cause would be a mystery.
+    if let Some(custom) = settings.custom_args.as_deref() {
+        if custom.trim().is_empty() {
+            settings.custom_args = None;
+        } else if let Some(argument) = settings
+            .effective_args()
+            .into_iter()
+            .find(|argument| crate::ai::local::RESERVED_ARGUMENTS.contains(&argument.as_str()))
+        {
+            return Err(format!(
+                "{argument} is set by the app, so it cannot appear in the custom arguments."
+            ));
+        }
+    }
     runtime
         .local_models()
         .save_runtime_settings(&model_id, settings)
+}
+
+/// The argument list these settings produce, so the page can show it as one line.
+///
+/// Takes the settings rather than a model id: the box has to show what the form
+/// currently says, not what was last saved.
+#[tauri::command]
+pub fn local_runtime_arguments(settings: crate::ai::local::LocalRuntimeSettings) -> String {
+    crate::ai::local::quote_arguments(&settings.to_args())
 }
 
 #[tauri::command]

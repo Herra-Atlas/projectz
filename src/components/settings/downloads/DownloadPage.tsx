@@ -1,12 +1,18 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { LoaderCircle, Search } from "lucide-react";
 
 import { SettingsPageTitle } from "../../SettingsSection";
 import type { Notify } from "../../../features/notifications/types";
 import { useDownloadSearch } from "../../../features/downloads/useDownloadSearch";
-import { useInstaller } from "../../../features/downloads/useInstaller";
-import { downloadKey, type DownloadFile, type DownloadKind } from "../../../features/downloads/types";
+import { useDownloads } from "../../../features/downloads/useDownloads";
+import {
+  downloadKey,
+  jobKey,
+  type DownloadKind,
+  type InstalledFile,
+} from "../../../features/downloads/types";
 import { DownloadRow } from "./DownloadRow";
 
 /** Rows drawn before the first scroll, and added by each one after. */
@@ -56,27 +62,43 @@ export function DownloadPage({
   const { files, loading, error } = useDownloadSearch(kind, query);
   const [visible, setVisible] = useState(PAGE);
 
-  const onInstalled = useMemo(
-    () => (file: DownloadFile, installedPath: string) => {
-      notify("success", `${file.name} installed`);
-      if (kind !== "llama") return;
-      // A GGUF on disk is not a model this app offers until it is registered, and
-      // one the user has to find again by hand is a download that looks like it
-      // did nothing. The installer already wrote the file; this is the half that
-      // makes it show up.
-      void invoke("local_models_add", { path: installedPath })
-        .then(() => onModelInstalled())
-        .catch((reason: unknown) =>
-          notify("error", `Downloaded, but could not be added to Local models: ${String(reason)}`),
-        );
-    },
-    [kind, notify, onModelInstalled],
-  );
-  const onError = useMemo(
-    () => (message: string) => notify("error", `Download failed: ${message}`),
-    [notify],
-  );
-  const { installing, progress, installed, install } = useInstaller(kind, onInstalled, onError);
+  const { jobs, start } = useDownloads((message) => notify("error", message));
+
+  // What is already on disk, so a row says "Installed" instead of offering a
+  // second copy. Read from the folder rather than from the job list: a file
+  // downloaded in an earlier session is just as installed.
+  const [installed, setInstalled] = useState<Set<string>>(new Set());
+  const loadInstalled = useCallback(() => {
+    void invoke<InstalledFile[]>("downloads_installed", { kind })
+      .then((found) => setInstalled(new Set(found.map((file) => `${file.repo}/${file.name}`))))
+      .catch(() => undefined);
+  }, [kind]);
+  useEffect(() => {
+    loadInstalled();
+  }, [loadInstalled]);
+  useEffect(() => {
+    let live = true;
+    let stop: (() => void) | undefined;
+    void listen("downloads-installed", loadInstalled).then((unlisten) => {
+      if (live) stop = unlisten;
+      else unlisten();
+    });
+    return () => {
+      live = false;
+      stop?.();
+    };
+  }, [loadInstalled]);
+
+  // A GGUF is registered by the backend when its job finishes; this is what makes
+  // the list behind the page re-read after that.
+  const announced = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    for (const job of jobs) {
+      if (job.kind !== "llama" || job.state !== "done" || announced.current.has(job.id)) continue;
+      announced.current.add(job.id);
+      onModelInstalled();
+    }
+  }, [jobs, onModelInstalled]);
 
   // A new result set starts from the top, or a search made after scrolling would
   // open at row 200 of a list that now has eight.
@@ -139,15 +161,15 @@ export function DownloadPage({
           <div className="divide-y divide-[var(--line)] border-y border-[var(--line)]">
             {shown.map((file) => {
               const key = downloadKey(file);
+              const job = jobs.find((entry) => entry.id === jobKey(kind, file.repo, file.path));
               return (
                 <DownloadRow
                   key={key}
                   file={file}
-                  installed={installed.has(key)}
-                  busy={installing === key}
-                  disabled={installing !== null}
-                  progress={progress[key]}
-                  onInstall={() => install(file)}
+                  installed={installed.has(`${file.repo}/${file.name}`)}
+                  job={job}
+                  disabled={false}
+                  onDownload={() => start(kind, file.repo, file.path)}
                 />
               );
             })}

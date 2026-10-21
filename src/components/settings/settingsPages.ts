@@ -31,6 +31,12 @@ export type SettingsPage =
   | { view: "ttsSettings" }
   /* One voice's own settings, carried by the voice's model path. */
   | { view: "ttsVoice"; voice: string }
+  /* A recognition model's own settings: what language it should expect. */
+  | { view: "sttModel"; model: string }
+  /* Transfers in flight, and what finished while the app was open. */
+  | { view: "downloads" }
+  /* What this installation is, what it uses, and the one destructive action. */
+  | { view: "system" }
   | { view: "skill"; skill: Skill | null }
   | { view: "model"; model: LocalModel }
   | { view: "form"; endpoint: Endpoint | null };

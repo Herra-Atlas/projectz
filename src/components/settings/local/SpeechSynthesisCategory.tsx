@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { open as openFile } from "@tauri-apps/plugin-dialog";
-import { Check, Cpu, Settings2, Trash2, Volume2 } from "lucide-react";
+import { Check, Cpu, Download, Settings2, Trash2, Volume2 } from "lucide-react";
 
 import { formatBytes } from "../../../features/downloads/format";
 import type { Notify } from "../../../features/notifications/types";
 import type { TtsSettings, VoiceEntry } from "../../../features/tts/types";
-import { LocalAddMenu } from "./LocalAddMenu";
+import { HoldToDelete } from "../../HoldToDelete";
 
 /**
  * The synthesis half of the Local page.
@@ -72,21 +71,6 @@ export function SpeechSynthesisCategory({
     }
   };
 
-  const addVoice = async () => {
-    const picked = await openFile({
-      multiple: false,
-      filters: [{ name: "Piper voice", extensions: ["onnx"] }],
-    });
-    if (typeof picked !== "string") return;
-    try {
-      const added = await invoke<VoiceEntry>("tts_add_voice", { path: picked });
-      await refresh();
-      notify("success", `${added.name} added`);
-    } catch (reason) {
-      notify("error", `The voice could not be added: ${String(reason)}`);
-    }
-  };
-
   const removeVoice = async (voice: VoiceEntry) => {
     try {
       await invoke("tts_remove_voice", { voice: voice.id });
@@ -119,14 +103,14 @@ export function SpeechSynthesisCategory({
                   : `${voices.length} voices`}
           </p>
         </div>
-        <LocalAddMenu
-          anchor="local.tts.add"
-          label="Add voice"
-          downloadLabel="Download voice"
-          addLabel="Add voice"
-          onDownload={onDownload}
-          onAdd={() => void addVoice()}
-        />
+        <button
+          type="button"
+          onClick={onDownload}
+          className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-md border border-[var(--line)] px-2.5 text-[12px] text-[var(--text)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+        >
+          <Download size={13} />
+          <span>Download voice</span>
+        </button>
         <button
           type="button"
           onClick={onSettings}
@@ -174,15 +158,14 @@ export function SpeechSynthesisCategory({
               >
                 <Settings2 size={14} />
               </button>
-              <button
-                type="button"
-                onClick={() => void removeVoice(voice)}
-                aria-label={`Delete ${voice.name}`}
+              <HoldToDelete
+                onConfirm={() => void removeVoice(voice)}
+                label={`Delete ${voice.name}`}
                 title="Delete voice"
                 className="grid size-8 shrink-0 place-items-center rounded-md text-[var(--quiet)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--danger)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
               >
                 <Trash2 size={14} />
-              </button>
+              </HoldToDelete>
             </div>
           );
         })}

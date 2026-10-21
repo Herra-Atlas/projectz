@@ -15,3 +15,14 @@ export function formatBytes(bytes: number): string {
   }
   return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
 }
+
+/**
+ * A transfer rate, in the same units as the sizes it divides.
+ *
+ * Zero is stated as zero rather than hidden: a download that is running at 0 B/s
+ * is stalled, and that is worth seeing.
+ */
+export function formatSpeed(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B/s";
+  return `${formatBytes(bytes)}/s`;
+}

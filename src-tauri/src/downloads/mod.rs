@@ -8,4 +8,5 @@ pub mod catalog;
 pub mod client;
 pub mod commands;
 pub mod install;
+pub mod jobs;
 pub mod kinds;

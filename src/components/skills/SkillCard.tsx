@@ -1,4 +1,5 @@
 import { Check, Package, Sparkles, Trash2 } from "lucide-react";
+import { HoldToDelete } from "../HoldToDelete";
 import type { Skill } from "../../features/skills/types";
 
 /**
@@ -92,14 +93,13 @@ export default function SkillCard({
           {on ? "Enabled" : "Off"}
         </button>
 
-        <button
-          type="button"
-          onClick={() => onDelete(skill)}
-          aria-label={`Delete ${skill.name}`}
+        <HoldToDelete
+          onConfirm={() => onDelete(skill)}
+          label={`Delete ${skill.name}`}
           className="grid size-8 shrink-0 place-items-center rounded-md text-[var(--quiet)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--danger)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
         >
           <Trash2 size={14} />
-        </button>
+        </HoldToDelete>
       </div>
     </article>
   );

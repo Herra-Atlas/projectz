@@ -198,6 +198,56 @@ pub struct LocalRuntimeSettings {
 
     /// `--mmproj-offload`. Whether the projector itself runs on the GPU.
     pub mmproj_offload: Option<bool>,
+
+    /// `--chat-template`. A built-in name, or the template itself.
+    ///
+    /// A GGUF whose metadata carries the wrong (or no) template is the commonest
+    /// reason a local model answers nonsense while the same file works elsewhere:
+    /// the model is fine, the prompt format is not.
+    pub chat_template: Option<String>,
+
+    /// `--chat-template-file`. A `.jinja` file, for a template kept outside the app.
+    pub chat_template_file: Option<String>,
+
+    /// `--jinja`. llama.cpp's own Jinja engine, which some templates need.
+    pub jinja: bool,
+
+    /// `--temp`. Sampling defaults for this model. Absent leaves llama.cpp's.
+    pub temperature: Option<f32>,
+
+    /// `--top-p`.
+    pub top_p: Option<f32>,
+
+    /// `--min-p`.
+    pub min_p: Option<f32>,
+
+    /// `--repeat-penalty`.
+    pub repeat_penalty: Option<f32>,
+
+    /// `--mlock`. Keeps the model in RAM instead of letting it be paged out.
+    pub mlock: bool,
+
+    /// `--no-mmap`. Reads the weights fully instead of mapping the file.
+    pub no_mmap: bool,
+
+    /// `-b`. Prompt-processing batch.
+    pub batch_size: Option<u32>,
+
+    /// `-ub`. The smaller batch the GPU actually sees.
+    pub ubatch_size: Option<u32>,
+
+    /// `--model-draft`. A small model that proposes tokens for the main one to
+    /// accept, which is the largest speedup available on a big model.
+    pub draft_model: Option<String>,
+
+    /// `--gpu-layers-draft`. How much of the draft model goes on the GPU.
+    pub draft_gpu_layers: Option<u32>,
+
+    /// A full argument list typed by the user, replacing everything above.
+    ///
+    /// `--model`, `--alias`, `--host` and `--port` stay with the app: it needs
+    /// them to find and talk to the process. Everything else is theirs to set.
+    pub custom_args: Option<String>,
 }
 
 impl Default for LocalRuntimeSettings {
@@ -218,6 +268,20 @@ impl Default for LocalRuntimeSettings {
             flash_attention: Some(FlashAttention::Auto),
             mmproj: None,
             mmproj_offload: None,
+            chat_template: None,
+            chat_template_file: None,
+            jinja: false,
+            temperature: None,
+            top_p: None,
+            min_p: None,
+            repeat_penalty: None,
+            mlock: false,
+            no_mmap: false,
+            batch_size: None,
+            ubatch_size: None,
+            draft_model: None,
+            draft_gpu_layers: None,
+            custom_args: None,
         }
     }
 }
@@ -282,8 +346,131 @@ impl LocalRuntimeSettings {
         if self.mmproj_offload == Some(true) {
             args.push("--mmproj-offload".to_string());
         }
+        // A template file wins over an inline one: it is the more specific of the
+        // two, and setting both is a mistake the user can see here rather than in
+        // llama.cpp's error message.
+        if let Some(file) = &self.chat_template_file {
+            if !file.trim().is_empty() {
+                push(&mut args, "--chat-template-file", file);
+            }
+        } else if let Some(template) = &self.chat_template {
+            if !template.trim().is_empty() {
+                push(&mut args, "--chat-template", template);
+            }
+        }
+        if self.jinja {
+            args.push("--jinja".to_string());
+        }
+        for (flag, value) in [
+            ("--temp", self.temperature),
+            ("--top-p", self.top_p),
+            ("--min-p", self.min_p),
+            ("--repeat-penalty", self.repeat_penalty),
+        ] {
+            if let Some(value) = value {
+                push(&mut args, flag, &format!("{value}"));
+            }
+        }
+        if self.mlock {
+            args.push("--mlock".to_string());
+        }
+        if self.no_mmap {
+            args.push("--no-mmap".to_string());
+        }
+        if let Some(batch) = self.batch_size {
+            push(&mut args, "-b", &batch.to_string());
+        }
+        if let Some(batch) = self.ubatch_size {
+            push(&mut args, "-ub", &batch.to_string());
+        }
+        if let Some(draft) = &self.draft_model {
+            if !draft.trim().is_empty() {
+                push(&mut args, "--model-draft", draft);
+            }
+        }
+        if let Some(layers) = self.draft_gpu_layers {
+            push(&mut args, "--gpu-layers-draft", &layers.to_string());
+        }
         args
     }
+
+    /// The arguments the process is actually started with.
+    ///
+    /// A custom list replaces the generated one wholesale rather than being
+    /// appended to it: "edit the command" means the text is the command, and a
+    /// hidden prefix would make the page lie about what is running.
+    pub fn effective_args(&self) -> Vec<String> {
+        match &self.custom_args {
+            Some(text) if !text.trim().is_empty() => split_arguments(text),
+            _ => self.to_args(),
+        }
+    }
+}
+
+/// An argument list as one line a person can edit.
+///
+/// Quoted only where a value needs it, so the common case reads like the command
+/// someone would have typed.
+pub fn quote_arguments(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| {
+            if arg.is_empty() || arg.chars().any(|character| character.is_whitespace() || character == '"') {
+                format!("\"{}\"", arg.replace('"', "\\\""))
+            } else {
+                arg.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The flags the app sets itself, which a custom argument list may not repeat.
+pub const RESERVED_ARGUMENTS: [&str; 4] = ["--model", "--alias", "--host", "--port"];
+
+/// Splits a command line into arguments, honouring quotes.
+///
+/// Only what a person types into one box: single and double quotes group a value
+/// with a space in it, and a backslash escapes the next character outside single
+/// quotes. Not a shell -- no variables, no globbing, no operators, because the
+/// string is arguments, not a script.
+fn split_arguments(text: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut started = false;
+
+    for character in text.chars() {
+        if escaped {
+            current.push(character);
+            escaped = false;
+            continue;
+        }
+        match (quote, character) {
+            (Some(open), close) if close == open => quote = None,
+            (Some(_), '\\') => escaped = true,
+            (Some(_), other) => current.push(other),
+            (None, '"') | (None, '\'') => {
+                quote = Some(character);
+                started = true;
+            }
+            (None, '\\') => escaped = true,
+            (None, character) if character.is_whitespace() => {
+                if started || !current.is_empty() {
+                    args.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            (None, other) => {
+                current.push(other);
+                started = true;
+            }
+        }
+    }
+    if started || !current.is_empty() {
+        args.push(current);
+    }
+    args
 }
 
 #[cfg(test)]
@@ -318,6 +505,78 @@ mod tests {
         // so this fails if either side moves and is not restated.
         assert_eq!(DEFAULT_CONTEXT, 30_000, "update localRuntimeDefaults.ts");
         assert_eq!(DEFAULT_PARALLEL, 1, "update localRuntimeDefaults.ts");
+    }
+
+    /// The value after a flag, wherever it sits. `pairs` above assumes every flag
+    /// takes one, which stops being true once a switch like `--mlock` is emitted.
+    fn followed(args: &[String], flag: &str) -> Option<String> {
+        args.iter()
+            .position(|argument| argument == flag)
+            .and_then(|at| args.get(at + 1))
+            .cloned()
+    }
+
+    #[test]
+    fn the_template_and_memory_flags_reach_the_command() {
+        let mut settings = LocalRuntimeSettings::default();
+        settings.chat_template = Some("chatml".to_string());
+        settings.jinja = true;
+        settings.mlock = true;
+        settings.no_mmap = true;
+        settings.temperature = Some(0.7);
+        settings.batch_size = Some(2048);
+        settings.draft_model = Some("draft.gguf".to_string());
+
+        let args = settings.to_args();
+        assert_eq!(followed(&args, "--chat-template").as_deref(), Some("chatml"));
+        assert!(args.contains(&"--jinja".to_string()));
+        assert!(args.contains(&"--mlock".to_string()));
+        assert!(args.contains(&"--no-mmap".to_string()));
+        assert_eq!(followed(&args, "--temp").as_deref(), Some("0.7"));
+        assert_eq!(followed(&args, "-b").as_deref(), Some("2048"));
+        assert_eq!(followed(&args, "--model-draft").as_deref(), Some("draft.gguf"));
+    }
+
+    #[test]
+    fn a_template_file_wins_over_inline_text() {
+        let mut settings = LocalRuntimeSettings::default();
+        settings.chat_template = Some("chatml".to_string());
+        settings.chat_template_file = Some("C:\\templates\\mine.jinja".to_string());
+
+        let args = settings.to_args();
+        assert_eq!(
+            followed(&args, "--chat-template-file").as_deref(),
+            Some("C:\\templates\\mine.jinja")
+        );
+        // Only one template is ever passed: two would be an error llama.cpp has to
+        // report instead of this.
+        assert!(!args.contains(&"--chat-template".to_string()));
+    }
+
+    #[test]
+    fn a_custom_list_replaces_every_generated_flag() {
+        let mut settings = LocalRuntimeSettings::default();
+        settings.custom_args = Some("--threads 8 --mlock".to_string());
+
+        assert_eq!(settings.effective_args(), vec!["--threads", "8", "--mlock"]);
+    }
+
+    #[test]
+    fn an_empty_custom_list_falls_back_to_the_settings() {
+        let mut settings = LocalRuntimeSettings::default();
+        settings.custom_args = Some("   ".to_string());
+
+        assert_eq!(settings.effective_args(), settings.to_args());
+    }
+
+    #[test]
+    fn a_quoted_argument_survives_the_round_trip() {
+        let args = vec![
+            "--chat-template".to_string(),
+            "a template with spaces".to_string(),
+            "--jinja".to_string(),
+        ];
+        assert_eq!(split_arguments(&quote_arguments(&args)), args);
     }
 
     /// One slot means the context shown is the context each conversation gets.

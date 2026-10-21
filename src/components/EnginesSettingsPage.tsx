@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ChevronDown, ChevronRight, Download, Link2, LoaderCircle, RefreshCw, Trash2, Zap } from "lucide-react";
+import { HoldToDelete } from "./HoldToDelete";
 import type { Notify } from "../features/notifications/types";
 import { ANCHOR_ATTRIBUTE, FlashHighlight, SettingsPageTitle } from "./SettingsSection";
 
@@ -103,7 +104,7 @@ function EngineRow({
             {working ? progress?.complete ? "Verifying…" : progress ? formatProgress(progress) : "Starting…" : "Download"}
           </button>
         ) : (
-          <button type="button" onClick={() => void onUninstall(engine)} disabled={busy} className="grid size-8 place-items-center rounded-md text-[var(--quiet)] hover:bg-[var(--raised)] hover:text-[var(--danger)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] disabled:opacity-40" aria-label={`Uninstall engine ${engine.version}`} title="Uninstall engine"><Trash2 size={14} /></button>
+          <HoldToDelete onConfirm={() => void onUninstall(engine)} disabled={busy} label={`Uninstall engine ${engine.version}`} title="Uninstall engine" className="grid size-8 place-items-center rounded-md text-[var(--quiet)] hover:bg-[var(--raised)] hover:text-[var(--danger)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] disabled:opacity-40"><Trash2 size={14} /></HoldToDelete>
         )}
       </div>
     </div>

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen } from "@tauri-apps/api/event";
-import { ArrowUp, Check, ChevronLeft, ChevronRight, Clipboard, LoaderCircle, Paperclip, RotateCcw, SkipForward, Square, X } from "lucide-react";
+import { ArrowUp, Check, ChevronLeft, ChevronRight, Clipboard, LoaderCircle, Mic, Paperclip, RotateCcw, SkipForward, Square, X } from "lucide-react";
 import ActivityPanel from "./ActivityPanel";
 import { Markdown } from "./Markdown";
 import { PathText } from "./PathText";
@@ -44,6 +44,7 @@ import type { ActivityStep, ChatMessage, ChatSession, SessionRunStatus, ToolStep
 import { withToolRecap } from "../../features/chat/toolRecap";
 
 import { closeOpenSteps, closeRunningThought } from "./closeOpenSteps";
+import { useDictation } from "../../features/stt/useDictation";
 import { hasPartialReply, partialReplyMessage } from "./partialReply";
 import { MARKDOWN_STYLES } from "./markdownStyles";
 import { useAttachments } from "./useAttachments";
@@ -1559,6 +1560,13 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   // synthesis, not the player -- the reason piper gave is what is worth showing.
   const speech = useSpeech((message) => onNotify("error", message));
 
+  // Dictation appends rather than replaces: a dictated sentence is usually the
+  // start of a message the user was already typing.
+  const dictation = useDictation(
+    (text) => setInput((current) => (current.trim() ? `${current.trim()} ${text}` : text)),
+    (message) => onNotify("error", message),
+  );
+
   // Selection inside a reply: only show the bar when the highlight is real,
   // and ignore selections the user made in the composer or their own message.
   const handleThreadSelection = (event: React.MouseEvent) => {
@@ -2030,6 +2038,37 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
             />
             {running && localModelId && backgroundRunsRef.current.get(runIdRef.current)?.isReasoning && <button type="button" onClick={() => void skipReasoning()} className="mt-0.5 inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-[var(--raised)] px-3 text-xs text-[var(--text)] transition-colors hover:bg-[color-mix(in_srgb,var(--accent)_20%,var(--raised))] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label="Skip reasoning" title="End reasoning and continue the answer"><SkipForward size={14} />Skip reasoning</button>}
             {running && <button type="button" onClick={stop} className="mt-0.5 grid size-9 shrink-0 place-items-center rounded-full bg-[var(--raised)] text-[var(--text)] transition-colors hover:bg-[color-mix(in_srgb,var(--accent)_20%,var(--raised))] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label="Stop generating" title="Stop generating"><Square size={14} fill="currentColor" /></button>}
+            {/* Push to talk. The device is open only between the two presses, so the
+                button's state is the whole truth about whether anything records. */}
+            {!slashExact && (
+              <button
+                type="button"
+                onClick={dictation.toggle}
+                disabled={sessionLoading}
+                aria-label={dictation.state === "recording" ? "Stop dictating" : "Dictate a message"}
+                aria-pressed={dictation.state === "recording"}
+                title={
+                  dictation.state === "recording"
+                    ? "Stop and transcribe"
+                    : dictation.state === "transcribing"
+                      ? "Transcribing…"
+                      : "Dictate a message"
+                }
+                className={`mt-0.5 grid size-9 shrink-0 place-items-center rounded-full transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] disabled:opacity-35 ${
+                  dictation.state === "recording"
+                    ? "bg-[var(--accent)] text-[var(--accent-ink)]"
+                    : "text-[var(--muted)] hover:text-[var(--text)]"
+                }`}
+              >
+                {dictation.state === "transcribing" ? (
+                  <LoaderCircle size={15} className="animate-spin" />
+                ) : dictation.state === "recording" ? (
+                  <Square size={12} fill="currentColor" />
+                ) : (
+                  <Mic size={15} />
+                )}
+              </button>
+            )}
             {/* While a reply runs the send button queues rather than disappearing, so
                 a message typed mid-reply is neither lost nor blocked on the model
                 stopping. A plain click or Enter adds it to the queue. */}

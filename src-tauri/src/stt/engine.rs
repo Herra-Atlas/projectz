@@ -30,6 +30,9 @@ pub const RELEASE_TAG: &str = "whisper-vulkan-b5454";
 /// `parakeet-cli.exe`, which the transcription step will use for Parakeet models.
 pub const WHISPER_EXE: &str = "whisper-cli.exe";
 
+/// Parakeet models are read by their own executable, shipped in the same archive.
+pub const PARAKEET_EXE: &str = "parakeet-cli.exe";
+
 const ASSET: &str = "whisper-vulkan-b5454.zip";
 const ASSET_URL: &str = "https://github.com/Herra-Atlas/vulkan-builds/releases/download/whisper-vulkan-b5454/whisper-vulkan-b5454.zip";
 const ASSET_SHA256: &str = "ee21a1617bbc54a325c0b3978f9abeadf9c521f88c7325c86ee56ea32cfe4f41";

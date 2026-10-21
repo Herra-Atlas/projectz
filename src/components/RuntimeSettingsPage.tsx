@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openFile } from "@tauri-apps/plugin-dialog";
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, ChevronRight } from "lucide-react";
 import { SettingRow, SettingsSection, Toggle } from "./SettingsSection";
-import EnginePicker from "./EnginePicker";
 import type { Notify } from "../features/notifications/types";
+import { syncArgument, type ArgumentSpec } from "../features/models/arguments";
 import { SCALE_STEPS, scaleToValue, valueToScale } from "../features/models/contextScale";
 import { formatBytes } from "../features/format/bytes";
 import { DEFAULT_CONTEXT, DEFAULT_PARALLEL } from "../features/models/localRuntimeDefaults";
@@ -48,7 +48,61 @@ export type LocalRuntimeSettings = {
   flash_attention?: "auto" | "on" | "off" | null;
   mmproj?: string | null;
   mmproj_offload?: boolean | null;
+  chat_template?: string | null;
+  chat_template_file?: string | null;
+  jinja: boolean;
+  temperature?: number | null;
+  top_p?: number | null;
+  min_p?: number | null;
+  repeat_penalty?: number | null;
+  mlock: boolean;
+  no_mmap: boolean;
+  batch_size?: number | null;
+  ubatch_size?: number | null;
+  draft_model?: string | null;
+  draft_gpu_layers?: number | null;
+  custom_args?: string | null;
 };
+
+/** Templates llama.cpp ships by name, for a GGUF that names none. */
+const TEMPLATES = ["chatml", "llama2", "llama3", "mistral", "gemma", "phi3", "qwen2", "deepseek", "vicuna"];
+
+/**
+ * How each setting appears in a hand-written argument list.
+ *
+ * A setting missing from this table is simply not synchronised: it stays in the
+ * list exactly as typed. That is the honest failure -- guessing at a flag the
+ * build may not have is worse than leaving the text alone.
+ */
+const ARGUMENT_FLAGS: Partial<Record<keyof LocalRuntimeSettings, ArgumentSpec>> = {
+  context: { flag: "--ctx-size" },
+  parallel: { flag: "--parallel" },
+  gpu_layers: { flag: "-ngl" },
+  cache_type_k: { flag: "--cache-type-k" },
+  cache_type_v: { flag: "--cache-type-v" },
+  kv_offload: { flag: "--no-kv-offload", isSwitch: true },
+  flash_attention: { flag: "-fa" },
+  chat_template: { flag: "--chat-template" },
+  chat_template_file: { flag: "--chat-template-file" },
+  jinja: { flag: "--jinja", isSwitch: true },
+  temperature: { flag: "--temp" },
+  top_p: { flag: "--top-p" },
+  min_p: { flag: "--min-p" },
+  repeat_penalty: { flag: "--repeat-penalty" },
+  mlock: { flag: "--mlock", isSwitch: true },
+  no_mmap: { flag: "--no-mmap", isSwitch: true },
+  batch_size: { flag: "-b" },
+  ubatch_size: { flag: "-ub" },
+  draft_model: { flag: "--model-draft" },
+  draft_gpu_layers: { flag: "-ngld" },
+};
+
+/** What a setting contributes to a custom list, or null when it contributes nothing. */
+function argumentValue(spec: ArgumentSpec, value: unknown): string | null {
+  if (spec.isSwitch) return value === true ? "" : null;
+  if (value === null || value === undefined || value === "") return null;
+  return String(value);
+}
 
 export type MemoryEstimate = {
   weights_bytes: number;
@@ -152,11 +206,15 @@ const contextCeiling = (declared: number | null | undefined) => {
   return declared;
 };
 
-export default function RuntimeSettings({ modelId, maxContext, engineId, onChange, onEngineChanged, notify }: RuntimeSettingsProps) {
+export default function RuntimeSettings({ modelId, maxContext, onChange }: RuntimeSettingsProps) {
   const [settings, setSettings] = useState<LocalRuntimeSettings | null>(null);
   const [estimate, setEstimate] = useState<MemoryEstimate | null>(null);
   const [device, setDevice] = useState<DeviceMemory | null>(null);
   const [projectorMissing, setProjectorMissing] = useState(false);
+  /** The argument list the settings above produce, for the box that shows it. */
+  const [generated, setGenerated] = useState("");
+  const generatedTimer = useRef<number | null>(null);
+  const [advanced, setAdvanced] = useState(false);
   /** Layers to show on the slider. Grown as the user drags past the end. */
   const [layerCeiling, setLayerCeiling] = useState(INITIAL_LAYER_CEILING);
 
@@ -189,7 +247,7 @@ export default function RuntimeSettings({ modelId, maxContext, engineId, onChang
         // and immediate; the next edit persists the corrected value.
         setSettings({ ...stored, context: Math.min(stored.context, contextMax) });
       })
-      .catch(() => { if (mounted) setSettings({ context: Math.min(DEFAULT_CONTEXT, contextMax), parallel: DEFAULT_PARALLEL }); });
+      .catch(() => { if (mounted) setSettings({ context: Math.min(DEFAULT_CONTEXT, contextMax), parallel: DEFAULT_PARALLEL, jinja: false, mlock: false, no_mmap: false }); });
     invoke<DeviceMemory | null>("local_device_memory")
       .then((value) => { if (mounted) setDevice(value); })
       .catch(() => undefined);
@@ -200,10 +258,35 @@ export default function RuntimeSettings({ modelId, maxContext, engineId, onChang
     setSettings((current) => {
       if (!current) return current;
       const next = { ...current, ...change };
+      // Once the list has been written by hand it is the truth. A dial then edits
+      // the argument it belongs to, instead of quietly discarding the rest of
+      // what was typed -- which is what "custom arguments" would otherwise mean
+      // the moment anything else on the page was touched.
+      if (current.custom_args != null) {
+        let text = current.custom_args;
+        for (const [key, value] of Object.entries(change)) {
+          const spec = ARGUMENT_FLAGS[key as keyof LocalRuntimeSettings];
+          if (spec) text = syncArgument(text, spec, argumentValue(spec, value));
+        }
+        next.custom_args = text.trim() ? text : null;
+      }
       onChange(next);
       return next;
     });
   }, [onChange]);
+
+  // The list as the settings above produce it, so the box always shows what
+  // would actually be sent rather than a blank that has to be filled in first.
+  useEffect(() => {
+    if (!settings) return;
+    if (generatedTimer.current !== null) window.clearTimeout(generatedTimer.current);
+    generatedTimer.current = window.setTimeout(() => {
+      invoke<string>("local_runtime_arguments", { settings })
+        .then(setGenerated)
+        .catch(() => undefined);
+    }, 140);
+    return () => { if (generatedTimer.current !== null) window.clearTimeout(generatedTimer.current); };
+  }, [settings]);
 
   useEffect(() => {
     if (!settings) return;
@@ -240,6 +323,26 @@ export default function RuntimeSettings({ modelId, maxContext, engineId, onChang
     update({ mmproj: selected });
   };
 
+  const chooseTemplateFile = async () => {
+    const selected = await openFile({
+      multiple: false,
+      filters: [{ name: "Chat template", extensions: ["jinja", "jinja2", "txt"] }],
+    });
+    if (typeof selected !== "string") return;
+    // The file wins over any text in the box, so the other one is cleared rather
+    // than left to look as if it is also in effect.
+    update({ chat_template_file: selected, chat_template: null });
+  };
+
+  const chooseDraft = async () => {
+    const selected = await openFile({
+      multiple: false,
+      filters: [{ name: "Draft model", extensions: ["gguf"] }],
+    });
+    if (typeof selected !== "string") return;
+    update({ draft_model: selected });
+  };
+
   if (!settings) return <p className="text-sm text-[var(--muted)]">Loading settings…</p>;
 
   const kvEnabled = settings.cache_type_k != null;
@@ -250,25 +353,6 @@ export default function RuntimeSettings({ modelId, maxContext, engineId, onChang
           is the one number that tells you whether the dial you are turning is
           pointing somewhere survivable. */}
       <MemoryPanel estimate={estimate} device={device} perSlot={perSlot} parallel={settings.parallel} />
-
-      {/* First, because it is the one setting here that decides *which binary
-          runs at all* -- everything below is arguments to that process. A reader
-          arriving at a model that will not start needs this before they read
-          nine dials. */}
-      <Group title="Engine">
-        <SettingRow
-          label="Engine"
-          description="Which llama.cpp build runs this model. Changing it stops the model if it is running."
-          control={
-            <EnginePicker
-              modelId={modelId}
-              engineId={engineId}
-              onChange={() => onEngineChanged?.()}
-              notify={notify}
-            />
-          }
-        />
-      </Group>
 
       <Group title="Conversation">
         <NumberRow
@@ -308,50 +392,6 @@ export default function RuntimeSettings({ modelId, maxContext, engineId, onChang
             : `Off: all ${settings.parallel} slots share ${settings.context.toLocaleString()} tokens`}
           checked={settings.kv_unified_per_slot != null}
           onChange={(on) => update({ kv_unified_per_slot: on ? settings.context : null })}
-        />
-      </Group>
-
-      <Group title="GPU">
-        <SliderRow
-          label="Layers on GPU"
-          hint={settings.gpu_layers === 999 || settings.gpu_layers == null
-            ? "As many as fit — llama.cpp decides"
-            : `${settings.gpu_layers} of the model's layers`}
-          value={settings.gpu_layers ?? 999}
-          min={0}
-          max={layerCeiling}
-          onChange={(gpu_layers) => {
-            // Dragging to the very top means "as many as fit", which is what
-            // llama.cpp is asked for with 999. Mapping the last eighth of the
-            // track to it means the top of the range is the automatic value, so
-            // the control reads as one continuous scale rather than a number with
-            // a hidden mode behind it -- and it still cannot be dragged past its
-            // own end, which is what a bare 999 on the track could do.
-            const atTop = gpu_layers >= layerCeiling - LAYER_GROWTH;
-            setLayerCeiling((current) => (gpu_layers >= current
-              ? Math.ceil((gpu_layers + LAYER_GROWTH) / LAYER_GROWTH) * LAYER_GROWTH
-              : current));
-            update({ gpu_layers: atTop ? 999 : gpu_layers });
-          }}
-          onAuto={() => update({ gpu_layers: 999 })}
-          autoActive={settings.gpu_layers === 999}
-        />
-        <ToggleRow
-          label="KV cache on GPU"
-          hint={settings.kv_offload == null ? "llama.cpp decides" : settings.kv_offload ? "Kept in VRAM" : "Kept in system memory"}
-          checked={settings.kv_offload === true}
-          onChange={(on) => update({ kv_offload: on ? true : null })}
-          triState={settings.kv_offload == null}
-        />
-        <SelectRow
-          label="Flash attention"
-          value={settings.flash_attention ?? "auto"}
-          options={[
-            { value: "auto", label: "Auto" },
-            { value: "on", label: "On" },
-            { value: "off", label: "Off" },
-          ]}
-          onChange={(value) => update({ flash_attention: value as LocalRuntimeSettings["flash_attention"] })}
         />
       </Group>
 
@@ -414,7 +454,374 @@ export default function RuntimeSettings({ modelId, maxContext, engineId, onChang
           />
         )}
       </Group>
+
+      <button
+        type="button"
+        onClick={() => setAdvanced((open) => !open)}
+        aria-expanded={advanced}
+        className="flex w-full items-center gap-1.5 rounded-md px-1 py-1 text-left text-[12px] text-[var(--muted)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+      >
+        <ChevronRight size={13} className={`shrink-0 transition-transform ${advanced ? "rotate-90" : ""}`} />
+        Advanced
+      </button>
+
+      {advanced && (
+        <>
+      <Group title="GPU">
+        <SliderRow
+          label="Layers on GPU"
+          hint={settings.gpu_layers === 999 || settings.gpu_layers == null
+            ? "As many as fit — llama.cpp decides"
+            : `${settings.gpu_layers} of the model's layers`}
+          value={settings.gpu_layers ?? 999}
+          min={0}
+          max={layerCeiling}
+          onChange={(gpu_layers) => {
+            // Dragging to the very top means "as many as fit", which is what
+            // llama.cpp is asked for with 999. Mapping the last eighth of the
+            // track to it means the top of the range is the automatic value, so
+            // the control reads as one continuous scale rather than a number with
+            // a hidden mode behind it -- and it still cannot be dragged past its
+            // own end, which is what a bare 999 on the track could do.
+            const atTop = gpu_layers >= layerCeiling - LAYER_GROWTH;
+            setLayerCeiling((current) => (gpu_layers >= current
+              ? Math.ceil((gpu_layers + LAYER_GROWTH) / LAYER_GROWTH) * LAYER_GROWTH
+              : current));
+            update({ gpu_layers: atTop ? 999 : gpu_layers });
+          }}
+          onAuto={() => update({ gpu_layers: 999 })}
+          autoActive={settings.gpu_layers === 999}
+        />
+        <ToggleRow
+          label="KV cache on GPU"
+          hint={settings.kv_offload == null ? "llama.cpp decides" : settings.kv_offload ? "Kept in VRAM" : "Kept in system memory"}
+          checked={settings.kv_offload === true}
+          onChange={(on) => update({ kv_offload: on ? true : null })}
+          triState={settings.kv_offload == null}
+        />
+        <SelectRow
+          label="Flash attention"
+          value={settings.flash_attention ?? "auto"}
+          options={[
+            { value: "auto", label: "Auto" },
+            { value: "on", label: "On" },
+            { value: "off", label: "Off" },
+          ]}
+          onChange={(value) => update({ flash_attention: value as LocalRuntimeSettings["flash_attention"] })}
+        />
+      </Group>
+
+      {/* A wrong template is the commonest reason a local model answers nonsense,
+          so it leads the sections about how the model is spoken to. */}
+      <Group title="Chat template">
+        <SelectRow
+          label="Template"
+          hint={
+            settings.chat_template_file
+              ? "Using the chosen .jinja file"
+              : settings.chat_template == null
+                ? "Whatever the GGUF declares"
+                : TEMPLATES.includes(settings.chat_template)
+                  ? "Built into llama.cpp"
+                  : "Your own template"
+          }
+          value={templateSelection(settings)}
+          options={[
+            { value: "", label: "From the model" },
+            ...TEMPLATES.map((name) => ({ value: name, label: name })),
+            { value: "custom", label: "Custom…" },
+          ]}
+          onChange={(value) =>
+            update({
+              chat_template: value === "" ? null : value === "custom" ? (settings.chat_template ?? "") : value,
+              chat_template_file: null,
+            })
+          }
+        />
+        {templateSelection(settings) === "custom" && (
+          <DraftRow
+            label="Template text"
+            description="The Jinja template itself. Applies to this model only."
+            value={settings.chat_template ?? ""}
+            multiline
+            placeholder="{{ messages }}"
+            onCommit={(chat_template) => update({ chat_template: chat_template.trim() ? chat_template : null })}
+          />
+        )}
+        <SettingRow
+          label="From a file"
+          description={settings.chat_template_file ? stripDevicePrefix(settings.chat_template_file) : "A .jinja file kept outside the app"}
+          control={
+            <div className="flex items-center gap-2">
+              {settings.chat_template_file && (
+                <button type="button" onClick={() => update({ chat_template_file: null })} className="h-9 rounded-md px-2.5 text-xs text-[var(--quiet)] hover:bg-[var(--raised)] hover:text-[var(--text)]">Clear</button>
+              )}
+              <button type="button" onClick={() => void chooseTemplateFile()} className="h-9 rounded-md border border-[var(--line)] px-3 text-xs text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]">
+                {settings.chat_template_file ? "Change" : "Choose file"}
+              </button>
+            </div>
+          }
+        />
+        <ToggleRow
+          label="Jinja engine"
+          hint="Needed by some templates, and by tool calling on them"
+          checked={settings.jinja}
+          onChange={(jinja) => update({ jinja })}
+        />
+      </Group>
+
+      <Group title="Generation">
+        <DecimalRow label="Temperature" hint="Higher is more varied" value={settings.temperature} min={0} max={2} step={0.05} onChange={(temperature) => update({ temperature })} />
+        <DecimalRow label="Top-p" hint="Nucleus sampling cutoff" value={settings.top_p} min={0} max={1} step={0.01} onChange={(top_p) => update({ top_p })} />
+        <DecimalRow label="Min-p" hint="Drops tokens below this probability" value={settings.min_p} min={0} max={1} step={0.01} onChange={(min_p) => update({ min_p })} />
+        <DecimalRow label="Repeat penalty" hint="Penalises repetition over 1" value={settings.repeat_penalty} min={0.5} max={2} step={0.01} onChange={(repeat_penalty) => update({ repeat_penalty })} />
+      </Group>
+
+      <Group title="Memory">
+        <ToggleRow
+          label="Lock in RAM"
+          hint="Stops the model being paged out; fails to load if there is not enough"
+          checked={settings.mlock}
+          onChange={(mlock) => update({ mlock })}
+        />
+        <ToggleRow
+          label="Read without mapping"
+          hint="Slower to start, steady when the file is on a slow disk"
+          checked={settings.no_mmap}
+          onChange={(no_mmap) => update({ no_mmap })}
+        />
+      </Group>
+
+      <Group title="Batch">
+        <IntegerRow label="Prompt batch" hint="Tokens processed per step. Larger is faster, needs more memory." value={settings.batch_size} min={32} max={8192} onChange={(batch_size) => update({ batch_size })} />
+        <IntegerRow label="GPU batch" hint="The smaller batch the GPU actually sees" value={settings.ubatch_size} min={16} max={4096} onChange={(ubatch_size) => update({ ubatch_size })} />
+      </Group>
+
+      <Group title="Speculative decoding">
+        <SettingRow
+          label="Draft model"
+          description={settings.draft_model ? stripDevicePrefix(settings.draft_model) : "A small model that proposes tokens for this one to accept"}
+          control={
+            <div className="flex items-center gap-2">
+              {settings.draft_model && (
+                <button type="button" onClick={() => update({ draft_model: null, draft_gpu_layers: null })} className="h-9 rounded-md px-2.5 text-xs text-[var(--quiet)] hover:bg-[var(--raised)] hover:text-[var(--text)]">Clear</button>
+              )}
+              <button type="button" onClick={() => void chooseDraft()} className="h-9 rounded-md border border-[var(--line)] px-3 text-xs text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]">
+                {settings.draft_model ? "Change" : "Choose file"}
+              </button>
+            </div>
+          }
+        />
+        {settings.draft_model && (
+          <IntegerRow label="Draft on GPU" hint="Layers of the draft model to offload" value={settings.draft_gpu_layers} min={0} max={999} onChange={(draft_gpu_layers) => update({ draft_gpu_layers })} />
+        )}
+      </Group>
+
+      {/* The list as it will actually be sent. Typing in it takes it over; from
+          then on the dials above edit their own flag inside it. */}
+      <Group title="Startup arguments">
+        <DraftRow
+          label="Arguments"
+          description={
+            settings.custom_args
+              ? "Edited by hand. Changing a setting above edits its flag here. --model, --alias, --host and --port stay with the app."
+              : "Exactly what will be sent. Type here to take it over; a setting changed afterwards edits its own flag."
+          }
+          value={settings.custom_args ?? generated}
+          multiline
+          placeholder="--ctx-size 30000 --parallel 1"
+          onCommit={(text) => update({ custom_args: text.trim() ? text : null })}
+        />
+        {settings.custom_args && (
+          <SettingRow
+            label="Custom list"
+            description="Go back to the arguments the settings above produce"
+            control={
+              <button type="button" onClick={() => update({ custom_args: null })} className="h-9 rounded-md border border-[var(--line)] px-3 text-xs text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]">Clear</button>
+            }
+          />
+        )}
+      </Group>
+        </>
+      )}
     </div>
+  );
+}
+
+/** Which option the template picker shows for the stored value. */
+function templateSelection(settings: LocalRuntimeSettings): string {
+  // Checked for null rather than falsiness: choosing "Custom" stores an empty
+  // string, and reading that as "nothing chosen" would bounce the picker back to
+  // "From the model" the moment it was chosen.
+  if (settings.chat_template == null) return "";
+  return TEMPLATES.includes(settings.chat_template) ? settings.chat_template : "custom";
+}
+
+/** A text field that commits on blur rather than on every keystroke. */
+function DraftRow({
+  label,
+  description,
+  value,
+  placeholder,
+  multiline = false,
+  onCommit,
+}: {
+  label: string;
+  description: string;
+  value: string;
+  placeholder?: string;
+  multiline?: boolean;
+  onCommit: (value: string) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => {
+    setDraft(value);
+  }, [value]);
+  const commit = () => {
+    if (draft !== value) onCommit(draft);
+  };
+  const shared = "w-full rounded-md border border-[var(--line)] bg-[var(--rail)] px-2 py-1.5 font-mono text-[11px] text-[var(--text)] outline-none focus-visible:border-[var(--accent)]";
+  return (
+    <SettingRow
+      label={label}
+      description={description}
+      control={
+        multiline ? (
+          <textarea
+            value={draft}
+            rows={4}
+            placeholder={placeholder}
+            onChange={(event) => setDraft(event.target.value)}
+            onBlur={commit}
+            className={`${shared} min-w-[18rem] resize-y`}
+          />
+        ) : (
+          <input
+            value={draft}
+            placeholder={placeholder}
+            onChange={(event) => setDraft(event.target.value)}
+            onBlur={commit}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") event.currentTarget.blur();
+            }}
+            className={`${shared} min-w-[14rem]`}
+          />
+        )
+      }
+    />
+  );
+}
+
+/** A whole number that commits on blur, with an empty value meaning "default". */
+function IntegerRow({
+  label,
+  hint,
+  value,
+  min,
+  max,
+  onChange,
+}: {
+  label: string;
+  hint: string;
+  value?: number | null;
+  min: number;
+  max: number;
+  onChange: (value: number | null) => void;
+}) {
+  const [draft, setDraft] = useState(value == null ? "" : String(value));
+  useEffect(() => {
+    setDraft(value == null ? "" : String(value));
+  }, [value]);
+  const commit = () => {
+    if (!draft.trim()) {
+      if (value != null) onChange(null);
+      return;
+    }
+    const parsed = Number(draft);
+    if (!Number.isFinite(parsed)) {
+      setDraft(value == null ? "" : String(value));
+      return;
+    }
+    onChange(Math.min(max, Math.max(min, Math.round(parsed))));
+  };
+  return (
+    <SettingRow
+      label={label}
+      description={hint}
+      control={
+        <input
+          type="number"
+          min={min}
+          max={max}
+          value={draft}
+          placeholder="default"
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={commit}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") event.currentTarget.blur();
+          }}
+          className="h-9 w-28 rounded-md border border-[var(--line)] bg-[var(--rail)] px-2 text-sm tabular-nums text-[var(--text)] outline-none focus-visible:border-[var(--accent)]"
+        />
+      }
+    />
+  );
+}
+
+/** A decimal that commits on blur, with an empty value meaning "default". */
+function DecimalRow({
+  label,
+  hint,
+  value,
+  min,
+  max,
+  step,
+  onChange,
+}: {
+  label: string;
+  hint: string;
+  value?: number | null;
+  min: number;
+  max: number;
+  step: number;
+  onChange: (value: number | null) => void;
+}) {
+  const [draft, setDraft] = useState(value == null ? "" : String(value));
+  useEffect(() => {
+    setDraft(value == null ? "" : String(value));
+  }, [value]);
+  const commit = () => {
+    if (!draft.trim()) {
+      if (value != null) onChange(null);
+      return;
+    }
+    const parsed = Number(draft);
+    if (!Number.isFinite(parsed)) {
+      setDraft(value == null ? "" : String(value));
+      return;
+    }
+    onChange(Math.min(max, Math.max(min, parsed)));
+  };
+  return (
+    <SettingRow
+      label={label}
+      description={hint}
+      control={
+        <input
+          type="number"
+          min={min}
+          max={max}
+          step={step}
+          value={draft}
+          placeholder="default"
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={commit}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") event.currentTarget.blur();
+          }}
+          className="h-9 w-28 rounded-md border border-[var(--line)] bg-[var(--rail)] px-2 text-sm tabular-nums text-[var(--text)] outline-none focus-visible:border-[var(--accent)]"
+        />
+      }
+    />
   );
 }
 

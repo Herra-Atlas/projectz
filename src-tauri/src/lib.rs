@@ -12,6 +12,7 @@ mod mcp;
 mod observation;
 mod panel;
 mod stt;
+mod system;
 mod taste;
 mod tts;
 mod websearch;
@@ -125,6 +126,9 @@ pub fn run() {
                     .map_err(std::io::Error::other)?,
             );
             app.manage(std::sync::Arc::clone(&database));
+            // Downloads live for the life of the app: the list is the work in
+            // flight, not a stored record.
+            app.manage(std::sync::Arc::new(downloads::jobs::Jobs::new()));
             let runtime = ai::runtime::AiRuntime::new_with_database(
                 engine_dir,
                 std::sync::Arc::clone(&database),
@@ -391,6 +395,7 @@ pub fn run() {
             commands::local_kv_quantisations,
             commands::local_path_exists,
             commands::local_runtime_settings_save,
+            commands::local_runtime_arguments,
             commands::local_model_status,
             commands::local_model_logs,
             commands::local_model_load,
@@ -423,14 +428,31 @@ pub fn run() {
             tts::commands::tts_speed,
             tts::commands::tts_set_speed,
             tts::commands::tts_set_skip_code,
-            tts::commands::tts_add_voice,
             tts::commands::tts_remove_voice,
             tts::commands::tts_speak,
             downloads::commands::downloads_search,
-            downloads::commands::downloads_install,
+            downloads::commands::downloads_start,
+            downloads::commands::downloads_jobs,
+            downloads::commands::downloads_pause,
+            downloads::commands::downloads_resume,
+            downloads::commands::downloads_stop,
             downloads::commands::downloads_installed,
+            system::system_info,
+            system::system_clear,
+            system::system_clear_models,
+            system::system_clear_engines,
+            system::system_clear_sessions,
+            system::system_forget_taste,
             stt::commands::stt_status,
             stt::commands::stt_install,
+            stt::commands::stt_models,
+            stt::commands::stt_settings,
+            stt::commands::stt_select_model,
+            stt::commands::stt_remove_model,
+            stt::commands::stt_model_language,
+            stt::commands::stt_set_language,
+            stt::commands::stt_recording_start,
+            stt::commands::stt_recording_stop,
         ])
         .build(tauri::generate_context!())
         .expect("error while building application")

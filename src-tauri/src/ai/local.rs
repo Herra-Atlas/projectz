@@ -22,7 +22,7 @@ mod settings;
 // `KvQuant` is reached through `local_kv_quantisations`, which is the only path
 // the frontend takes -- so it is re-exported here for that command alone rather
 // than as a general convenience.
-pub use settings::{KvQuant, LocalRuntimeSettings};
+pub use settings::{quote_arguments, KvQuant, LocalRuntimeSettings, RESERVED_ARGUMENTS};
 
 const SERVER_PORT: u16 = 43127;
 const SERVER_MODEL_ALIAS: &str = "projectz-local";
@@ -506,7 +506,7 @@ impl LocalModelManager {
             .arg("--port")
             .arg(SERVER_PORT.to_string())
             .arg("--no-webui")
-            .args(settings.to_args())
+            .args(settings.effective_args())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         // llama-server is a console program, and a packaged build has no console

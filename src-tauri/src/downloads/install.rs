@@ -7,6 +7,13 @@
 //! visibly not a model. The rename at the end is atomic on the same volume, so a
 //! file that appears under its real name is a file that finished.
 //!
+//! # Why the same file is the resume point
+//!
+//! Pausing leaves the `.part` where it is, and the next attempt asks for
+//! `bytes=<its length>-`. If the server ignores the range and answers 200, the
+//! file is truncated and the transfer starts again -- appending would put two
+//! copies of the beginning in the middle of a model.
+//!
 //! # Why the body is streamed
 //!
 //! A model is gigabytes. Buffering it would cost the memory of the model before
@@ -17,67 +24,52 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use futures_util::StreamExt;
-use tauri::{AppHandle, Emitter};
+use reqwest::header::RANGE;
+use reqwest::StatusCode;
 
-use super::kinds::Kind;
+use super::jobs::Flags;
 
 const API: &str = "https://huggingface.co";
 
-/// What a row is told while its file is arriving.
-#[derive(Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Progress {
-    pub repo: String,
-    pub path: String,
-    pub received: u64,
-    /// Absent when the server did not send a length, which is not an error.
-    pub total: Option<u64>,
+/// How a transfer ended. Only `Done` leaves a file under its real name.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Ending {
+    Done,
+    Paused,
+    Stopped,
 }
 
-/// Downloads everything `path` needs, and returns what was written.
-///
-/// The companions are fetched too -- a Piper voice's `.onnx.json` is part of the
-/// voice, not a later extra -- so a row that says "installed" is a row that can
-/// actually be loaded.
-pub async fn download(
-    app: &AppHandle,
-    client: &reqwest::Client,
-    kind: Kind,
-    repo: &str,
-    path: &str,
-) -> Result<Vec<PathBuf>, String> {
-    let mut written = Vec::new();
-    for companion in kind.companions(path) {
-        let destination = kind.destination(repo, &companion);
-        // Only the file that was asked for reports progress. The sidecar is a few
-        // kilobytes, and a second bar that fills instantly is noise.
-        let report = if companion == path {
-            Some(Progress {
-                repo: repo.to_string(),
-                path: path.to_string(),
-                received: 0,
-                total: None,
-            })
-        } else {
-            None
-        };
-        fetch(app, client, repo, &companion, &destination, report).await?;
-        written.push(destination);
-    }
-    Ok(written)
+/// Where a file is written while it is incomplete.
+pub fn partial_of(destination: &Path) -> PathBuf {
+    let mut name = destination.as_os_str().to_os_string();
+    name.push(".part");
+    PathBuf::from(name)
 }
 
-async fn fetch(
-    app: &AppHandle,
+/// Streams one repository file to `destination`.
+pub async fn fetch(
     client: &reqwest::Client,
     repo: &str,
     path: &str,
     destination: &Path,
-    progress: Option<Progress>,
-) -> Result<(), String> {
+    flags: &Flags,
+    mut report: impl FnMut(u64, Option<u64>),
+) -> Result<Ending, String> {
     let url = format!("{API}/{repo}/resolve/main/{path}");
-    let response = client
-        .get(&url)
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+    }
+    let partial = partial_of(destination);
+    let already = std::fs::metadata(&partial)
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+
+    let mut request = client.get(&url);
+    if already > 0 {
+        request = request.header(RANGE, format!("bytes={already}-"));
+    }
+    let response = request
         .send()
         .await
         .map_err(|error| format!("Could not download {path}: {error}"))?;
@@ -88,41 +80,43 @@ async fn fetch(
         ));
     }
 
-    if let Some(parent) = destination.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
-    }
+    let resumed = response.status() == StatusCode::PARTIAL_CONTENT;
+    let mut file = if resumed {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&partial)
+            .map_err(|error| format!("Could not write {}: {error}", partial.display()))?
+    } else {
+        std::fs::File::create(&partial)
+            .map_err(|error| format!("Could not write {}: {error}", partial.display()))?
+    };
 
-    let mut partial = destination.as_os_str().to_os_string();
-    partial.push(".part");
-    let partial = PathBuf::from(partial);
+    let mut received = if resumed { already } else { 0 };
+    let total = response
+        .content_length()
+        .map(|length| length + if resumed { already } else { 0 });
+    report(received, total);
 
-    let mut file = std::fs::File::create(&partial)
-        .map_err(|error| format!("Could not write {}: {error}", partial.display()))?;
-
-    let total = response.content_length();
-    let mut received: u64 = 0;
     let mut body = response.bytes_stream();
     while let Some(chunk) = body.next().await {
+        if flags.stopped() {
+            drop(file);
+            let _ = std::fs::remove_file(&partial);
+            return Ok(Ending::Stopped);
+        }
+        if flags.paused() {
+            let _ = file.flush();
+            return Ok(Ending::Paused);
+        }
         let chunk = chunk.map_err(|error| {
-            // The partial file is left behind on purpose: it is the evidence that
-            // this download did not finish, and the next attempt replaces it.
+            // The partial file is left behind on purpose: it is both the evidence
+            // that this download did not finish and the resume point.
             format!("The download of {path} was interrupted: {error}")
         })?;
         file.write_all(&chunk)
             .map_err(|error| format!("Could not write {}: {error}", partial.display()))?;
         received += chunk.len() as u64;
-
-        if let Some(template) = &progress {
-            let _ = app.emit(
-                "downloads-progress",
-                Progress {
-                    received,
-                    total,
-                    ..template.clone()
-                },
-            );
-        }
+        report(received, total);
     }
 
     // Flushed before the rename so the size a reader stats afterwards is the size
@@ -131,11 +125,13 @@ async fn fetch(
         .map_err(|error| format!("Could not finish {}: {error}", partial.display()))?;
     drop(file);
 
+    if flags.stopped() {
+        let _ = std::fs::remove_file(&partial);
+        return Ok(Ending::Stopped);
+    }
+
     std::fs::rename(&partial, destination).map_err(|error| {
-        format!(
-            "Could not put {} in place: {error}",
-            destination.display()
-        )
+        format!("Could not put {} in place: {error}", destination.display())
     })?;
-    Ok(())
+    Ok(Ending::Done)
 }

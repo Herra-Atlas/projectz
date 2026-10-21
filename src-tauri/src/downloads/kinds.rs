@@ -32,6 +32,19 @@ impl Kind {
         }
     }
 
+    /// The extension of the file this kind installs.
+    ///
+    /// What makes a directory listing of installed files mean "models" rather
+    /// than "everything": a recognition model is a `.bin` and would otherwise be
+    /// filtered out by a reader that only knew about GGUF and ONNX.
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Llama => "gguf",
+            Self::Tts => "onnx",
+            Self::Stt => "bin",
+        }
+    }
+
     /// Where one repository installs.
     ///
     /// A repository name contains a slash, which would make it read as two

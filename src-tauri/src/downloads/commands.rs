@@ -1,11 +1,14 @@
 //! The commands the download page calls.
 
+use std::sync::Arc;
+
 use futures_util::StreamExt;
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter, State};
 
 use super::catalog::{self, DownloadFile};
 use super::client::{self, Client};
-use super::install;
+use super::install::{self, Ending};
+use super::jobs::{Flags, JobState, JobView, Jobs};
 use super::kinds::Kind;
 
 /// How many repositories a llama.cpp search expands into file lists.
@@ -116,25 +119,27 @@ pub struct InstalledFile {
 pub async fn downloads_installed(kind: Kind) -> Result<Vec<InstalledFile>, String> {
     let root = super::kinds::models_root_for(kind);
     let mut found = Vec::new();
-    collect(&root, &mut found);
+    collect(&root, kind, &mut found);
     found.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(found)
 }
 
-fn collect(directory: &std::path::Path, found: &mut Vec<InstalledFile>) {
+fn collect(directory: &std::path::Path, kind: Kind, found: &mut Vec<InstalledFile>) {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect(&path, found);
+            collect(&path, kind, found);
             continue;
         }
-        let usable = matches!(
-            path.extension().and_then(|extension| extension.to_str()),
-            Some("gguf") | Some("onnx")
-        );
+        // The extension of the file *this kind installs*, so a recognition model
+        // is not filtered out for having the extension its own models use.
+        let usable = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case(kind.extension()));
         if !usable {
             continue;
         }
@@ -158,22 +163,149 @@ fn collect(directory: &std::path::Path, found: &mut Vec<InstalledFile>) {
     }
 }
 
-/// Downloads one row and returns where its file was written.
+/// Starts a download and answers with its id.
 ///
-/// The path is reported rather than assumed by the caller: the installer is the
-/// only side that knows the layout, and a second copy of that rule in the page is
-/// how the two drift apart.
+/// Returns immediately: a model is minutes long, and a command that awaited it
+/// would leave the page with no way to show progress, pause it, or leave.
 #[tauri::command]
-pub async fn downloads_install(
+pub async fn downloads_start(
     app: AppHandle,
+    jobs: State<'_, Arc<Jobs>>,
     kind: Kind,
     repo: String,
     path: String,
 ) -> Result<String, String> {
     let client = Client::new()?;
-    let written = install::download(&app, client.files(), kind, &repo, &path).await?;
-    Ok(written
-        .first()
-        .map(|destination| destination.display().to_string())
-        .unwrap_or_default())
+    let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+    let destination = kind.destination(&repo, &path);
+    let (id, flags) = jobs.add(kind, &repo, &path, &name, &destination.display().to_string());
+    let _ = app.emit("downloads-state", jobs.list());
+    spawn(app, Arc::clone(&jobs), client.files().clone(), kind, repo, path, id.clone(), flags);
+    Ok(id)
+}
+
+#[tauri::command]
+pub fn downloads_jobs(jobs: State<'_, Arc<Jobs>>) -> Vec<JobView> {
+    jobs.list()
+}
+
+/// Asks a running download to stop at the next chunk and keep its `.part`.
+#[tauri::command]
+pub fn downloads_pause(app: AppHandle, jobs: State<'_, Arc<Jobs>>, id: String) -> bool {
+    let accepted = jobs.pause(&id);
+    if accepted {
+        let _ = app.emit("downloads-state", jobs.list());
+    }
+    accepted
+}
+
+/// Continues a paused download from the bytes already on disk.
+#[tauri::command]
+pub fn downloads_resume(app: AppHandle, jobs: State<'_, Arc<Jobs>>, id: String) -> Result<bool, String> {
+    let Some(job) = jobs.resume(&id) else {
+        return Ok(false);
+    };
+    let client = Client::new()?;
+    let _ = app.emit("downloads-state", jobs.list());
+    spawn(
+        app,
+        Arc::clone(&jobs),
+        client.files().clone(),
+        job.kind,
+        job.repo,
+        job.path,
+        job.id,
+        Arc::clone(&jobs.flags(&id).ok_or("The download is no longer in the list.")?),
+    );
+    Ok(true)
+}
+
+/// Stops a download and discards what it had written.
+#[tauri::command]
+pub fn downloads_stop(app: AppHandle, jobs: State<'_, Arc<Jobs>>, id: String) -> bool {
+    let accepted = jobs.stop(&id);
+    if accepted {
+        let _ = app.emit("downloads-state", jobs.list());
+    }
+    accepted
+}
+
+/// Runs one job to its end, reporting into the list as it goes.
+///
+/// The companions of a file are fetched here too -- a Piper voice's `.onnx.json`
+/// is part of the voice -- which is why this is a loop rather than one call.
+fn spawn(
+    app: AppHandle,
+    jobs: Arc<Jobs>,
+    client: reqwest::Client,
+    kind: Kind,
+    repo: String,
+    path: String,
+    id: String,
+    flags: Arc<Flags>,
+) {
+    tauri::async_runtime::spawn(async move {
+        let mut ending: Result<Ending, String> = Ok(Ending::Done);
+        for companion in kind.companions(&path) {
+            let destination = kind.destination(&repo, &companion);
+            let primary = companion == path;
+            // Throttled: a chunk arrives every few milliseconds and the whole list
+            // per chunk would be more traffic than the download.
+            let mut last = std::time::Instant::now();
+            let outcome = install::fetch(
+                &client,
+                &repo,
+                &companion,
+                &destination,
+                &flags,
+                |received, total| {
+                    if !primary {
+                        return;
+                    }
+                    jobs.progress(&id, received, total);
+                    if last.elapsed().as_millis() >= 200 {
+                        last = std::time::Instant::now();
+                        let _ = app.emit("downloads-state", jobs.list());
+                    }
+                },
+            )
+            .await;
+
+            match outcome {
+                Ok(Ending::Done) => continue,
+                Ok(other) => {
+                    ending = Ok(other);
+                    break;
+                }
+                Err(error) => {
+                    ending = Err(error);
+                    break;
+                }
+            }
+        }
+
+        match ending {
+            Ok(Ending::Done) => {
+                let destination = kind.destination(&repo, &path);
+                let size = std::fs::metadata(&destination)
+                    .map(|meta| meta.len())
+                    .unwrap_or(0);
+                jobs.progress(&id, size, Some(size));
+                jobs.state(&id, JobState::Done, None);
+                // A downloaded GGUF is not a model this app offers until it is
+                // registered, and one the user has to find again by hand is a
+                // download that looks like it did nothing.
+                if kind == Kind::Llama {
+                    use tauri::Manager;
+                    let runtime = app.state::<crate::ai::runtime::AiRuntime>();
+                    let _ = runtime.local_models().add(destination.display().to_string());
+                }
+                let _ = app.emit("downloads-installed", kind);
+            }
+            Ok(Ending::Paused) => jobs.state(&id, JobState::Paused, None),
+            Ok(Ending::Stopped) => jobs.state(&id, JobState::Stopped, None),
+            Err(error) => jobs.state(&id, JobState::Failed, Some(error)),
+        }
+        let _ = app.emit("downloads-state", jobs.list());
+    });
 }

@@ -89,53 +89,11 @@ pub fn tts_set_skip_code(
     settings.save(&database)
 }
 
-/// Copies a voice the user picked into the app's own folder and returns its row.
-///
-/// Two files, because a Piper voice without its `.onnx.json` cannot be loaded:
-/// taking only the model would install something that looks present and then
-/// refuses to speak. The copy is deliberate -- a voice in the user's Downloads
-/// folder can be moved, and a selection points at a path.
-#[tauri::command]
-pub fn tts_add_voice(path: String) -> Result<VoiceEntry, String> {
-    let source = std::path::PathBuf::from(&path);
-    let is_model = source.is_file()
-        && source
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("onnx"));
-    if !is_model {
-        return Err("Choose a Piper voice: an .onnx model file.".to_string());
-    }
-
-    let config = source.with_extension("onnx.json");
-    if !config.is_file() {
-        return Err(format!(
-            "The settings file beside the voice is missing. Expected {}.",
-            config.display()
-        ));
-    }
-
-    let destination = voice::local_dir();
-    std::fs::create_dir_all(&destination)
-        .map_err(|error| format!("Could not create {}: {error}", destination.display()))?;
-
-    let name = source
-        .file_name()
-        .ok_or_else(|| "That file has no name.".to_string())?;
-    let model = destination.join(name);
-    std::fs::copy(&source, &model).map_err(|error| format!("Could not copy the voice: {error}"))?;
-    std::fs::copy(&config, model.with_extension("onnx.json"))
-        .map_err(|error| format!("Could not copy the voice's settings: {error}"))?;
-
-    voice::describe(&model).ok_or_else(|| "The copied voice could not be read.".to_string())
-}
-
 /// Deletes a voice the app installed, model and settings together.
 ///
-/// Refused for the voice the build places: it is part of the app rather than
-/// something the user added, and removing it would leave the speech features with
-/// nothing to fall back to. A deleted voice also loses its stored pace and, if it
-/// was the selected one, the selection returns to the built-in voice.
+/// A deleted voice also loses its stored pace and, if it was the selected one,
+/// the selection clears -- which is the truth: there is nothing installed to read
+/// with until another voice is downloaded.
 #[tauri::command]
 pub fn tts_remove_voice(
     database: State<'_, Arc<Database>>,

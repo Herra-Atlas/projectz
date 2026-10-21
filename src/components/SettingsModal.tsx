@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open as openFile } from "@tauri-apps/plugin-dialog";
-import { ArrowLeft, BookMarked, Brain, ChevronDown, ChevronRight, Cpu, GripVertical, Lightbulb, LoaderCircle, MoveRight, Palette, Pencil, Plug, Plus, Search, Server, Settings2, SlidersHorizontal, Sparkles, Trash2, X, Zap } from "lucide-react";
+import { ArrowLeft, BookMarked, Brain, ChevronDown, ChevronRight, Cpu, Download, GripVertical, Info, Lightbulb, LoaderCircle, MoveRight, Palette, Pencil, Plug, Plus, Search, Server, Settings2, SlidersHorizontal, Sparkles, Trash2, X, Zap } from "lucide-react";
 import { resolveTheme, type Appearance } from "../features/appearance/appearance";
 import AccentPicker from "./appearance/AccentPicker";
 import ThemePicker from "./appearance/ThemePicker";
@@ -10,6 +12,7 @@ import ModelBadges from "./modelBadges/ModelBadges";
 import EnginesSettingsPage from "./EnginesSettingsPage";
 import { engineLabel } from "./EnginePicker";
 import RuntimeSettingsPage, { type LocalRuntimeSettings } from "./RuntimeSettingsPage";
+import EnginePicker from "./EnginePicker";
 import SkillsPage from "./SkillsPage";
 import McpSettingsPage from "./McpSettingsPage";
 import AssistSettingsPage from "./assist/AssistSettingsPage";
@@ -19,6 +22,11 @@ import { buildSettingsIndex, type SettingsEntry } from "./settings/settingsIndex
 import { LocalCategoryTabs, LOCAL_TITLES, type LocalCategory } from "./settings/local/LocalCategoryTabs";
 import { LocalAddMenu } from "./settings/local/LocalAddMenu";
 import { SpeechRecognitionCategory } from "./settings/local/SpeechRecognitionCategory";
+import { SttModelSettingsPage } from "./settings/local/SttModelSettingsPage";
+import { DownloadsPage } from "./settings/downloads/DownloadsPage";
+import { SystemPage } from "./settings/SystemPage";
+import { HoldToDelete } from "./HoldToDelete";
+import type { DownloadJob } from "../features/downloads/types";
 import { SpeechSynthesisCategory } from "./settings/local/SpeechSynthesisCategory";
 import { TtsSettingsPage } from "./settings/local/TtsSettingsPage";
 import { TtsVoiceSettingsPage } from "./settings/local/TtsVoiceSettingsPage";
@@ -145,6 +153,39 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
   const [providerModelQueries, setProviderModelQueries] = useState<Record<string, string>>({});
   const [localModels, setLocalModels] = useState<LocalModel[]>([]);
   /**
+   * How many downloads the backend holds, so the sidebar can offer Downloads
+   * while there is something to look at.
+   *
+   * Only a count is kept. The full list changes several times a second, and
+   * re-rendering this whole dialog on every progress tick would make the settings
+   * window the slowest thing in the app.
+   */
+  const [transferCount, setTransferCount] = useState(0);
+  /** The engine a dragged GGUF file is hovering over, while it is over one. */
+  const [fileDropEngine, setFileDropEngine] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    let stop: (() => void) | undefined;
+    const apply = (jobs: DownloadJob[]) => {
+      setTransferCount((previous) => (previous === jobs.length ? previous : jobs.length));
+    };
+    void invoke<DownloadJob[]>("downloads_jobs")
+      .then((jobs) => {
+        if (live) apply(jobs);
+      })
+      .catch(() => undefined);
+    void listen<DownloadJob[]>("downloads-state", (event) => apply(event.payload)).then(
+      (unlisten) => {
+        if (live) stop = unlisten;
+        else unlisten();
+      },
+    );
+    return () => {
+      live = false;
+      stop?.();
+    };
+  }, []);
+  /**
    * Which engine kind the Local page is showing.
    *
    * Held here rather than in the tab strip so it survives a trip to a model's
@@ -172,16 +213,6 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
   const [pickedModel, setPickedModel] = useState<{ id: string; name: string } | null>(null);
   /** The group under the pointer during a drag, for the drop highlight. */
   const [dropEngine, setDropEngine] = useState<string | null>(null);
-  /**
-   * The same value as `draggingModel`, readable synchronously.
-   *
-   * The pointer handlers need it mid-gesture, and a state update scheduled in
-   * the same event is not visible to the handler still running -- so a quick
-   * release could be read as a click and drop nothing.
-   */
-  const draggingRef = useRef<string | null>(null);
-  /** Where the pointer went down, before the movement counts as a drag. */
-  const pointerDrag = useRef<{ x: number; y: number; modelId: string } | null>(null);
   /** Set when a drag ends, so the click that follows it does not also arm the model. */
   const suppressClick = useRef(false);
   /**
@@ -629,6 +660,85 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
     }
   };
 
+  /** The engine group under a client-space point, if the pointer is over one. */
+  const engineAt = (x: number, y: number): string | null => {
+    const element = document.elementFromPoint(x, y);
+    return element?.closest<HTMLElement>("[data-engine-group]")?.dataset.engineGroup ?? null;
+  };
+
+  /**
+   * Adds GGUF files dropped from Explorer, and puts them on the engine they were
+   * dropped on.
+   *
+   * One loop rather than `Promise.all`: each add is a database write plus a read
+   * of the file's header, and a handful of models arriving in parallel contend
+   * for the same lock for no gain.
+   */
+  const addDroppedModels = async (paths: string[], engineId: string | null) => {
+    let added = 0;
+    for (const path of paths) {
+      try {
+        const model = await invoke<LocalModel>("local_models_add", { path });
+        if (engineId) {
+          await invoke("local_model_engine_set", { modelId: model.id, engineId });
+        }
+        added += 1;
+      } catch (reason) {
+        notify("error", `Could not add ${path}: ${String(reason)}`);
+      }
+    }
+    if (added === 0) return;
+    await refreshLocalModels();
+    onEndpointsChanged();
+    notify("success", added === 1 ? "1 model added" : `${added} models added`);
+  };
+
+  /**
+   * Files dragged in from Explorer, while the llama.cpp page is the one showing.
+   *
+   * Tauri consumes the native drag to implement its own file drop, so the paths
+   * arrive through this event rather than a DOM `drop` -- the same route the
+   * composer uses to attach a file. Listening only on this page means a file
+   * dropped anywhere else cannot quietly register a model.
+   */
+  useEffect(() => {
+    if (page.view !== "local" || localCategory !== "llama") return;
+    let live = true;
+    let stop: (() => void) | undefined;
+    const scale = () => window.devicePixelRatio || 1;
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const payload = event.payload;
+        if (payload.type === "drop") {
+          setFileDropEngine(null);
+          const paths = payload.paths.filter((path) => path.toLowerCase().endsWith(".gguf"));
+          if (paths.length === 0) return;
+          void addDroppedModels(
+            paths,
+            engineAt(payload.position.x / scale(), payload.position.y / scale()),
+          );
+          return;
+        }
+        if (payload.type === "leave") {
+          setFileDropEngine(null);
+          return;
+        }
+        setFileDropEngine(engineAt(payload.position.x / scale(), payload.position.y / scale()));
+      })
+      .then((unlisten) => {
+        if (live) stop = unlisten;
+        else unlisten();
+      });
+    return () => {
+      live = false;
+      stop?.();
+    };
+    // `addDroppedModels` and `engineAt` read state through their closures and are
+    // rebuilt with it; re-binding on the two things that decide whether a drop is
+    // welcome is enough.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page.view, localCategory]);
+
   const addLocalModel = async () => {
     const selected = await openFile({
       multiple: false,
@@ -751,11 +861,11 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
   // Where each drilled-in page returns to, and what the back control is called.
   // The provider form and the skill form are the same shape -- a whole page
   // standing in for a list -- so the header treats them the same way.
-  const isSubPage = page.view === "form" || page.view === "model" || page.view === "skill" || page.view === "download" || page.view === "ttsSettings" || page.view === "ttsVoice";
+  const isSubPage = page.view === "form" || page.view === "model" || page.view === "skill" || page.view === "download" || page.view === "ttsSettings" || page.view === "ttsVoice" || page.view === "sttModel";
   const backTarget: SettingsPage =
-    page.view === "model" || page.view === "download" || page.view === "ttsSettings" || page.view === "ttsVoice" ? { view: "local" } : page.view === "skill" ? { view: "skills" } : { view: "providers" };
+    page.view === "model" || page.view === "download" || page.view === "ttsSettings" || page.view === "ttsVoice" || page.view === "sttModel" ? { view: "local" } : page.view === "skill" ? { view: "skills" } : { view: "providers" };
   const backLabel =
-    page.view === "model" ? "Back to local models" : page.view === "download" ? "Back to local engines" : page.view === "ttsVoice" ? "Back to speech synthesis" : page.view === "ttsSettings" ? "Back to speech synthesis" : page.view === "skill" ? "Back to skills" : "Back to providers";
+    page.view === "model" ? "Back to local models" : page.view === "download" ? "Back to local engines" : page.view === "ttsVoice" ? "Back to speech synthesis" : page.view === "ttsSettings" ? "Back to speech synthesis" : page.view === "sttModel" ? "Back to speech recognition" : page.view === "skill" ? "Back to skills" : "Back to providers";
 
   return (
     <dialog
@@ -791,7 +901,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
         <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
           {/* No bottom hairline in the stacked layout either: the title band already draws
               one directly under it, and two rules a few pixels apart is the duplicate. */}
-          <nav aria-label="Settings sections" className="flex shrink-0 gap-1 overflow-x-auto bg-[var(--rail)] px-2.5 py-2 sm:w-[200px] sm:flex-col sm:gap-0.5 sm:overflow-visible sm:border-r sm:border-[var(--line)] sm:py-3">
+          <nav aria-label="Settings sections" className="flex shrink-0 gap-1 overflow-x-auto bg-[var(--rail)] px-2.5 py-2 sm:min-h-0 sm:w-[200px] sm:flex-col sm:gap-0.5 sm:overflow-y-auto sm:border-r sm:border-[var(--line)] sm:py-3">
             <p className="hidden px-2.5 pb-1.5 pt-1 text-[11px] font-medium text-[var(--quiet)] sm:block">Application</p>
             <button type="button" data-settings-nav="general" aria-label="General" onClick={() => setPage({ view: "general" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "general" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><SlidersHorizontal size={16} />General</button>
             <button type="button" data-settings-nav="appearance" aria-label="Appearance" onClick={() => setPage({ view: "appearance" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "appearance" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Palette size={16} />Appearance</button>
@@ -809,6 +919,21 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
             <button type="button" data-settings-nav="providers" aria-label="Providers" onClick={() => setPage({ view: "providers" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "providers" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Server size={16} />Providers</button>
             <button type="button" data-settings-nav="local" aria-label="Local models" onClick={() => setPage({ view: "local" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "local" || page.view === "model" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Cpu size={16} />Local</button>
             <button type="button" data-settings-nav="engines" aria-label="Engines" onClick={() => setPage({ view: "engines" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "engines" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Zap size={16} />Engines</button>
+            {/* Only while something is transferring, or has this session: a permanent
+                "Downloads" entry for a list that is usually empty is a page nobody
+                needs and a row that says nothing. */}
+            {transferCount > 0 && (
+              <button type="button" data-settings-nav="downloads" aria-label="Downloads" onClick={() => setPage({ view: "downloads" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "downloads" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}>
+                <Download size={16} />
+                Downloads
+                <span className="ml-auto text-[11px] tabular-nums text-[var(--quiet)]">{transferCount}</span>
+              </button>
+            )}
+            {/* On its own, at the bottom: System is not a category, and standing
+                apart says so. `mt-auto` pins it once the list fits; when the window
+                is too short, the whole nav scrolls and this comes last. */}
+            <div aria-hidden="true" className="hidden sm:mt-auto sm:block sm:h-px sm:bg-[var(--line)]" />
+            <button type="button" data-settings-nav="system" aria-label="System" onClick={() => setPage({ view: "system" })} className={`flex min-h-9 shrink-0 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "system" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Info size={16} />System</button>
           </nav>
 
           <div className="min-w-0 flex-1 overflow-y-auto">
@@ -837,7 +962,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                         <div className="min-w-0 flex-1"><h3 className="truncate text-sm font-medium">{endpoint.name}</h3><p className="truncate text-xs text-[var(--quiet)]">{endpoint.base_url} · {enabledCount} of {allModels.length} models enabled</p></div>
                         <button type="button" onClick={() => void testEndpoint(endpoint)} disabled={testingId === endpoint.id} className="grid size-9 shrink-0 place-items-center rounded-md text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--accent)] disabled:opacity-50" aria-label={`Test ${endpoint.name}`} title="Test connection and find models"><Zap size={16} className={testingId === endpoint.id ? "animate-pulse" : ""} /></button>
                         <button type="button" onClick={() => openEdit(endpoint)} className="grid size-9 shrink-0 place-items-center rounded-md text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]" aria-label={`Edit ${endpoint.name}`} title="Edit provider"><Pencil size={16} /></button>
-                        <button type="button" onClick={() => void removeEndpoint(endpoint)} className="grid size-9 shrink-0 place-items-center rounded-md text-[var(--quiet)] hover:bg-[var(--raised)] hover:text-[var(--danger)]" aria-label={`Remove ${endpoint.name}`} title="Remove provider"><Trash2 size={16} /></button>
+                        <HoldToDelete onConfirm={() => void removeEndpoint(endpoint)} label={`Remove ${endpoint.name}`} title="Remove provider" className="grid size-9 shrink-0 place-items-center rounded-md text-[var(--quiet)] hover:bg-[var(--raised)] hover:text-[var(--danger)] focus-visible:outline-2 focus-visible:outline-[var(--accent)]"><Trash2 size={16} /></HoldToDelete>
                       </div>
                       {expanded && <div className="mb-3 ml-[2.75rem] max-h-64 overflow-y-auto border-l border-[var(--line)] py-1 pl-3">
                         <div className="sticky top-0 z-10 flex flex-wrap items-center gap-x-4 gap-y-2 bg-[var(--page)] pb-2 pr-2">
@@ -880,7 +1005,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                     Moving {pickedModel.name}. Choose an engine below, or press Escape to cancel.
                   </p>
                 )}
-                {localModels.length === 0 ? <div className="px-4 py-7"><p className="text-sm text-[var(--muted)]">No local models added.</p><p className="mt-1 text-xs text-[var(--quiet)]">Choose a GGUF file to register its path for local inference.</p></div> : <div className="divide-y divide-[var(--line)]">
+                {localModels.length === 0 ? <div className="px-4 py-7"><p className="text-sm text-[var(--muted)]">No local models added.</p><p className="mt-1 text-xs text-[var(--quiet)]">Drop GGUF files here to add them, or choose one from the menu above.</p></div> : <div className="divide-y divide-[var(--line)]">
                   {/* Grouped by engine, the same shape the providers page uses.
                       The group is the engine, not the model: a model is run by one
                       engine, so grouping by it answers the question someone
@@ -888,14 +1013,21 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                       else is on it" -- which a flat alphabetical list of models
                       cannot. `engine_id` arrives as the model's own engine from
                       the backend, so this never has to guess. */}
-                  {localModelGroups.map((group) => <article key={group.id}>
+                  {localModelGroups.map((group) => <article key={group.id}
+                    // The whole group is the target, not just its header. An open
+                    // engine draws its models below the header, and dropping onto
+                    // that list is the natural place to aim -- with the attribute
+                    // only on the header, `closest` found nothing there and the
+                    // drop was silently refused.
+                    data-engine-group={group.id}
+                  >
                     <div
                       // Marks the target for `dropTargetAt`, which hit-tests the
                       // document while a model is in flight. A collapsed group is
                       // still a target: opening it is what the drop is *for*, not
                       // a precondition of it.
                       data-engine-group={group.id}
-                      className={`flex min-h-[68px] items-center gap-2 border-l-2 px-4 py-3 transition-colors ${dropEngine === group.id ? "border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_10%,transparent)]" : "border-transparent"}`}
+                      className={`flex min-h-[68px] items-center gap-2 border-l-2 px-4 py-3 transition-colors ${dropEngine === group.id || fileDropEngine === group.id ? "border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_10%,transparent)]" : "border-transparent"}`}
                     >
                       <button type="button" onClick={() => setExpandedEngines((current) => current.includes(group.id) ? current.filter((id) => id !== group.id) : [...current, group.id])} aria-expanded={expandedEngines.includes(group.id)} aria-label={`${expandedEngines.includes(group.id) ? "Collapse" : "Expand"} ${group.label}`} title={`${expandedEngines.includes(group.id) ? "Collapse" : "Expand"} ${group.label}`} className="grid size-9 shrink-0 place-items-center rounded-md text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><Cpu size={16} /></button>
                       <div className="min-w-0 flex-1"><h3 className="truncate text-sm font-medium">{group.label}</h3><p className="truncate text-xs text-[var(--quiet)]">{group.models.length === 0 ? "No models" : group.models.length === 1 ? "1 model" : `${group.models.length} models`}{group.id ? "" : " · no engine chosen"}</p></div>
@@ -923,37 +1055,53 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                             // file drop, so `dragstart` never reaches the page --
                             // and switching that off would cost the chat its
                             // drop-a-file-to-attach.
+                            //
+                            // The move and release are listened for on `window`,
+                            // not on this row. A fast drag leaves the row between
+                            // two pointer events, and a row-local handler never
+                            // hears the rest of the gesture: the model simply
+                            // stayed where it was. Window listeners also remove the
+                            // need for pointer capture, which would have swallowed
+                            // the clicks on the buttons inside the row.
                             onPointerDown={(event) => {
                               if (event.button !== 0) return;
                               suppressClick.current = false;
-                              pointerDrag.current = { x: event.clientX, y: event.clientY, modelId: model.id };
+                              const originX = event.clientX;
+                              const originY = event.clientY;
+                              let dragging = false;
+
+                              const detach = () => {
+                                window.removeEventListener("pointermove", move);
+                                window.removeEventListener("pointerup", up);
+                                window.removeEventListener("pointercancel", abort);
+                              };
+                              const move = (moveEvent: PointerEvent) => {
+                                if (!dragging) {
+                                  if (Math.hypot(moveEvent.clientX - originX, moveEvent.clientY - originY) < DRAG_THRESHOLD) return;
+                                  dragging = true;
+                                  suppressClick.current = true;
+                                  setDraggingModel(model.id);
+                                }
+                                setDropEngine(dropTargetAt(moveEvent.clientX, moveEvent.clientY, model.id));
+                              };
+                              const up = (upEvent: PointerEvent) => {
+                                detach();
+                                setDraggingModel(null);
+                                setDropEngine(null);
+                                if (!dragging) return;
+                                const target = dropTargetAt(upEvent.clientX, upEvent.clientY, model.id);
+                                if (target) void moveModelToEngine(model.id, target);
+                              };
+                              const abort = () => {
+                                detach();
+                                setDraggingModel(null);
+                                setDropEngine(null);
+                              };
+
+                              window.addEventListener("pointermove", move);
+                              window.addEventListener("pointerup", up);
+                              window.addEventListener("pointercancel", abort);
                             }}
-                            onPointerMove={(event) => {
-                              const origin = pointerDrag.current;
-                              if (!origin || origin.modelId !== model.id) return;
-                              if (draggingRef.current !== model.id) {
-                                if (Math.hypot(event.clientX - origin.x, event.clientY - origin.y) < DRAG_THRESHOLD) return;
-                                // Past the threshold this is a drag. The row takes
-                                // the pointer capture, so the moves keep arriving
-                                // as it crosses the groups below it.
-                                event.currentTarget.setPointerCapture(event.pointerId);
-                                draggingRef.current = model.id;
-                                suppressClick.current = true;
-                                setDraggingModel(model.id);
-                              }
-                              setDropEngine(dropTargetAt(event.clientX, event.clientY, model.id));
-                            }}
-                            onPointerUp={(event) => {
-                              const origin = pointerDrag.current;
-                              pointerDrag.current = null;
-                              if (!origin || origin.modelId !== model.id || draggingRef.current !== model.id) return;
-                              const target = dropTargetAt(event.clientX, event.clientY, model.id);
-                              draggingRef.current = null;
-                              setDraggingModel(null);
-                              setDropEngine(null);
-                              if (target) void moveModelToEngine(model.id, target);
-                            }}
-                            onPointerCancel={() => { pointerDrag.current = null; draggingRef.current = null; setDraggingModel(null); setDropEngine(null); }}
                             className={`flex min-h-9 flex-wrap items-center gap-3 py-1.5 pr-2 transition-[background-color,opacity] ${draggingModel === model.id ? "select-none opacity-40" : ""} ${picked ? "bg-[color-mix(in_srgb,var(--accent)_10%,transparent)]" : ""}`}
                           >
                             {/* Two ways to start a move, one handle. Dragging is the
@@ -997,19 +1145,32 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                             {!model.present && <span className="shrink-0 text-[11px] text-[var(--danger)]">File missing</span>}
                             <span className="hidden text-[11px] text-[var(--muted)] sm:block">{formatSize(model.size_bytes)}</span>
                             <button type="button" onClick={() => { setFormError(""); setPage({ view: "model", model }); }} className="grid size-8 shrink-0 place-items-center rounded-md text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label={`Settings for ${model.name}`} title="Model settings"><Settings2 size={16} /></button>
-                            <button type="button" onClick={() => void removeLocalModel(model)} className="grid size-8 shrink-0 place-items-center rounded-md text-[var(--quiet)] hover:bg-[var(--raised)] hover:text-[var(--danger)]" aria-label={`Remove ${model.name}`} title="Remove model from list"><Trash2 size={16} /></button>
+                            <HoldToDelete onConfirm={() => void removeLocalModel(model)} label={`Remove ${model.name}`} title="Remove model from list" className="grid size-8 shrink-0 place-items-center rounded-md text-[var(--quiet)] hover:bg-[var(--raised)] hover:text-[var(--danger)]"><Trash2 size={16} /></HoldToDelete>
                           </div>;
                         })}
                       </div>
                     </div>}
                   </article>)}
                 </div>}
-                </> : localCategory === "stt" ? <SpeechRecognitionCategory onDownload={() => setPage({ view: "download", kind: "stt" })} notify={notify} /> : <SpeechSynthesisCategory onDownload={() => setPage({ view: "download", kind: "tts" })} onSettings={() => setPage({ view: "ttsSettings" })} onVoiceSettings={(voice) => setPage({ view: "ttsVoice", voice })} notify={notify} />}
+                </> : localCategory === "stt" ? <SpeechRecognitionCategory onDownload={() => setPage({ view: "download", kind: "stt" })} onModelSettings={(model) => setPage({ view: "sttModel", model })} notify={notify} /> : <SpeechSynthesisCategory onDownload={() => setPage({ view: "download", kind: "tts" })} onSettings={() => setPage({ view: "ttsSettings" })} onVoiceSettings={(voice) => setPage({ view: "ttsVoice", voice })} notify={notify} />}
               </> : page.view === "download" ? <DownloadPage kind={page.kind} notify={notify} onModelInstalled={() => void refreshLocalModels()} />
               : page.view === "ttsSettings" ? <TtsSettingsPage notify={notify} />
               : page.view === "ttsVoice" ? <TtsVoiceSettingsPage voice={page.voice} notify={notify} />
+              : page.view === "sttModel" ? <SttModelSettingsPage model={page.model} notify={notify} />
+              : page.view === "downloads" ? <DownloadsPage notify={notify} />
+              : page.view === "system" ? <SystemPage notify={notify} />
               : page.view === "model" ? <>
-                <SettingsPageTitle><h2 className="text-[17px] font-semibold tracking-tight">{page.model.name}</h2></SettingsPageTitle>
+                <SettingsPageTitle>
+                  <h2 className="text-[17px] font-semibold tracking-tight">{page.model.name}</h2>
+                  {/* Beside the name because it decides which binary runs at all,
+                      and the model cannot start without one. */}
+                  <EnginePicker
+                    modelId={page.model.id}
+                    engineId={page.model.engine_id}
+                    onChange={() => void updateLocalModelEngine()}
+                    notify={notify}
+                  />
+                </SettingsPageTitle>
                 <RuntimeSettingsPage
                   key={page.model.id}
                   modelId={page.model.id}

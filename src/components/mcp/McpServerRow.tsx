@@ -1,4 +1,5 @@
 import { Pencil, Trash2 } from "lucide-react";
+import { HoldToDelete } from "../HoldToDelete";
 
 import type { McpServerView } from "../../features/mcp/types";
 import { commandLine } from "../../features/mcp/draft";
@@ -74,16 +75,15 @@ export default function McpServerRow({
         >
           <Pencil size={16} />
         </button>
-        <button
-          type="button"
-          onClick={onDelete}
+        <HoldToDelete
+          onConfirm={onDelete}
           disabled={busy}
-          className="grid size-9 shrink-0 place-items-center rounded-md text-[var(--quiet)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--danger)] disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
-          aria-label={`Remove ${server.name}`}
+          label={`Remove ${server.name}`}
           title="Remove server"
+          className="grid size-9 shrink-0 place-items-center rounded-md text-[var(--quiet)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--danger)] disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
         >
           <Trash2 size={16} />
-        </button>
+        </HoldToDelete>
       </div>
 
       {/* The tools, behind the same disclosure a provider keeps its models

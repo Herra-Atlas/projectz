@@ -16,7 +16,7 @@ import type { SettingsPage } from "./settingsPages";
  * none can be named by a search result and none is a page the index lists. `form`
  * stays: opening it blank is exactly what "Add provider" means.
  */
-export type SettingsView = Exclude<SettingsPage["view"], "model" | "skill" | "download" | "ttsVoice">;
+export type SettingsView = Exclude<SettingsPage["view"], "model" | "skill" | "download" | "ttsVoice" | "sttModel">;
 
 /**
  * One findable row, as search sees it.
