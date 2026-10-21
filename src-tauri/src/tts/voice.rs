@@ -1,11 +1,10 @@
 //! Which voices exist, which one is chosen, and where they live.
 //!
-//! # Two places a voice can come from
+//! # One place a voice comes from
 //!
-//! The build places one (`voice/piper/voices/...`), and the downloader plus the
-//! Add-voice action write into `models/tts/...`. Both are listed the same way and
-//! spoken the same way, because to a reader they are the same thing: a voice the
-//! app can use. `built_in` exists only so the page can say which one shipped.
+//! A voice is a file the user installed -- downloaded from the voice page or
+//! copied in from disk -- so the list is whatever is under `models/tts`. Nothing
+//! is placed by the build.
 //!
 //! # Why a voice is identified by its path
 //!
@@ -18,9 +17,6 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::app_paths::{models_root, voice_root};
-
-/// The voice the build places, named as its release ships it.
-pub const BUILT_IN_FILE: &str = "en_US-amy-low.onnx";
 
 /// The folder holding `piper.exe`, its DLLs and `espeak-ng-data`.
 pub fn install_dir() -> PathBuf {
@@ -41,60 +37,42 @@ pub struct VoiceEntry {
     pub name: String,
     pub sample_rate: u32,
     pub size: u64,
-    /// Placed by the build rather than installed by the user.
-    pub built_in: bool,
 }
 
-/// Every voice the app can speak with, the built-in one first.
+/// Every voice the app can speak with.
 pub fn list() -> Vec<VoiceEntry> {
     let mut entries = Vec::new();
-
-    let built_in = install_dir().join("voices").join(BUILT_IN_FILE);
-    if let Some(entry) = entry_for(&built_in, true) {
-        entries.push(entry);
-    }
-
     collect(&models_root().join("tts"), &mut entries);
-
-    // Stable order within the installed half, so a re-render does not reorder the
-    // list under the pointer. The built-in voice is left where it is, at the top.
-    let installed_from = entries.iter().take_while(|entry| entry.built_in).count();
-    entries[installed_from..].sort_by(|left, right| left.name.cmp(&right.name));
+    // Stable order, so a re-render does not reorder the list under the pointer.
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
     entries
 }
 
-/// The selection a voice path stands for: `None` for the one the build placed.
+/// The selection a voice path stands for.
 ///
-/// The built-in voice is chosen by "no choice at all", so a page that knows it by
-/// its path -- a row, a settings page -- has to fold back to that. Without this
-/// the same voice would have two settings depending on which page asked, and the
-/// pace set in one place would not be the pace used in the other.
+/// Empty is the same choice as nothing, so the stored record cannot end up with
+/// two spellings of "no voice".
 pub fn canonical(id: Option<&str>) -> Option<String> {
     let id = id?;
     if id.trim().is_empty() {
         return None;
     }
-    let built_in = install_dir().join("voices").join(BUILT_IN_FILE);
-    if Path::new(id) == built_in {
-        return None;
-    }
     Some(id.to_string())
 }
 
-/// The chosen voice, or the built-in one when nothing is chosen.
+/// The chosen voice.
 ///
-/// A selection whose file has gone falls back rather than failing: the user
-/// deleted it, and the app can still speak.
+/// A selection whose file has gone fails rather than falling back, because there
+/// is nothing to fall back to: every voice is one the user installed.
 pub fn resolve(id: Option<&str>) -> Result<Voice, String> {
-    if let Some(id) = id {
-        let path = PathBuf::from(id);
-        // Only files this app put here. A stored path is data, and data that names
-        // an executable's neighbour is not a voice.
-        if path.is_file() && is_managed(&path) {
-            return from_model(&path);
-        }
+    let id = id.ok_or_else(|| "No voice is installed.".to_string())?;
+    let path = PathBuf::from(id);
+    // Only files this app put here. A stored path is data, and data that names an
+    // executable's neighbour is not a voice.
+    if !path.is_file() || !is_managed(&path) {
+        return Err(format!("The voice is missing. Expected {id}."));
     }
-    from_model(&install_dir().join("voices").join(BUILT_IN_FILE))
+    from_model(&path)
 }
 
 /// A resolved, usable voice: every path `piper.exe` needs, already checked.
@@ -137,7 +115,7 @@ impl VoiceInfo {
     pub fn missing(reason: String) -> Self {
         Self {
             available: false,
-            name: BUILT_IN_FILE.to_string(),
+            name: String::new(),
             sample_rate: DEFAULT_SAMPLE_RATE,
             reason: Some(reason),
         }
@@ -183,11 +161,11 @@ fn from_model(model: &Path) -> Result<Voice, String> {
 ///
 /// Public because adding a voice by hand has to answer with the row it created,
 /// and the rules for reading a voice's rate belong here rather than in a command.
-pub fn describe(model: &Path, built_in: bool) -> Option<VoiceEntry> {
-    entry_for(model, built_in)
+pub fn describe(model: &Path) -> Option<VoiceEntry> {
+    entry_for(model)
 }
 
-fn entry_for(model: &Path, built_in: bool) -> Option<VoiceEntry> {
+fn entry_for(model: &Path) -> Option<VoiceEntry> {
     let config = model.with_extension("onnx.json");
     let sample_rate = sample_rate_from(&config).ok()?;
     Some(VoiceEntry {
@@ -195,7 +173,6 @@ fn entry_for(model: &Path, built_in: bool) -> Option<VoiceEntry> {
         name: file_name(model),
         sample_rate,
         size: std::fs::metadata(model).map(|meta| meta.len()).unwrap_or(0),
-        built_in,
     })
 }
 
@@ -217,7 +194,7 @@ fn collect(directory: &Path, found: &mut Vec<VoiceEntry>) {
         if !is_model {
             continue;
         }
-        if let Some(entry) = entry_for(&path, false) {
+        if let Some(entry) = entry_for(&path) {
             found.push(entry);
         }
     }

@@ -17,31 +17,31 @@ pub async fn panel_terminal_run(command: String, workspace: String) -> Result<St
         .map_err(|error| format!("Could not open workspace: {error}"))?;
     let working_directory = resolve_within(&root, ".")?;
 
-    let mut child = if cfg!(windows) {
-        Command::new("powershell.exe")
+    let mut command = if cfg!(windows) {
+        let mut process = Command::new("powershell.exe");
+        process
             .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
             .arg(format!(
                 "$global:LASTEXITCODE = $null; {command}; $commandSucceeded = $?; if ($null -ne $LASTEXITCODE) {{ exit $LASTEXITCODE }}; if ($commandSucceeded) {{ exit 0 }} else {{ exit 1 }}"
-            ))
-            .current_dir(&working_directory)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|error| format!("Could not start PowerShell: {error}"))?
+            ));
+        process
     } else {
-        Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .current_dir(&working_directory)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|error| format!("Could not start shell: {error}"))?
+        let mut process = Command::new("sh");
+        process.arg("-c").arg(command);
+        process
     };
+    command
+        .current_dir(&working_directory)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    // The panel reads the output, so the shell needs no console of its own, and
+    // a packaged build has none to give it.
+    crate::child::hide_console_async(&mut command);
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Could not start the shell: {error}"))?;
 
     let stdout = child.stdout.take().ok_or("Could not capture stdout")?;
     let stderr = child.stderr.take().ok_or("Could not capture stderr")?;

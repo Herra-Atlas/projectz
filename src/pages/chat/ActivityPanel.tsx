@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Brain, ChevronRight, LoaderCircle } from "lucide-react";
 import ToolIcon from "../../components/ToolIcon";
 import { formatTokens } from "../../features/chat/sessionStats";
@@ -66,8 +66,9 @@ export default function ActivityPanel({ steps, live, renderMarkdown, totalSecond
     setWasLive(live);
   }, [live, wasLive]);
 
-  const rows = useMemo(() => buildRows(steps), [steps]);
-  const totals = usePanelTotals(steps, live, totalSeconds);
+  const settled = useMemo(() => closeSuperseded(steps), [steps]);
+  const rows = useMemo(() => buildRows(settled), [settled]);
+  const totals = usePanelTotals(settled, live, totalSeconds);
 
   if (steps.length === 0) return null;
 
@@ -146,7 +147,7 @@ function ThoughtRow({
   renderMarkdown: (text: string) => React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
-  const now = useTick(live && step.running, step.startedAt);
+  const now = useTick(live && step.running);
   const seconds = stepSeconds(step, now, live);
   // A thought with nothing in it gets no disclosure, because a caret beside an
   // empty trace invites a click that reveals nothing.
@@ -311,12 +312,16 @@ function ToolRow({ steps, live }: { steps: ToolStep[]; live: boolean }) {
 
   return (
     <li className="text-[12px] leading-6 text-[var(--muted)]">
-      <div className="flex items-center gap-1.5 py-0.5">
+      <div className="flex min-w-0 items-center gap-1.5 py-0.5">
         {collapsible ? (
           <button
             type="button"
             onClick={() => setExpanded((value) => !value)}
             aria-expanded={expanded}
+            // The row clips its detail to one line, so a long command is
+            // unreadable at a glance. The native tooltip is the whole of it,
+            // without spending the width the rest of the row needs.
+            title={collapsible ? groupDetail(steps) : first.detail}
             className="flex min-h-7 min-w-0 flex-1 items-center gap-1.5 rounded text-left hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
           >
             {label}
@@ -324,7 +329,7 @@ function ToolRow({ steps, live }: { steps: ToolStep[]; live: boolean }) {
             {caret}
           </button>
         ) : (
-          <div className="flex min-h-7 min-w-0 flex-1 items-center gap-1.5">
+          <div className="flex min-h-7 min-w-0 flex-1 items-center gap-1.5" title={first.detail}>
             {label}
             {figures}
           </div>
@@ -518,6 +523,40 @@ function DiffBlock({ label, diff }: { label: string; diff: ToolDiff }) {
 }
 
 /**
+ * Ends steps that a later step has already superseded.
+ *
+ * Nothing in this panel runs two rows at once: a step is appended after the one
+ * before it has finished, which is why only the last step can still be running.
+ * A `running` flag left on an earlier step is therefore a missed close, not
+ * concurrency -- and it shows: the thought keeps counting while the tool it
+ * handed over to is working, so a row claims to be thinking long after it
+ * stopped.
+ *
+ * Closing it at the moment the next step began keeps the figure honest and
+ * needs no event the backend does not already send.
+ */
+function closeSuperseded(steps: ActivityStep[]): ActivityStep[] {
+  let changed = false;
+  const settled = steps.map((step, index) => {
+    if (step.kind === "note" || !step.running || step.startedAt === undefined) return step;
+    const follower = steps
+      .slice(index + 1)
+      .find(
+        (entry): entry is ToolStep | ThoughtStep =>
+          entry.kind !== "note" && entry.startedAt !== undefined,
+      );
+    if (follower?.startedAt === undefined) return step;
+    changed = true;
+    return {
+      ...step,
+      running: false,
+      seconds: Math.max(0, (follower.startedAt - step.startedAt) / 1000),
+    };
+  });
+  return changed ? settled : steps;
+}
+
+/**
  * Folds consecutive finished reads into one row.
  *
  * Only reads fold. Two searches are two questions and merging them would say
@@ -618,7 +657,7 @@ function usePanelTotals(
   live: boolean,
   totalSeconds?: number,
 ): { seconds: number; toolCount: number } {
-  const now = useTick(live, steps);
+  const now = useTick(live);
   let toolCount = 0;
   let summed = 0;
   for (const step of steps) {
@@ -657,7 +696,7 @@ function stepSeconds(step: ActivityStep, now: number, live: boolean): number {
 
 /** Seconds for a row: the whole run, so a group reports what it cost. */
 function useRunSeconds(steps: ToolStep[], live: boolean): number {
-  const now = useTick(live, steps.some((step) => step.running));
+  const now = useTick(live);
   return steps.reduce((total, step) => total + stepSeconds(step, now, live), 0);
 }
 
@@ -676,22 +715,16 @@ function useRunSeconds(steps: ToolStep[], live: boolean): number {
  * depended on an unrelated interval elsewhere and would have broken silently if
  * that one were slowed.
  */
-function useTick(active: boolean, ...deps: unknown[]): number {
+function useTick(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
-  const activeRef = useRef(active);
-  activeRef.current = active;
   useEffect(() => {
-    // Re-arm only when `active` or the watched values change, so appending a
-    // step does not leave a stale interval behind.
     if (!active) return;
+    // Read the clock on the way in as well as on every tick: a row that starts
+    // between two ticks should not report the time of the previous one.
     setNow(Date.now());
-    const timer = window.setInterval(() => {
-      if (!activeRef.current) return;
-      setNow(Date.now());
-    }, 1000);
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, ...deps]);
+  }, [active]);
   return now;
 }
 

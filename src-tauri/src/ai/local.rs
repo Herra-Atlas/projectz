@@ -494,7 +494,8 @@ impl LocalModelManager {
         }
         process.loading_model_id = Some(id.clone());
         process.logs.clear();
-        let mut child = Command::new(server)
+        let mut command = Command::new(server);
+        command
             .current_dir(&runtime_dir)
             .arg("--model")
             .arg(&model_path)
@@ -507,7 +508,11 @@ impl LocalModelManager {
             .arg("--no-webui")
             .args(settings.to_args())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        // llama-server is a console program, and a packaged build has no console
+        // of its own to hand it one, so Windows would open a window for it.
+        crate::child::hide_console(&mut command);
+        let mut child = command
             .spawn()
             .map_err(|error| {
                 process.loading_model_id = None;

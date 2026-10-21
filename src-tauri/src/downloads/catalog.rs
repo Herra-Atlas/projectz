@@ -138,6 +138,55 @@ pub fn piper_voices(index: &serde_json::Value, query: &str) -> Vec<DownloadFile>
 /// The one repository the Piper voices live in.
 pub const PIPER_REPO: &str = "rhasspy/piper-voices";
 
+/// Where recognition models come from.
+///
+/// Two repositories because they are two model families with two file formats,
+/// both read by the whisper.cpp engine: Whisper's own ggml models, and the
+/// Parakeet TDT port shipped inside whisper.cpp. A `parakeet.cpp` GGUF is a
+/// different format and would not load, which is why the Parakeet source is
+/// named here rather than left to a search.
+pub const WHISPER_REPO: &str = "ggerganov/whisper.cpp";
+pub const PARAKEET_REPO: &str = "ggml-org/parakeet-GGUF";
+
+/// The `.bin` models a recognition repository offers.
+pub fn stt_models(repo: &str, tree: &[TreeEntry], query: &str) -> Vec<DownloadFile> {
+    let needle = query.trim().to_ascii_lowercase();
+    tree.iter()
+        .filter(|entry| entry.entry_type == "file")
+        .filter(|entry| entry.path.to_ascii_lowercase().ends_with(".bin"))
+        // Root files only: whisper.cpp keeps test fixtures and converted copies in
+        // subfolders, and none of those is a model to install.
+        .filter(|entry| !entry.path.contains('/'))
+        .filter(|entry| needle.is_empty() || entry.path.to_ascii_lowercase().contains(&needle))
+        .map(|entry| DownloadFile {
+            repo: repo.to_string(),
+            path: entry.path.clone(),
+            name: file_name(&entry.path).to_string(),
+            size: entry.size,
+            note: recognition_note(repo, &entry.path),
+        })
+        .collect()
+}
+
+/// What tells two recognition models apart: language, and a quantisation if the
+/// file name states one.
+fn recognition_note(repo: &str, path: &str) -> String {
+    if repo == PARAKEET_REPO {
+        return "Parakeet TDT · multilingual".to_string();
+    }
+    let name = file_name(path).to_ascii_lowercase();
+    let mut note = if name.contains(".en") {
+        "English only".to_string()
+    } else {
+        "multilingual".to_string()
+    };
+    if let Some(at) = name.find("-q") {
+        note.push_str(" · ");
+        note.push_str(&name[at + 1..].trim_end_matches(".bin").to_ascii_uppercase());
+    }
+    note
+}
+
 fn file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }

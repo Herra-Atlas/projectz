@@ -29,9 +29,8 @@ export type SettingsPage =
   /* Speech synthesis has settings of its own -- the voice and the pace -- and they
      are a page rather than a row because the engine list is already a picker. */
   | { view: "ttsSettings" }
-  /* One voice's own settings. `null` is the voice the build placed, which is the
-     same value the selection uses for it. */
-  | { view: "ttsVoice"; voice: string | null }
+  /* One voice's own settings, carried by the voice's model path. */
+  | { view: "ttsVoice"; voice: string }
   | { view: "skill"; skill: Skill | null }
   | { view: "model"; model: LocalModel }
   | { view: "form"; endpoint: Endpoint | null };

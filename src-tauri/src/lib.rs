@@ -2,6 +2,7 @@ mod ai;
 mod app_paths;
 mod assist;
 mod browser;
+mod child;
 mod commands;
 mod database;
 mod documents;
@@ -10,6 +11,7 @@ mod jobs;
 mod mcp;
 mod observation;
 mod panel;
+mod stt;
 mod taste;
 mod tts;
 mod websearch;
@@ -427,6 +429,8 @@ pub fn run() {
             downloads::commands::downloads_search,
             downloads::commands::downloads_install,
             downloads::commands::downloads_installed,
+            stt::commands::stt_status,
+            stt::commands::stt_install,
         ])
         .build(tauri::generate_context!())
         .expect("error while building application")

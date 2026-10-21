@@ -30,8 +30,8 @@ export function SpeechSynthesisCategory({
   onDownload: () => void;
   /** The engine's own settings. */
   onSettings: () => void;
-  /** One voice's settings. */
-  onVoiceSettings: (voice: string | null) => void;
+  /** One voice's settings, named by its model path. */
+  onVoiceSettings: (voice: string) => void;
   notify: Notify;
 }) {
   const [voices, setVoices] = useState<VoiceEntry[] | null>(null);
@@ -59,14 +59,13 @@ export function SpeechSynthesisCategory({
 
   const choose = async (voice: VoiceEntry) => {
     if (settings === null) return;
-    const chosen = voice.builtIn ? null : voice.id;
-    if (settings.voice === chosen) return;
+    if (settings.voice === voice.id) return;
     const previous = settings;
     // Painted first, then stored: the tick should follow the press, and a failed
     // save is reported rather than silently undoing it.
-    setSettings({ ...settings, voice: chosen });
+    setSettings({ ...settings, voice: voice.id });
     try {
-      await invoke("tts_select_voice", { voice: chosen });
+      await invoke("tts_select_voice", { voice: voice.id });
     } catch (reason) {
       setSettings(previous);
       notify("error", `The voice could not be saved: ${String(reason)}`);
@@ -141,7 +140,7 @@ export function SpeechSynthesisCategory({
 
       <div className="mb-3 ml-[2.75rem] border-l border-[var(--line)] py-1 pl-3">
         {voices?.map((voice) => {
-          const isChosen = voice.builtIn ? selected === null : selected === voice.id;
+          const isChosen = selected === voice.id;
           return (
             <div key={voice.id} className="flex items-center gap-1">
               <button
@@ -159,7 +158,6 @@ export function SpeechSynthesisCategory({
                   <h4 className="truncate text-xs font-medium text-[var(--muted)]">{voice.name}</h4>
                   <p className="truncate text-[11px] text-[var(--quiet)]">
                     {(voice.sampleRate / 1000).toFixed(1)} kHz · {formatBytes(voice.size)}
-                    {voice.builtIn ? " · built in" : ""}
                   </p>
                 </div>
                 {isChosen && <Check size={14} className="shrink-0 text-[var(--accent)]" />}
@@ -169,27 +167,22 @@ export function SpeechSynthesisCategory({
                   Two buttons in one target is how both become unreliable. */}
               <button
                 type="button"
-                onClick={() => onVoiceSettings(voice.builtIn ? null : voice.id)}
+                onClick={() => onVoiceSettings(voice.id)}
                 aria-label={`${voice.name} settings`}
                 title={`${voice.name} settings`}
                 className="grid size-8 shrink-0 place-items-center rounded-md text-[var(--quiet)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
               >
                 <Settings2 size={14} />
               </button>
-              {/* Only for voices the app installed. The built-in voice is part of
-                  the build rather than something the user added, and deleting it
-                  would leave speech with nothing to fall back to. */}
-              {!voice.builtIn && (
-                <button
-                  type="button"
-                  onClick={() => void removeVoice(voice)}
-                  aria-label={`Delete ${voice.name}`}
-                  title="Delete voice"
-                  className="grid size-8 shrink-0 place-items-center rounded-md text-[var(--quiet)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--danger)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
-                >
-                  <Trash2 size={14} />
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={() => void removeVoice(voice)}
+                aria-label={`Delete ${voice.name}`}
+                title="Delete voice"
+                className="grid size-8 shrink-0 place-items-center rounded-md text-[var(--quiet)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--danger)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+              >
+                <Trash2 size={14} />
+              </button>
             </div>
           );
         })}

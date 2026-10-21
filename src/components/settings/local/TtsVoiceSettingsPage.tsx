@@ -15,15 +15,14 @@ const SAVE_AFTER_MS = 250;
  * One voice's settings.
  *
  * The pace is the setting, because it is the only thing Piper exposes per voice
- * that a reader would want to change -- the model itself is the file. `voice` is
- * `null` for the one the build placed, which is the same value the selection uses
- * for it, so the two pages cannot disagree about which voice a pace belongs to.
+ * that a reader would want to change -- the model itself is the file.
  */
 export function TtsVoiceSettingsPage({
   voice,
   notify,
 }: {
-  voice: string | null;
+  /** The voice's model path, which is also the key its pace is stored under. */
+  voice: string;
   notify: Notify;
 }) {
   const [entry, setEntry] = useState<VoiceEntry | null>(null);
@@ -38,9 +37,7 @@ export function TtsVoiceSettingsPage({
         invoke<VoiceSpeed>("tts_speed", { voice }),
       ]);
       setSpeed(pace);
-      setEntry(
-        (voice === null ? list.find((item) => item.builtIn) : list.find((item) => item.id === voice)) ?? null,
-      );
+      setEntry(list.find((item) => item.id === voice) ?? null);
     } catch (reason) {
       notify("error", `Could not read this voice: ${String(reason)}`);
     }
@@ -63,7 +60,7 @@ export function TtsVoiceSettingsPage({
     }, SAVE_AFTER_MS);
   };
 
-  const title = entry?.name ?? (voice === null ? "Built-in voice" : "Voice");
+  const title = entry?.name ?? "Voice";
 
   return (
     <>
@@ -75,7 +72,6 @@ export function TtsVoiceSettingsPage({
         {entry !== null && (
           <span className="text-xs text-[var(--quiet)]">
             {(entry.sampleRate / 1000).toFixed(1)} kHz · {formatBytes(entry.size)}
-            {entry.builtIn ? " · built in" : ""}
           </span>
         )}
       </SettingsPageTitle>

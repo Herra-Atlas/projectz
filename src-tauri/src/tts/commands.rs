@@ -127,7 +127,7 @@ pub fn tts_add_voice(path: String) -> Result<VoiceEntry, String> {
     std::fs::copy(&config, model.with_extension("onnx.json"))
         .map_err(|error| format!("Could not copy the voice's settings: {error}"))?;
 
-    voice::describe(&model, false).ok_or_else(|| "The copied voice could not be read.".to_string())
+    voice::describe(&model).ok_or_else(|| "The copied voice could not be read.".to_string())
 }
 
 /// Deletes a voice the app installed, model and settings together.

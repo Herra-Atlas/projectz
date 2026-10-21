@@ -239,9 +239,11 @@ pub(crate) fn platform_command(command: &str) -> Command {
         process.arg("-c").arg(command);
         process
     };
-    // Keeps the environment override on Windows from launching a second console
-    // window behind the app for every command.
+    // Keeps colour codes out of tool output, where they are only noise.
     process.env("NO_COLOR", "1");
+    // No console window: a packaged app has no console to lend the shell, so
+    // Windows would otherwise open one over the chat for every command.
+    crate::child::hide_console_async(&mut process);
     process
 }
 

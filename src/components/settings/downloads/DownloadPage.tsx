@@ -15,16 +15,19 @@ const PAGE = 50;
 const TITLES: Record<DownloadKind, string> = {
   llama: "Download a model",
   tts: "Download a voice",
+  stt: "Download a recognition model",
 };
 
 const PLACEHOLDERS: Record<DownloadKind, string> = {
   llama: "Search GGUF models — llama, qwen, mistral…",
   tts: "Search voices — amy, english, low…",
+  stt: "Search models — tiny, base, large, parakeet…",
 };
 
 const HINTS: Record<DownloadKind, string> = {
   llama: "Each repository installs into its own folder, so a projector or tokenizer downloaded later sits beside the model.",
   tts: "A voice is its .onnx model plus the settings file beside it; both are installed together.",
+  stt: "Whisper models first, then Parakeet. Both are read by the same engine — a parakeet.cpp GGUF is a different format and will not load.",
 };
 
 /**

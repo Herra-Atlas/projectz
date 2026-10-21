@@ -39,7 +39,8 @@ const MAX_PCM_BYTES: usize = 32 * 1024 * 1024;
 pub fn synthesize(voice: &Voice, text: &str, speed: f32) -> Result<Vec<u8>, String> {
     let length_scale = 1.0 / if speed > 0.0 { speed } else { 1.0 };
 
-    let mut child = Command::new(&voice.program)
+    let mut command = Command::new(&voice.program);
+    command
         // Piper resolves its DLLs and `espeak-ng-data` relative to itself, and a
         // Windows child inherits the parent's directory rather than its own.
         .current_dir(&voice.home)
@@ -59,7 +60,11 @@ pub fn synthesize(voice: &Voice, text: &str, speed: f32) -> Result<Vec<u8>, Stri
         .arg("--output_raw")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Piper is a console program: without this, every sentence flashes a black
+    // window over the chat.
+    crate::child::hide_console(&mut command);
+    let mut child = command
         .spawn()
         .map_err(|error| format!("Piper could not be started: {error}"))?;
 

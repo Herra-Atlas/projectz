@@ -57,6 +57,40 @@ pub async fn downloads_search(kind: Kind, query: String) -> Result<Vec<DownloadF
             let index = client.piper_index().await?;
             catalog::piper_voices(&index, &query)
         }
+        // Two repositories, one engine: Whisper's own models and the Parakeet TDT
+        // port that ships inside whisper.cpp. Each is one tree request, run
+        // together.
+        Kind::Stt => {
+            let http = client.http().clone();
+            // Owned, not `&'static str`: an async block that captures a borrowed
+            // string cannot satisfy the `Send` bound the command macro asks for.
+            let repos = [
+                catalog::WHISPER_REPO.to_string(),
+                catalog::PARAKEET_REPO.to_string(),
+            ];
+            let trees = futures_util::stream::iter(repos.into_iter().map(|repo| {
+                let http = http.clone();
+                let query = query.clone();
+                async move {
+                    match client::tree(&http, &repo).await {
+                        Ok(tree) => catalog::stt_models(&repo, &tree, &query),
+                        Err(_) => Vec::new(),
+                    }
+                }
+            }))
+            .buffer_unordered(2)
+            .collect::<Vec<_>>()
+            .await;
+            let mut rows: Vec<DownloadFile> = trees.into_iter().flatten().collect();
+            // Whisper first: it is the smaller, English-capable default, and a
+            // mixed list sorted by name would open on Parakeet.
+            rows.sort_by(|left, right| {
+                let left_rank = if left.repo == catalog::WHISPER_REPO { 0 } else { 1 };
+                let right_rank = if right.repo == catalog::WHISPER_REPO { 0 } else { 1 };
+                left_rank.cmp(&right_rank).then_with(|| left.name.cmp(&right.name))
+            });
+            rows
+        }
     };
     files.truncate(MAX_ROWS);
     Ok(files)

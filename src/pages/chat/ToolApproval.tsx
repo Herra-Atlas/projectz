@@ -86,9 +86,13 @@ export default function ToolApproval({ request, onAnswer, onCancel }: ToolApprov
       {/* The command in `--text` rather than as a heading: this is a row, and the
           call it is about is named by the command beside it. Monospaced, because
           a command is code and proportional spacing makes `rm` and `rn` harder to
-          tell apart at a glance. Truncates rather than wrapping, so a long command
-          cannot push the two buttons off the row and out of reach. */}
-      <span className="min-w-0 flex-1 truncate font-mono text-xs text-[var(--text)]">
+          tell apart at a glance. Clipped to one line so a long command cannot
+          push the two buttons off the row and out of reach; the whole of it is in
+          the tooltip, which is where a reader looks before allowing it. */}
+      <span
+        className="min-w-0 flex-1 truncate font-mono text-xs text-[var(--text)]"
+        title={command || request.tool}
+      >
         {command || request.tool}
       </span>
 

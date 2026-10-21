@@ -18,6 +18,8 @@ pub enum Kind {
     Llama,
     /// A Piper voice: an `.onnx` model and the `.onnx.json` beside it.
     Tts,
+    /// A Whisper model: one `ggml-*.bin` file.
+    Stt,
 }
 
 impl Kind {
@@ -26,6 +28,7 @@ impl Kind {
         match self {
             Self::Llama => "llama",
             Self::Tts => "tts",
+            Self::Stt => "stt",
         }
     }
 
@@ -50,7 +53,10 @@ impl Kind {
     pub fn destination(self, repo: &str, path: &str) -> PathBuf {
         let relative = match self {
             Self::Llama => PathBuf::from(path),
-            Self::Tts => PathBuf::from(file_name(path)),
+            // A voice and a Whisper model are named for themselves: the repository
+            // path is a packaging detail, and a reader looking for one should not
+            // have to walk the folders it happens to sit in.
+            Self::Tts | Self::Stt => PathBuf::from(file_name(path)),
         };
         self.install_dir(repo).join(relative)
     }
@@ -59,10 +65,10 @@ impl Kind {
     ///
     /// A voice without its `.onnx.json` cannot be loaded -- that is where Piper
     /// reads the sample rate and the phoneme table -- so the sidecar is not an
-    /// optional extra to fetch later.
+    /// optional extra to fetch later. A Whisper model is one file.
     pub fn companions(self, path: &str) -> Vec<String> {
         match self {
-            Self::Llama => vec![path.to_string()],
+            Self::Llama | Self::Stt => vec![path.to_string()],
             Self::Tts => vec![path.to_string(), format!("{path}.json")],
         }
     }

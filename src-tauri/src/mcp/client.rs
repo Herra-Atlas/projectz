@@ -423,6 +423,9 @@ fn spawn(server: &McpServer) -> Result<Child, String> {
         if let Some((name, value)) = key_env(&server.key) {
             command.env(name, value);
         }
+        // A server is usually a console program; without this, starting one opens
+        // a window over the app and closing it kills the server.
+        crate::child::hide_console_async(&mut command);
         command
     };
 

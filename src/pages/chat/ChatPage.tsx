@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen } from "@tauri-apps/api/event";
-import { ArrowUp, Check, Clipboard, LoaderCircle, Paperclip, RotateCcw, SkipForward, Square, X } from "lucide-react";
+import { ArrowUp, Check, ChevronLeft, ChevronRight, Clipboard, LoaderCircle, Paperclip, RotateCcw, SkipForward, Square, X } from "lucide-react";
 import ActivityPanel from "./ActivityPanel";
 import { Markdown } from "./Markdown";
 import { PathText } from "./PathText";
@@ -189,9 +189,40 @@ export default function ChatPage({ endpointId, model, localModelId, session, ses
   // report is dispatched from there.
   const messagesRef = useRef<ChatMessage[]>(messages);
   messagesRef.current = messages;
+  /**
+   * The replies retries replaced, by message index, so they can be paged back to.
+   *
+   * Session-scoped and deliberately not persisted: the transcript keeps one reply
+   * per turn, and only that one is ever sent to the model. The alternatives are
+   * pages the reader can flip through while this conversation is open.
+   */
+  const [variantSets, setVariantSets] = useState<
+    Record<number, { items: ChatMessage[]; active: number }>
+  >({});
   const [input, setInput] = useState("");
   const [draggingFiles, setDraggingFiles] = useState(false);
   const [running, setRunning] = useState(false);
+  // A retry's fresh reply arrives as an ordinary assistant message. Adopting it
+  // as the newest page is what makes "2/2" appear without the retry path having
+  // to know when a reply finished. Skipped while a run is going, because a
+  // streaming message is replaced object by object and each replacement would
+  // become a page of its own.
+  useEffect(() => {
+    if (running) return;
+    setVariantSets((previous) => {
+      let changed = false;
+      const next = { ...previous };
+      for (const key of Object.keys(previous)) {
+        const index = Number(key);
+        const set = previous[index];
+        const current = messagesRef.current[index];
+        if (!set || !current || set.items.includes(current)) continue;
+        next[index] = { items: [...set.items, current], active: set.items.length };
+        changed = true;
+      }
+      return changed ? next : previous;
+    });
+  }, [messages, running]);
   const [streamText, setStreamText] = useState("");
   const [streamReasoning, setStreamReasoning] = useState("");
   // The steps behind the reply now streaming, in the order they happened. Held
@@ -1484,9 +1515,33 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     if (!sessionId || sessionRunIdsRef.current.has(sessionId)) return;
     const conversation = messages.slice(0, assistantIndex);
     if (!conversation.some((message) => message.role === "user")) return;
+    // The reply about to be replaced becomes a page of its own. Without this a
+    // retry was a deletion: the answer was gone the moment the new one started,
+    // and there was no way back to compare the two.
+    const replaced = messages[assistantIndex];
+    if (replaced) {
+      setVariantSets((previous) => {
+        const set = previous[assistantIndex];
+        if (set?.items.includes(replaced)) return previous;
+        const items = set ? [...set.items, replaced] : [replaced];
+        return { ...previous, [assistantIndex]: { items, active: items.length - 1 } };
+      });
+    }
     sessionIdRef.current = sessionId;
     onFirstSend();
     void startOrQueueChat(conversation, sessionId, [], []);
+  };
+
+  /** Shows one of a retried turn's replies, leaving the run itself alone. */
+  const chooseVariant = (index: number, slot: number) => {
+    const set = variantSets[index];
+    if (!set || slot < 0 || slot >= set.items.length || slot === set.active) return;
+    setVariantSets((previous) => ({ ...previous, [index]: { ...previous[index], active: slot } }));
+    setMessages((previous) => {
+      const next = [...previous];
+      next[index] = set.items[slot];
+      return next;
+    });
   };
 
   const copyMessage = async (content: string, index: number) => {
@@ -1786,6 +1841,35 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
                           disabled={!speech.voice?.available || !message.content.trim()}
                           onPress={() => speech.toggle(`assistant-${index}`, message.content)}
                         />
+                        {variantSets[index] && variantSets[index].items.length > 1 && (
+                          // Pages, so the reply a retry replaced is still an answer
+                          // the reader can compare against rather than a loss.
+                          <div className="flex items-center gap-0.5 tabular-nums">
+                            <button
+                              type="button"
+                              onClick={() => chooseVariant(index, variantSets[index].active - 1)}
+                              disabled={variantSets[index].active === 0}
+                              aria-label="Previous reply"
+                              title="Previous reply"
+                              className="inline-flex min-h-8 items-center rounded px-1 hover:bg-[var(--raised)] hover:text-[var(--text)] disabled:opacity-40"
+                            >
+                              <ChevronLeft size={13} />
+                            </button>
+                            <span>
+                              {variantSets[index].active + 1}/{variantSets[index].items.length}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => chooseVariant(index, variantSets[index].active + 1)}
+                              disabled={variantSets[index].active === variantSets[index].items.length - 1}
+                              aria-label="Next reply"
+                              title="Next reply"
+                              className="inline-flex min-h-8 items-center rounded px-1 hover:bg-[var(--raised)] hover:text-[var(--text)] disabled:opacity-40"
+                            >
+                              <ChevronRight size={13} />
+                            </button>
+                          </div>
+                        )}
                         <button type="button" onClick={() => retry(index)} disabled={running} className="inline-flex min-h-8 items-center gap-1 rounded px-1.5 hover:bg-[var(--raised)] hover:text-[var(--text)] disabled:opacity-40" aria-label="Retry response" title="Retry response"><RotateCcw size={13} /><span>Retry</span></button>
                       </div>
                     </div>

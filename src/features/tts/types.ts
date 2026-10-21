@@ -20,8 +20,6 @@ export type VoiceEntry = {
   name: string;
   sampleRate: number;
   size: number;
-  /** Placed by the build rather than installed by the user. */
-  builtIn: boolean;
 };
 
 /** The stored speech settings, with the bounds the page draws against. */

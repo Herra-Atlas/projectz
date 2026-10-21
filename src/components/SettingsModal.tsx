@@ -1004,7 +1004,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                     </div>}
                   </article>)}
                 </div>}
-                </> : localCategory === "stt" ? <SpeechRecognitionCategory /> : <SpeechSynthesisCategory onDownload={() => setPage({ view: "download", kind: "tts" })} onSettings={() => setPage({ view: "ttsSettings" })} onVoiceSettings={(voice) => setPage({ view: "ttsVoice", voice })} notify={notify} />}
+                </> : localCategory === "stt" ? <SpeechRecognitionCategory onDownload={() => setPage({ view: "download", kind: "stt" })} notify={notify} /> : <SpeechSynthesisCategory onDownload={() => setPage({ view: "download", kind: "tts" })} onSettings={() => setPage({ view: "ttsSettings" })} onVoiceSettings={(voice) => setPage({ view: "ttsVoice", voice })} notify={notify} />}
               </> : page.view === "download" ? <DownloadPage kind={page.kind} notify={notify} onModelInstalled={() => void refreshLocalModels()} />
               : page.view === "ttsSettings" ? <TtsSettingsPage notify={notify} />
               : page.view === "ttsVoice" ? <TtsVoiceSettingsPage voice={page.voice} notify={notify} />
