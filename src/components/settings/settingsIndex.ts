@@ -9,7 +9,14 @@ import type { SettingsPage } from "./settingsPages";
  * instead made the user press the button the result was supposed to be. It is reachable
  * as a page on its own, which is why that view -- and only that one -- is included.
  */
-export type SettingsView = Exclude<SettingsPage["view"], "model" | "skill">;
+/**
+ * The views that are complete as `{ view }`.
+ *
+ * `model`, `skill`, `download` and `ttsVoice` need the record they are about, so
+ * none can be named by a search result and none is a page the index lists. `form`
+ * stays: opening it blank is exactly what "Add provider" means.
+ */
+export type SettingsView = Exclude<SettingsPage["view"], "model" | "skill" | "download" | "ttsVoice">;
 
 /**
  * One findable row, as search sees it.

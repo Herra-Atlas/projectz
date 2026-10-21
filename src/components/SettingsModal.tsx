@@ -16,6 +16,13 @@ import AssistSettingsPage from "./assist/AssistSettingsPage";
 import TasteSettingsPage from "./taste/TasteSettingsPage";
 import SettingsSearch, { pageForEntry } from "./settings/SettingsSearch";
 import { buildSettingsIndex, type SettingsEntry } from "./settings/settingsIndex";
+import { LocalCategoryTabs, LOCAL_TITLES, type LocalCategory } from "./settings/local/LocalCategoryTabs";
+import { LocalAddMenu } from "./settings/local/LocalAddMenu";
+import { SpeechRecognitionCategory } from "./settings/local/SpeechRecognitionCategory";
+import { SpeechSynthesisCategory } from "./settings/local/SpeechSynthesisCategory";
+import { TtsSettingsPage } from "./settings/local/TtsSettingsPage";
+import { TtsVoiceSettingsPage } from "./settings/local/TtsVoiceSettingsPage";
+import { DownloadPage } from "./settings/downloads/DownloadPage";
 import type { SettingsPage } from "./settings/settingsPages";
 import { useAssist } from "../features/assist/useAssist";
 import { useTaste } from "../features/taste/useTaste";
@@ -137,6 +144,14 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
   const [expandedProviders, setExpandedProviders] = useState<string[]>([]);
   const [providerModelQueries, setProviderModelQueries] = useState<Record<string, string>>({});
   const [localModels, setLocalModels] = useState<LocalModel[]>([]);
+  /**
+   * Which engine kind the Local page is showing.
+   *
+   * Held here rather than in the tab strip so it survives a trip to a model's
+   * settings page and back -- coming back to llama.cpp because the page happened
+   * to remount would lose the user's place.
+   */
+  const [localCategory, setLocalCategory] = useState<LocalCategory>("llama");
   /**
    * Which engine groups are open on the Local models page.
    *
@@ -597,6 +612,23 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
     }
   };
 
+  /**
+   * Re-reads the local model list from the backend.
+   *
+   * Two writers change it without this component doing the writing -- `add` above,
+   * and a download that registers what it installed -- so the list is refetched
+   * rather than patched. `inspect` fills in quantisation, context window and
+   * presence, which a locally appended row would not have.
+   */
+  const refreshLocalModels = async () => {
+    try {
+      setLocalModels(await invoke<LocalModel[]>("local_models_list"));
+    } catch {
+      // A failed refresh leaves the list as it was; the action that caused it has
+      // already reported its own outcome.
+    }
+  };
+
   const addLocalModel = async () => {
     const selected = await openFile({
       multiple: false,
@@ -719,11 +751,11 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
   // Where each drilled-in page returns to, and what the back control is called.
   // The provider form and the skill form are the same shape -- a whole page
   // standing in for a list -- so the header treats them the same way.
-  const isSubPage = page.view === "form" || page.view === "model" || page.view === "skill";
+  const isSubPage = page.view === "form" || page.view === "model" || page.view === "skill" || page.view === "download" || page.view === "ttsSettings" || page.view === "ttsVoice";
   const backTarget: SettingsPage =
-    page.view === "model" ? { view: "local" } : page.view === "skill" ? { view: "skills" } : { view: "providers" };
+    page.view === "model" || page.view === "download" || page.view === "ttsSettings" || page.view === "ttsVoice" ? { view: "local" } : page.view === "skill" ? { view: "skills" } : { view: "providers" };
   const backLabel =
-    page.view === "model" ? "Back to local models" : page.view === "skill" ? "Back to skills" : "Back to providers";
+    page.view === "model" ? "Back to local models" : page.view === "download" ? "Back to local engines" : page.view === "ttsVoice" ? "Back to speech synthesis" : page.view === "ttsSettings" ? "Back to speech synthesis" : page.view === "skill" ? "Back to skills" : "Back to providers";
 
   return (
     <dialog
@@ -739,12 +771,11 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
       className="m-0 h-dvh w-dvw max-h-none max-w-none overflow-hidden border-0 bg-transparent p-0 text-[var(--text)] backdrop:bg-black/65"
     >
       <div className="mx-auto flex h-full w-full max-w-[1000px] flex-col overflow-hidden border-x border-[var(--line)] bg-[var(--page)] shadow-2xl sm:my-[6vh] sm:h-[88vh] sm:rounded-lg sm:border">
-        {/* No hairline under the header. The page's own title band draws one, and the two
-            together read as a double line with a strip of empty background between them --
-            which is what made General, Appearance, Assist and Taste look framed twice. The
-            band is the separator; the header is only for the search field and the close
-            button. */}
-        <header className="flex min-h-[60px] items-center justify-between px-4 sm:px-6">
+        {/* The header is separated from the page below it by a hairline, the same
+            way the sidebar is separated from the content. Without it the search
+            field floated over whatever the page drew first; the page's own title
+            band then drew the second rule, a few pixels lower. */}
+        <header className="flex min-h-[60px] items-center justify-between border-b border-[var(--line)] px-4 sm:px-6">
           <div className="flex min-w-0 flex-1 items-center gap-2.5">
             {isSubPage && <button type="button" onClick={() => setPage(backTarget)} className="grid size-8 place-items-center rounded-md text-[var(--muted)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label={backLabel} aria-labelledby={undefined}><ArrowLeft size={16} /></button>}
             {/* The search field takes the place the static "Settings / General" label
@@ -827,9 +858,19 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                 </div>}
               </> : page.view === "engines" ? <EnginesSettingsPage onChanged={() => { onEndpointsChanged(); void refreshEngines(); }} notify={notify} /> : page.view === "local" ? <>
                 <SettingsPageTitle>
-                  <h2 className="text-[17px] font-semibold tracking-tight"><FlashHighlight anchor="local.list" />Local models</h2>
-                  <button type="button" {...{ [ANCHOR_ATTRIBUTE]: "local.add" }} onClick={() => void addLocalModel()} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 text-[13px] font-medium text-[var(--text)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><FlashHighlight anchor="local.add" /><Plus size={15} />Add models</button>
+                  <h2 className="text-[17px] font-semibold tracking-tight"><FlashHighlight anchor="local.list" />{LOCAL_TITLES[localCategory]}</h2>
+                  {/* llama.cpp is the only half with something to add. A Whisper
+                      model and a Piper voice are placed by their own installers
+                      rather than chosen from a file dialog, so a picker here would
+                      offer a file the engine cannot load. */}
+                  {localCategory === "llama" && <LocalAddMenu anchor="local.add" onDownload={() => setPage({ view: "download", kind: "llama" })} onAdd={() => void addLocalModel()} />}
                 </SettingsPageTitle>
+                {/* The three engines in one page rather than three sidebar entries:
+                    they answer the same question -- "what is installed on this
+                    machine" -- and a reader comparing them should not have to
+                    leave the page to do it. */}
+                <div className="mb-4"><LocalCategoryTabs value={localCategory} onChange={setLocalCategory} /></div>
+                {localCategory === "llama" ? <>
                 {/* Only while a model is armed. The move is a mode, and a mode
                     with no visible state is one the user cannot tell they are
                     in -- or get out of. */}
@@ -963,7 +1004,11 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                     </div>}
                   </article>)}
                 </div>}
-              </> : page.view === "model" ? <>
+                </> : localCategory === "stt" ? <SpeechRecognitionCategory /> : <SpeechSynthesisCategory onDownload={() => setPage({ view: "download", kind: "tts" })} onSettings={() => setPage({ view: "ttsSettings" })} onVoiceSettings={(voice) => setPage({ view: "ttsVoice", voice })} notify={notify} />}
+              </> : page.view === "download" ? <DownloadPage kind={page.kind} notify={notify} onModelInstalled={() => void refreshLocalModels()} />
+              : page.view === "ttsSettings" ? <TtsSettingsPage notify={notify} />
+              : page.view === "ttsVoice" ? <TtsVoiceSettingsPage voice={page.voice} notify={notify} />
+              : page.view === "model" ? <>
                 <SettingsPageTitle><h2 className="text-[17px] font-semibold tracking-tight">{page.model.name}</h2></SettingsPageTitle>
                 <RuntimeSettingsPage
                   key={page.model.id}

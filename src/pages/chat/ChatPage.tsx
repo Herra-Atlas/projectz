@@ -12,6 +12,8 @@ import { markdownComponents, MarkdownActionsProvider } from "./markdownComponent
 import ModelSwitcher from "../../components/ModelSwitcher";
 import ModeSelector from "../../components/ModeSelector";
 import SelectionActions, { type SelectionAction } from "./SelectionActions";
+import { SpeechButton } from "./SpeechButton";
+import { useSpeech } from "../../features/tts/useSpeech";
 import ToolApproval, { type PendingApproval } from "./ToolApproval";
 import ToolQuestion, { type PendingQuestion } from "./ToolQuestion";
 import TodoStrip, { type TodoEntry } from "./TodoStrip";
@@ -1497,6 +1499,11 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     }
   };
 
+  // Read-aloud. The voice is asked for once, when the page mounts; a missing one
+  // disables the button instead of failing on the press. A failure here is the
+  // synthesis, not the player -- the reason piper gave is what is worth showing.
+  const speech = useSpeech((message) => onNotify("error", message));
+
   // Selection inside a reply: only show the bar when the highlight is real,
   // and ignore selections the user made in the composer or their own message.
   const handleThreadSelection = (event: React.MouseEvent) => {
@@ -1771,6 +1778,14 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
                       {showMetrics && message.metrics && <span title={message.metrics.generation_rate_estimated ? "Generation rate estimated from response length" : "Generation rate reported by the local model server"}>{message.metrics.prompt_tokens != null ? `${message.metrics.prompt_tokens.toLocaleString()} prompt · ` : ""}{message.metrics.completion_tokens != null ? `${message.metrics.completion_tokens.toLocaleString()} completion · ` : ""}Prompt {message.metrics.prompt_seconds.toFixed(1)}s · Generation {message.metrics.generation_seconds.toFixed(1)}s · {message.metrics.generation_rate_estimated ? "~" : ""}{message.metrics.tokens_per_second.toFixed(1)} tok/s{message.metrics.prompt_eval_tokens_per_second != null ? ` · PP ${message.metrics.prompt_eval_tokens_per_second.toFixed(1)} tok/s` : ""}</span>}
                       <div className="flex items-center gap-1">
                         <button type="button" onClick={() => void copyMessage(message.content, index)} className="inline-flex min-h-8 items-center gap-1 rounded px-1.5 hover:bg-[var(--raised)] hover:text-[var(--text)]" aria-label={copiedIndex === index ? "Copied response" : "Copy response"} title={copiedIndex === index ? "Copied" : "Copy response"}>{copiedIndex === index ? <Check size={13} /> : <Clipboard size={13} />}<span>{copiedIndex === index ? "Copied" : "Copy"}</span></button>
+                        {/* Beside Copy because it acts on the same thing: the text of
+                            this reply. Disabled while there is no voice rather than
+                            hidden, so the row does not change width once it is found. */}
+                        <SpeechButton
+                          active={speech.speaking === `assistant-${index}`}
+                          disabled={!speech.voice?.available || !message.content.trim()}
+                          onPress={() => speech.toggle(`assistant-${index}`, message.content)}
+                        />
                         <button type="button" onClick={() => retry(index)} disabled={running} className="inline-flex min-h-8 items-center gap-1 rounded px-1.5 hover:bg-[var(--raised)] hover:text-[var(--text)] disabled:opacity-40" aria-label="Retry response" title="Retry response"><RotateCcw size={13} /><span>Retry</span></button>
                       </div>
                     </div>

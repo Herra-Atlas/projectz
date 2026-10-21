@@ -1,14 +1,17 @@
 mod ai;
+mod app_paths;
 mod assist;
 mod browser;
 mod commands;
 mod database;
 mod documents;
+mod downloads;
 mod jobs;
 mod mcp;
 mod observation;
 mod panel;
 mod taste;
+mod tts;
 mod websearch;
 mod window;
 
@@ -411,6 +414,19 @@ pub fn run() {
             panel::browser::panel_browser_back,
             panel::browser::panel_browser_forward,
             panel::browser::panel_browser_close,
+            tts::commands::tts_voice,
+            tts::commands::tts_voices,
+            tts::commands::tts_settings,
+            tts::commands::tts_select_voice,
+            tts::commands::tts_speed,
+            tts::commands::tts_set_speed,
+            tts::commands::tts_set_skip_code,
+            tts::commands::tts_add_voice,
+            tts::commands::tts_remove_voice,
+            tts::commands::tts_speak,
+            downloads::commands::downloads_search,
+            downloads::commands::downloads_install,
+            downloads::commands::downloads_installed,
         ])
         .build(tauri::generate_context!())
         .expect("error while building application")
