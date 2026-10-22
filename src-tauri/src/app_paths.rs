@@ -29,6 +29,25 @@ pub fn voice_root() -> PathBuf {
     data_root().join("voice")
 }
 
+/// Skills the user installs or writes: `<root>/skills/<slug>/SKILL.md`.
+///
+/// A folder per skill, in the open Agent Skills layout, so a skill can carry the
+/// scripts and references that make it more than a paragraph. The agent reaches
+/// these through the skill tools rather than `read_file`, which is confined to
+/// the workspace -- see [`crate::skills`].
+pub fn skills_root() -> PathBuf {
+    data_root().join("skills")
+}
+
+/// The set the app ships: `<root>/bundled-skills/<slug>/SKILL.md`.
+///
+/// A second root rather than a flag on a row, because a version bump replaces
+/// this whole tree and must never be able to overwrite something the user wrote.
+/// The index reads both roots; a user skill of the same slug wins.
+pub fn bundled_skills_root() -> PathBuf {
+    data_root().join("bundled-skills")
+}
+
 /// Scratch space for programs this app starts: `<root>/tmp/`.
 ///
 /// A child process inherits its parent's working directory, and a dev build of a

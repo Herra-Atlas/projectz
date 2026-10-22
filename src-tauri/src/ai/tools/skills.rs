@@ -1,56 +1,62 @@
-//! Reading and managing stored skills.
+//! Reading, writing and running folder-backed skills.
 //!
 //! # Why the model can reach these
 //!
-//! The composer applies a skill the user checked, and that path sends the
-//! instructions inline — reliable, because there is no decision for the model to
-//! get wrong. This file is the other half: the skills the user *did not* check,
-//! which the model may judge relevant from their names and descriptions and pull
-//! itself. That is the progressive-disclosure pattern, and it is why the
-//! descriptions a user writes on a skill matter as much as the body.
+//! A skill is a folder -- `SKILL.md` plus whatever `scripts/`, `references/` and
+//! `assets/` it carries -- and the model sees only an index of names and
+//! triggers. [`SKILL_READ`] pulls one body when it decides the task matches;
+//! [`SKILL_WRITE`] lets it add a file to a skill it is working on; [`SKILL_RUN`]
+//! executes a script the user has trusted. That is progressive disclosure: the
+//! index is cheap, the body costs a read, and a script costs a process.
 //!
-//! # Why managing them is a separate tool
+//! # Why running is separate, and why trust is checked here
 //!
-//! Reading a skill is data. Creating, editing and deleting one changes stored
-//! state, so it is `Effect::Write` and asks like any other write — which is the
-//! whole point of putting it through the same gate rather than giving the model a
-//! private path to the table.
+//! Reading a skill is data. Creating, editing or removing one changes what the
+//! app will offer later, so it is `Effect::Write`. Running a script is arbitrary
+//! code, so it is also a write -- but the extra gate is not the permission level,
+//! it is the per-skill `trusted` flag. A skill the agent just drafted, or one
+//! installed from a link, is readable and useful while its scripts stay inert.
+//! That is the line that keeps `skill_manage` from being a code-execution
+//! primitive.
 //!
-//! Two tools rather than one, because a single `skill(action, ...)` would make
-//! every read carry a write-shaped permission and a write carry a read-shaped
-//! description. The split lets the permission policy allow reading independently
-//! from managing saved skills.
+//! # Where the folders are
+//!
+//! Outside the workspace, deliberately: the workspace is the user's project, a
+//! skill is the app's material, and `read_file` must not be widened to reach it.
+//! Every path argument here resolves inside one skill folder using the same
+//! containment check the file tools use.
+
+use std::path::Path;
 
 use serde_json::Value;
 
-use crate::database::skills::{NewSkill, SkillOrigin};
+use crate::database::Database;
 
-use super::ToolSpec;
+use super::{ToolContext, ToolSpec};
 
-/// Lists the skills available and returns their full instructions.
-///
-/// Separate from the summary a model already has, because the bodies are the
-/// expensive part and they are only worth sending once the model has decided one
-/// is relevant.
+/// Lists the skills available and returns one's full instructions.
 pub const SKILL_READ: ToolSpec = ToolSpec {
     name: "skill_read",
     description: "Read a saved skill's full instructions. Call this when the task matches a skill \
                   listed in your system prompt — writing, editing, reviewing, debugging, testing, \
                   researching or drafting prose — and follow what it returns rather than working \
-                  the approach out from scratch. Returns the instructions to follow.",
+                  the approach out from scratch. Omit `path` for SKILL.md; pass a path from the \
+                  file list it prints to read one reference, script or asset. Returns the text.",
     parameters: r#"{
         "type": "object",
         "properties": {
             "name": {
                 "type": "string",
                 "description": "The skill's name, as listed. The whole `name [type]` label works too."
+            },
+            "path": {
+                "type": "string",
+                "description": "Optional. A supporting file inside that skill, for example `references/REFERENCE.md` or `scripts/run.ps1`. Omit to read the skill's own instructions."
             }
         },
         "required": ["name"],
         "additionalProperties": false
     }"#,
-    // A read: the user already wrote these instructions and stored them, so
-    // fetching one back is no more consequential than reading a file.
     effect: super::Effect::Read,
     command_argument: None,
     execute: |arguments, context| {
@@ -61,14 +67,14 @@ pub const SKILL_READ: ToolSpec = ToolSpec {
     },
 };
 
-/// The catalogue of saved skills, as the model sees it.
+/// The catalogue of skills, as the model sees it.
 ///
-/// **Names and descriptions only, never a body.** This is the whole point of the
+/// **Names and triggers only, never a body.** This is the whole point of the
 /// index: a model can only decide a skill is relevant if it knows the skill
 /// exists, and a body per skill would put every stored instruction into the
-/// prompt of every run whether or not it applied. The description is the only text
-/// it gets, so it is written as a trigger — "when to read this" — rather than a
-/// summary of what is inside.
+/// prompt of every run whether or not it applied. The description is the only
+/// text it gets, so it is written as a trigger -- "when to read this" -- rather
+/// than a summary of what is inside.
 ///
 /// **Built per request from the enabled set, and constant across a conversation.**
 /// Reading a skill is a tool call, which grows the conversation rather than this
@@ -80,9 +86,9 @@ pub const SKILL_READ: ToolSpec = ToolSpec {
 /// for. Returning an empty string instead would put a paragraph about having no
 /// skills into every request, which is a claim about the world rather than an
 /// instruction.
-pub fn index(database: Option<&crate::database::Database>) -> Option<String> {
+pub fn index(database: Option<&Database>) -> Option<String> {
     let database = database?;
-    let skills = database.enabled_skills().ok()?;
+    let skills = crate::skills::enabled(database).ok()?;
     if skills.is_empty() {
         return None;
     }
@@ -100,18 +106,27 @@ pub fn index(database: Option<&crate::database::Database>) -> Option<String> {
             if let Some(description) = labelled(&skill.description) {
                 line.push_str(&format!(" — {description}"));
             }
+            if skill.file_count > 0 {
+                line.push_str(&format!(
+                    " ({} file{})",
+                    skill.file_count,
+                    plural(skill.file_count)
+                ));
+            }
             line
         })
         .collect::<Vec<_>>()
         .join("\n");
     Some(format!(
-        "You have skills: saved sets of instructions for how this user wants particular kinds of \
-work done, listed below one per line as `name [type] — when to use it`. Before you start, check \
-this list and call `skill_read` with the exact name of the skill whose name, type or description \
-matches what you are about to do -- writing or editing code, reviewing, debugging, testing, \
-researching, drafting prose -- then follow what it returns. Read the closest match: one skill is \
-usually the right number, and each further one costs a round trip. If none apply, ignore this \
-list and get on with the task.\n\n{listed}"
+        "You have skills: folders of instructions and supporting files for how this user wants \
+particular kinds of work done, listed below one per line as `name [type] — when to use it`. \
+Before you start, check this list and call `skill_read` with the exact name of the skill whose \
+name, type or description matches what you are about to do -- writing or editing code, \
+reviewing, debugging, testing, researching, drafting prose -- then follow what it returns. The \
+result lists the files in the skill; read one with `skill_read` and `path` only if the \
+instructions point at it, and run a script with `skill_run` only when the skill says to. Read the \
+closest match: one skill is usually the right number, and each further one costs a round trip. If \
+none apply, ignore this list and get on with the task.\n\n{listed}"
     ))
 }
 
@@ -126,18 +141,27 @@ fn labelled(value: &Option<String>) -> Option<&str> {
         .filter(|text| !text.is_empty())
 }
 
-/// Creates, edits, enables or disables a skill.
+fn plural(count: usize) -> &'static str {
+    if count == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+/// Creates or edits a skill's own text.
 ///
-/// Deliberately no delete. Deleting is the one operation with no undo, and a model
-/// that can remove a thing the user wrote by hand is a much larger claim than one
-/// that can stop it being applied — `set_enabled` already covers the reversible
-/// half. The user deletes their own skills in Settings.
+/// Deliberately no delete. Deleting is the one operation with no undo, and a
+/// model that can remove a folder the user wrote by hand is a much larger claim
+/// than one that can stop it being applied — `enabled: false` already covers the
+/// reversible half. The user deletes their own skills in Settings.
 pub const SKILL_MANAGE: ToolSpec = ToolSpec {
     name: "skill_manage",
     description: "Save a reusable set of instructions as a skill, or update one that already \
                   exists. Use this when the user tells you how they want something done in a \
                   way worth remembering. Prefer updating an existing skill over creating a \
-                  near-duplicate.",
+                  near-duplicate. This writes SKILL.md only; use `skill_write` for scripts and \
+                  references.",
     parameters: r#"{
         "type": "object",
         "properties": {
@@ -160,7 +184,7 @@ pub const SKILL_MANAGE: ToolSpec = ToolSpec {
             },
             "instructions": {
                 "type": "string",
-                "description": "The full instructions to store, in the second person and specific enough to act on."
+                "description": "The full SKILL.md body, in the second person and specific enough to act on. Markdown."
             },
             "skill_type": {
                 "type": "string",
@@ -185,14 +209,88 @@ pub const SKILL_MANAGE: ToolSpec = ToolSpec {
     },
 };
 
+/// Writes a supporting file into a skill, or copies an asset from the workspace.
+pub const SKILL_WRITE: ToolSpec = ToolSpec {
+    name: "skill_write",
+    description: "Add or replace a file inside a skill: a script under `scripts/`, a reference \
+                  under `references/`, or a template under `assets/`. Pass `content` for text, or \
+                  `from_path` to copy an existing workspace file (an image, a PDF, a template) \
+                  byte for byte. SKILL.md itself is edited with `skill_manage`.",
+    parameters: r#"{
+        "type": "object",
+        "properties": {
+            "skill": {
+                "type": "string",
+                "description": "The skill's name or slug, as listed."
+            },
+            "path": {
+                "type": "string",
+                "description": "Destination inside the skill, for example `scripts/run.ps1` or `references/CHECKLIST.md`. Must be relative."
+            },
+            "content": {
+                "type": "string",
+                "description": "The file's text. Omit when using `from_path`."
+            },
+            "from_path": {
+                "type": "string",
+                "description": "A file in the workspace to copy in, relative to the workspace root. Use this for anything binary."
+            }
+        },
+        "required": ["skill", "path"],
+        "additionalProperties": false
+    }"#,
+    // A write: it grows what the skill can do, and invalidates earlier reads.
+    effect: super::Effect::Write,
+    command_argument: None,
+    execute: |arguments, context| {
+        Box::pin(std::future::ready(write(
+            arguments,
+            context.database.as_deref(),
+        )))
+    },
+};
+
+/// Runs one script from a skill the user has trusted.
+pub const SKILL_RUN: ToolSpec = ToolSpec {
+    name: "skill_run",
+    description: "Run a script from a skill, with the skill's folder as the working directory. \
+                  Use this when the skill's instructions say to run one. The skill must be marked \
+                  trusted by the user; if it is not, tell the user to allow scripts on the skill's \
+                  page rather than trying again. Returns the exit code and the command's output.",
+    parameters: r#"{
+        "type": "object",
+        "properties": {
+            "skill": {
+                "type": "string",
+                "description": "The skill's name or slug, as listed."
+            },
+            "script": {
+                "type": "string",
+                "description": "The script's path inside the skill, for example `scripts/extract.py`."
+            },
+            "args": {
+                "type": "array",
+                "description": "Arguments passed to the script, in order.",
+                "items": { "type": "string" }
+            }
+        },
+        "required": ["skill", "script"],
+        "additionalProperties": false
+    }"#,
+    // Running a program can change anything, exactly like `run_terminal`.
+    effect: super::Effect::Write,
+    // Named so the approval prompt shows the script that will run, not just the
+    // skill's name.
+    command_argument: Some("script"),
+    execute: |arguments, context| Box::pin(run(arguments, context)),
+};
+
 /// The database, or the reason there isn't one.
 ///
 /// A run with no session has no conversation to scope stored state to, and a
 /// skill tool that guessed would be answering one conversation from another's
 /// rows. The message names the fix rather than reporting a bare refusal.
-fn require_database(
-    database: Option<&crate::database::Database>,
-) -> Result<&crate::database::Database, String> {
+fn require_database(database: Option<&Database>) -> Result<&Database, String> {
     database.ok_or_else(|| {
         "Skills are unavailable in this run because it has no conversation. \
          Ask the user to start a conversation and try again."
@@ -200,16 +298,12 @@ fn require_database(
     })
 }
 
-/// Turns the caller's arguments into the validated row shape.
-///
-/// Shared by both actions so `create` and `update` cannot disagree about what a
-/// blank label or a missing description means — the difference between the two is
-/// only which field identifies the skill.
+/// Turns the caller's arguments into the validated draft shape.
 ///
 /// `required` is the create case: only `create` must be told a name, because an
 /// update carries the existing one in `existing_name` and a model fixing a
 /// skill's wording should not have to restate its title to do so.
-fn draft_from(arguments: &Value, required: bool) -> Result<NewSkill, String> {
+fn draft_from(arguments: &Value, required: bool) -> Result<crate::skills::SkillDraft, String> {
     let text = |field: &str| -> Option<String> {
         arguments
             .get(field)
@@ -218,10 +312,6 @@ fn draft_from(arguments: &Value, required: bool) -> Result<NewSkill, String> {
             .filter(|value| !value.is_empty())
             .map(str::to_string)
     };
-    // `existing_name` first when it is present: an update names the skill it is
-    // replacing, and a `name` sent alongside it is a rename request rather than
-    // the identifier. Taking `name` first would silently create a duplicate
-    // whenever a model filled both in.
     let name = if required {
         text("name").ok_or("skill_manage create requires a `name`")?
     } else {
@@ -229,16 +319,12 @@ fn draft_from(arguments: &Value, required: bool) -> Result<NewSkill, String> {
             "skill_manage requires a `name`, or the `existing_name` of the skill to update",
         )?
     };
-    Ok(NewSkill {
+    Ok(crate::skills::SkillDraft {
         name,
         description: text("description"),
         instructions: text("instructions")
             .ok_or("skill_manage requires `instructions` — the text to store")?,
         skill_type: text("skill_type").or_else(|| Some(DEFAULT_TYPE.to_string())),
-        // Always `Generated`: this skill was drafted by the model from a
-        // conversation, and the schema carries an origin precisely so the user
-        // can tell a deliberate one from an inferred one.
-        origin: SkillOrigin::Generated,
     })
 }
 
@@ -254,15 +340,11 @@ const DEFAULT_TYPE: &str = "unorganized";
 /// The names a caller's request may match, most literal first.
 ///
 /// The index lists a skill as `name [type] — when to use it`, and a model reading
-/// it sometimes asks for that whole label as though it were the name: the failure
-/// reads `No skill named "Documentation [writing]"` for a skill plainly called
-/// `Documentation`. The bracketed part is the type, which the model was told about
-/// precisely so it could reason about a family of skills, so mistaking it for part
-/// of the name is a reasonable mistake -- and one this tool can absorb rather than
-/// report, which costs a round trip and teaches nothing.
-///
-/// The exact request is tried first, so a skill genuinely named `Foo [bar]` is
-/// still found by the name it was saved under.
+/// it sometimes asks for that whole label as though it were the name. The
+/// bracketed part is the type, which the model was told about precisely so it
+/// could reason about a family of skills, so mistaking it for part of the name is
+/// a reasonable mistake -- and one this tool can absorb rather than report, which
+/// costs a round trip and teaches nothing.
 fn names_to_try(requested: &str) -> Vec<&str> {
     let trimmed = requested.trim();
     let mut names = vec![trimmed];
@@ -277,7 +359,7 @@ fn names_to_try(requested: &str) -> Vec<&str> {
     names
 }
 
-fn read(arguments: Value, database: Option<&crate::database::Database>) -> Result<String, String> {
+fn read(arguments: Value, database: Option<&Database>) -> Result<String, String> {
     let database = require_database(database)?;
     let name = arguments
         .get("name")
@@ -285,42 +367,54 @@ fn read(arguments: Value, database: Option<&crate::database::Database>) -> Resul
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or("skill_read requires the `name` of a skill")?;
+    // `names_to_try` is kept as a shaping step rather than folded into resolve:
+    // the folder resolver matches a slug or a label, and the bracketed label is
+    // the one form only this tool has to absorb.
+    let mut last = None;
+    let mut skill = None;
+    for candidate in names_to_try(name) {
+        match crate::skills::resolve(database, candidate) {
+            Ok(found) => {
+                skill = Some(found);
+                break;
+            }
+            Err(error) => last = Some(error),
+        }
+    }
+    let skill = skill.ok_or_else(|| last.unwrap_or_else(|| format!("No skill named `{name}`")))?;
 
-    let skills = database
-        .enabled_skills()
-        .map_err(|error| format!("Could not read the saved skills: {error}"))?;
-    let skill = names_to_try(name)
-        .into_iter()
-        .find_map(|candidate| {
-            skills
-                .iter()
-                .find(|skill| skill.name.eq_ignore_ascii_case(candidate))
-        })
-        .ok_or_else(|| {
-            // Names rather than ids on purpose: the model never sees an id, so
-            // asking for one would make the tool uncallable. The failure lists the
-            // real names, because a model guessing at them is the likely cause.
-            let available = skills
-                .iter()
-                .map(|skill| skill.name.clone())
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("No skill named `{name}`. Available: {available}")
-        })?;
+    if let Some(path) = arguments
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        let body = crate::skills::read_file(database, &skill.slug, path)?;
+        database.record_skill_use(&skill.slug);
+        return Ok(format!("# {}\n\n[{path}]\n\n{body}", skill.name));
+    }
 
+    let detail = crate::skills::get(database, &skill.slug)?;
     // A read is a use. The user watched the model choose this skill -- the
     // `skill_read` row is right there in the activity panel -- so the stored
-    // count has to agree with what was on screen. The composer's checked skills
-    // are counted on the reply path; this is the other half, and without it the
-    // Skills screen undercounts every skill the model pulled for itself.
-    database.record_skill_use(&skill.id);
-    Ok(format!("# {}\n\n{}", skill.name, skill.instructions))
+    // count has to agree with what was on screen.
+    database.record_skill_use(&skill.slug);
+    let mut out = format!("# {}\n\n{}", detail.skill.name, detail.instructions.trim());
+    if !detail.files.is_empty() {
+        out.push_str("\n\nFiles in this skill (read one with `skill_read` and `path`):\n");
+        for file in &detail.files {
+            out.push_str(&format!(
+                "- {} ({} bytes{})\n",
+                file.path,
+                file.size,
+                if file.is_script { ", script" } else { "" }
+            ));
+        }
+    }
+    Ok(out)
 }
 
-fn manage(
-    arguments: Value,
-    database: Option<&crate::database::Database>,
-) -> Result<String, String> {
+fn manage(arguments: Value, database: Option<&Database>) -> Result<String, String> {
     let database = require_database(database)?;
     match arguments
         .get("action")
@@ -328,57 +422,30 @@ fn manage(
         .unwrap_or("")
     {
         "create" => {
-            let skill = draft_from(&arguments, true)?;
-            let created = database
-                .create_skill(&skill)
-                .map_err(|error| format!("Could not save the skill: {error}"))?;
+            let draft = draft_from(&arguments, true)?;
+            let created =
+                crate::skills::create(database, &draft, crate::skills::SkillOrigin::Generated)?;
             Ok(format!(
-                "Saved the skill `{}`. It will be offered to the user from now on.",
-                created.name
+                "Saved the skill `{}` as `{}`. It will be offered to the user from now on.",
+                created.name, created.slug
             ))
         }
         "update" => {
-            let skill = draft_from(&arguments, false)?;
-            // Identified by `existing_name` when sent, otherwise by the name the
-            // update is writing. Both resolve to the same row in the common case,
-            // and preferring `existing_name` is what makes a rename update rather
-            // than a second skill.
+            let draft = draft_from(&arguments, false)?;
             let target = arguments
                 .get("existing_name")
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-                .unwrap_or(skill.name.as_str());
-            let skills = database
-                .enabled_skills()
-                .map_err(|error| format!("Could not read the saved skills: {error}"))?;
-            let existing = names_to_try(target)
-                .into_iter()
-                .find_map(|candidate| {
-                    skills
-                        .iter()
-                        .find(|entry| entry.name.eq_ignore_ascii_case(candidate))
-                })
-                .ok_or_else(|| {
-                    let available = skills
-                        .iter()
-                        .map(|skill| skill.name.clone())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("No skill named `{target}`. Available: {available}")
-                })?;
-
+                .unwrap_or(draft.name.as_str());
+            let existing = crate::skills::resolve(database, target)?;
             // `enabled` is handled apart from the text because the update path
             // deliberately does not carry it: a save that looked like the same
             // request must not be able to silently switch a skill back on.
             if let Some(enabled) = arguments.get("enabled").and_then(Value::as_bool) {
-                database
-                    .set_skill_enabled(&existing.id, enabled)
-                    .map_err(|error| format!("Could not change the skill: {error}"))?;
+                database.set_skill_enabled(&existing.slug, enabled)?;
             }
-            let updated = database
-                .update_skill(&existing.id, &skill)
-                .map_err(|error| format!("Could not save the skill: {error}"))?;
+            let updated = crate::skills::update(database, &existing.slug, &draft)?;
             Ok(format!("Updated the skill `{}`.", updated.name))
         }
         other => Err(format!(
@@ -387,227 +454,245 @@ fn manage(
     }
 }
 
+fn write(arguments: Value, database: Option<&Database>) -> Result<String, String> {
+    let database = require_database(database)?;
+    let skill = arguments
+        .get("skill")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or("skill_write requires the `skill` name")?;
+    let path = arguments
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or("skill_write requires a `path` inside the skill")?;
+    let content = arguments.get("content").and_then(Value::as_str);
+    let from_path = arguments
+        .get("from_path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let file = match (content, from_path) {
+        (Some(_), Some(_)) => {
+            return Err("Pass either `content` or `from_path`, not both".to_string())
+        }
+        (Some(content), None) => crate::skills::write_file(database, skill, path, content)?,
+        (None, Some(source)) => crate::skills::copy_file(database, skill, path, source)?,
+        (None, None) => {
+            return Err(
+                "skill_write needs `content`, or `from_path` to copy a workspace file".to_string(),
+            )
+        }
+    };
+    Ok(format!(
+        "Wrote `{}` ({} bytes) to the skill `{}`.{}",
+        file.path,
+        file.size,
+        skill,
+        if file.is_script {
+            " Its scripts become runnable only after the user allows them on the skill's page."
+        } else {
+            ""
+        }
+    ))
+}
+
+async fn run(arguments: Value, context: ToolContext) -> Result<String, String> {
+    let database = context.database.as_deref().ok_or_else(|| {
+        "Skills are unavailable in this run because it has no conversation".to_string()
+    })?;
+    let name = arguments
+        .get("skill")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or("skill_run requires the `skill` name")?;
+    let script = arguments
+        .get("script")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or("skill_run requires the `script` path")?;
+    let args = arguments
+        .get("args")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let (skill, path) = crate::skills::script_path(database, name, script)?;
+    if !skill.enabled {
+        return Err(format!(
+            "The skill `{}` is turned off, so its scripts cannot run. Ask the user to enable it.",
+            skill.name
+        ));
+    }
+    if !crate::skills::trusted(database, &skill.slug)? {
+        return Err(format!(
+            "The skill `{}` has not been allowed to run scripts. Ask the user to turn on \
+             \"Allow scripts\" on the skill's page, then try again.",
+            skill.name
+        ));
+    }
+
+    let skill_dir = crate::skills::directory_of(&skill)?;
+    execute_script(&path, &skill_dir, &args, &context).await
+}
+
+/// Spawns one script with the skill folder as its working directory.
+///
+/// **The working directory is the skill root, not the script's own folder.** A
+/// script that says `assets/input.pdf` means the skill's `assets/`, and a `cwd`
+/// of `scripts/` would make every relative path in the instructions wrong. The
+/// script is passed by its absolute path so it runs from either place.
+///
+/// Interpreter by extension rather than sniffing the shebang: this is a Windows
+/// app, a shebang means nothing to PowerShell, and a file with no known extension
+/// cannot be run at all. `SKILL_DIR` and `PROJECTZ_WORKSPACE` are exported so a
+/// script can find its own assets and write results back to the user's project
+/// without being told either path in its arguments.
+async fn execute_script(
+    script: &Path,
+    skill_dir: &Path,
+    args: &[String],
+    context: &ToolContext,
+) -> Result<String, String> {
+    let extension = script
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    let (mut command, interpreter) = match extension.as_str() {
+        "ps1" => {
+            let mut command = tokio::process::Command::new("powershell.exe");
+            command.args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ]);
+            command.arg(script);
+            (command, "powershell.exe")
+        }
+        "py" => {
+            let mut command = tokio::process::Command::new("python");
+            command.arg(script);
+            (command, "python")
+        }
+        "js" | "mjs" | "cjs" => {
+            let mut command = tokio::process::Command::new("node");
+            command.arg(script);
+            (command, "node")
+        }
+        "sh" | "bash" => {
+            let mut command = tokio::process::Command::new("bash");
+            command.arg(script);
+            (command, "bash")
+        }
+        "cmd" | "bat" => {
+            let mut command = tokio::process::Command::new("cmd");
+            command.arg("/c").arg(script);
+            (command, "cmd")
+        }
+        "rb" => {
+            let mut command = tokio::process::Command::new("ruby");
+            command.arg(script);
+            (command, "ruby")
+        }
+        "pl" => {
+            let mut command = tokio::process::Command::new("perl");
+            command.arg(script);
+            (command, "perl")
+        }
+        "exe" => (tokio::process::Command::new(script), "the file itself"),
+        other => {
+            return Err(format!(
+                "`.{other}` is not a script this app knows how to run. Use .ps1, .py, .js, .sh, \
+                 .cmd or .bat."
+            ))
+        }
+    };
+    for argument in args {
+        command.arg(argument);
+    }
+    command
+        .current_dir(skill_dir)
+        .env("SKILL_DIR", skill_dir)
+        .env("NO_COLOR", "1");
+    if let Some(workspace) = super::workspace::root() {
+        command.env("PROJECTZ_WORKSPACE", workspace);
+    }
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    crate::child::hide_console_async(&mut command);
+
+    let child = command.spawn().map_err(|error| {
+        // A missing interpreter is the commonest failure and the least
+        // informative as a raw OS error ("program not found"). Name the program
+        // the script needed so the fix is obvious.
+        if error.kind() == std::io::ErrorKind::NotFound {
+            format!(
+                "Could not run `{}`: {interpreter} is not installed or not on PATH.",
+                script.display()
+            )
+        } else {
+            format!("Could not start `{}`: {error}", script.display())
+        }
+    })?;
+    let wait = child.wait_with_output();
+    tokio::pin!(wait);
+    let output = tokio::select! {
+        finished = &mut wait => finished.map_err(|error| format!("The script failed: {error}"))?,
+        _ = super::approval::wait_until_cancelled(&context.cancelled) => {
+            return Err("Cancelled before the script finished".into());
+        }
+        _ = tokio::time::sleep(std::time::Duration::from_secs(super::terminal::MAX_RUNTIME_SECS)) => {
+            return Err(format!(
+                "The script was stopped after {}s without finishing. Run the long part in the \
+                 background with run_terminal if it needs longer.",
+                super::terminal::MAX_RUNTIME_SECS
+            ));
+        }
+    };
+    Ok(format!(
+        "Exit code: {}\n\n{}{}",
+        output.status.code().unwrap_or(-1),
+        super::terminal::bounded_output(&output.stdout, &output.stderr),
+        if output.status.success() {
+            ""
+        } else {
+            "\n[The script reported a failure.]"
+        }
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
-    fn database() -> std::sync::Arc<crate::database::Database> {
-        let database = std::sync::Arc::new(
-            crate::database::Database::in_memory().expect("an in-memory database"),
-        );
-        database
-            .create_skill(&NewSkill {
-                name: "Rust house style".into(),
-                description: Some("how Rust is written here".into()),
-                instructions: "Prefer Result over panic.".into(),
-                skill_type: None,
-                origin: SkillOrigin::User,
-            })
-            .expect("seed");
-        database
-    }
-
-    /// The index exists so a model can tell a skill is worth reading. Without the
-    /// name it cannot ask, and without the description it cannot tell which.
+    /// The index prints `name [type]`; a model that copies the whole label must
+    /// still find the skill.
     #[test]
-    fn the_index_lists_names_and_descriptions() {
-        let database = database();
-        let text = index(Some(database.as_ref())).expect("an index");
-        assert!(text.contains("Rust house style"), "{text}");
-        assert!(text.contains("how Rust is written here"), "{text}");
-    }
-
-    /// A body in the index would put every stored instruction into every request.
-    /// The whole design is that only the trigger text travels until one is chosen.
-    #[test]
-    fn the_index_carries_no_instructions() {
-        let database = database();
-        let text = index(Some(database.as_ref())).expect("an index");
-        assert!(!text.contains("Prefer Result over panic."), "{text}");
-    }
-
-    /// `type` is named because it is the one grouping a skill has, and the only
-    /// way the model can reason about a whole family -- "the code skills" --
-    /// without reading a body.
-    #[test]
-    fn the_index_names_a_skills_type_when_it_has_one() {
-        let database = std::sync::Arc::new(
-            crate::database::Database::in_memory().expect("an in-memory database"),
-        );
-        database
-            .create_skill(&NewSkill {
-                name: "Rust house style".into(),
-                description: Some("how Rust is written here".into()),
-                instructions: "Prefer Result over panic.".into(),
-                skill_type: Some("code".into()),
-                origin: SkillOrigin::User,
-            })
-            .expect("seed");
-        let text = index(Some(database.as_ref())).expect("an index");
-        assert!(text.contains("Rust house style [code]"), "{text}");
-        assert!(text.contains("— how Rust is written here"), "{text}");
-    }
-
-    /// A skill with no description still has to be listed: the model can still
-    /// read it, and omitting it would make it unreachable rather than undescribed.
-    #[test]
-    fn a_skill_without_a_description_is_still_listed() {
-        let database = std::sync::Arc::new(
-            crate::database::Database::in_memory().expect("an in-memory database"),
-        );
-        database
-            .create_skill(&NewSkill {
-                name: "No blurb".into(),
-                description: None,
-                instructions: "Be brief.".into(),
-                skill_type: None,
-                origin: SkillOrigin::User,
-            })
-            .expect("seed");
-        let text = index(Some(database.as_ref())).expect("an index");
-        assert!(text.contains("No blurb"), "{text}");
-    }
-
-    /// Disabled skills are not offered, so they must not appear here either — an
-    /// index listing a skill the model cannot read is a dead end.
-    #[test]
-    fn a_disabled_skill_is_not_offered() {
-        let database = database();
-        let disabled = database
-            .list_skills()
-            .expect("list")
-            .into_iter()
-            .find(|skill| skill.name == "Rust house style")
-            .expect("seeded");
-        database
-            .set_skill_enabled(&disabled.id, false)
-            .expect("disable");
-        assert_eq!(index(Some(database.as_ref())), None);
-    }
-
-    /// An empty catalogue must produce no section at all. A paragraph explaining
-    /// that there are no skills is a claim about the world, not an instruction.
-    #[test]
-    fn no_skills_produces_no_section() {
-        let empty = crate::database::Database::in_memory().expect("an in-memory database");
-        assert_eq!(index(Some(&empty)), None);
-        // A run with no session has nothing to read a catalogue from.
-        assert_eq!(index(None), None);
-    }
-
-    /// The model has to be told how to use the catalogue, or a list of names is
-    /// just text it will not act on.
-    #[test]
-    fn the_index_says_how_to_use_it() {
-        let database = database();
-        let text = index(Some(database.as_ref())).expect("an index");
-        assert!(text.contains("skill_read"), "{text}");
-    }
-
-    #[test]
-    fn reading_a_skill_returns_its_instructions_and_name() {
-        let database = database();
-        let out = read(
-            json!({ "name": "Rust house style" }),
-            Some(database.as_ref()),
-        )
-        .expect("read");
-        // The name travels with the body: a set of rules without its heading is
-        // assertions with nothing to attach them to a topic.
-        assert!(out.contains("Rust house style"), "{out}");
-        assert!(out.contains("Prefer Result over panic."), "{out}");
-    }
-
-    /// Reading a skill counts as using it, so the Skills screen's figure matches
-    /// the `skill_read` row the user already saw in the panel.
-    #[test]
-    fn reading_a_skill_counts_as_a_use() {
-        let database = database();
-        let before = use_count(&database, "Rust house style");
-        read(
-            json!({ "name": "Rust house style" }),
-            Some(database.as_ref()),
-        )
-        .expect("read");
-        assert_eq!(use_count(&database, "Rust house style"), before + 1);
-    }
-
-    /// A failed read resolves to no skill, so there is nothing to count -- and
-    /// counting the attempt would make the figure rise on every typo.
-    #[test]
-    fn a_refused_read_counts_nothing() {
-        let database = database();
-        let before = use_count(&database, "Rust house style");
-        assert!(read(json!({ "name": "nope" }), Some(database.as_ref())).is_err());
-        assert_eq!(use_count(&database, "Rust house style"), before);
-    }
-
-    /// The stored use count for a skill, by name.
-    fn use_count(database: &std::sync::Arc<crate::database::Database>, name: &str) -> i64 {
-        database
-            .enabled_skills()
-            .expect("skills")
-            .into_iter()
-            .find(|skill| skill.name == name)
-            .expect("seeded skill")
-            .use_count
-    }
-
-    /// The model is never shown an id, so matching on one would make the tool
-    /// uncallable in practice.
-    #[test]
-    fn a_skill_is_found_by_name_without_regard_to_case() {
-        let database = database();
-        let out = read(
-            json!({ "name": "rust HOUSE style" }),
-            Some(database.as_ref()),
-        )
-        .expect("read");
-        assert!(out.contains("Prefer Result over panic."), "{out}");
-    }
-
-    /// A model guessing names is the likely failure, so the refusal carries the
-    /// real ones rather than only saying no.
-    #[test]
-    fn an_unknown_name_says_what_is_available() {
-        let database = database();
-        let error = read(json!({ "name": "nope" }), Some(database.as_ref())).expect_err("no such");
-        assert!(error.contains("Rust house style"), "{error}");
-    }
-
-    #[test]
-    fn reading_without_a_name_is_reported() {
-        let database = database();
-        assert!(read(json!({}), Some(database.as_ref())).is_err());
-    }
-
-    /// The failure this exists for. The index prints `name [type]`, a model asked
-    /// for the whole label, and the tool refused a skill it had just offered --
-    /// costing a round trip and teaching nothing.
-    #[test]
-    fn a_name_copied_from_the_index_still_finds_the_skill() {
-        let database = database();
-        let body = read(
-            json!({ "name": "Rust house style [unorganized]" }),
-            Some(database.as_ref()),
-        )
-        .expect("the bracketed label should resolve to the skill");
-        assert!(body.contains("Prefer Result over panic."), "{body}");
-    }
-
-    /// The type is a suffix, not part of the name: anything else in brackets is
-    /// not stripped out of the middle of a name.
-    #[test]
-    fn only_a_trailing_bracketed_suffix_is_ignored() {
+    fn a_bracketed_label_is_tried_both_ways() {
         assert_eq!(
             names_to_try("Documentation [writing]"),
             vec!["Documentation [writing]", "Documentation"]
         );
-        // The exact request is tried first, so a skill genuinely saved with
-        // brackets is still reachable by the name it was saved under.
         assert_eq!(names_to_try("Foo [bar]").first(), Some(&"Foo [bar]"));
-        // Nothing to strip.
         assert_eq!(names_to_try("  Email inbox  "), vec!["Email inbox"]);
         assert_eq!(names_to_try("[leading]"), vec!["[leading]"]);
         assert_eq!(names_to_try("unclosed [bracket"), vec!["unclosed [bracket"]);
@@ -617,189 +702,41 @@ mod tests {
     /// because the index prints a type beside every name and an unlabelled row is
     /// the one thing a model cannot judge.
     #[test]
-    fn a_skill_saved_without_a_type_is_stored_as_unorganized() {
-        let database = std::sync::Arc::new(
-            crate::database::Database::in_memory().expect("an in-memory database"),
-        );
-        manage(
-            json!({
-                "action": "create",
-                "name": "Winding down",
-                "instructions": "Say what changed and what is left."
-            }),
-            Some(database.as_ref()),
+    fn a_missing_type_becomes_unorganized() {
+        let draft = draft_from(
+            &json!({ "action": "create", "name": "Winding down", "instructions": "Say what changed." }),
+            true,
         )
-        .expect("a created skill");
-
-        let stored = database.enabled_skills().expect("the stored skills");
-        let skill = stored
-            .iter()
-            .find(|skill| skill.name == "Winding down")
-            .expect("the skill should be stored");
-        assert_eq!(skill.skill_type.as_deref(), Some(DEFAULT_TYPE));
+        .expect("draft");
+        assert_eq!(draft.skill_type.as_deref(), Some(DEFAULT_TYPE));
     }
 
-    /// And a type the caller did give is kept rather than overwritten by the
-    /// default.
+    /// A model fixing a skill's wording should not have to restate its title.
     #[test]
-    fn a_type_the_caller_gave_is_kept() {
-        let database = std::sync::Arc::new(
-            crate::database::Database::in_memory().expect("an in-memory database"),
-        );
-        manage(
-            json!({
-                "action": "create",
-                "name": "Email inbox",
-                "skill_type": "browser",
-                "instructions": "Check the inbox at example.test."
-            }),
-            Some(database.as_ref()),
+    fn an_update_can_name_the_skill_it_replaces() {
+        let draft = draft_from(
+            &json!({ "action": "update", "existing_name": "Rust house style", "instructions": "Be brief." }),
+            false,
         )
-        .expect("a created skill");
-
-        let stored = database.enabled_skills().expect("the stored skills");
-        assert_eq!(stored[0].skill_type.as_deref(), Some("browser"));
-    }
-
-    /// A run with no conversation must not answer from stored state at all, since
-    /// there is no conversation to scope it to.
-    #[test]
-    fn a_run_with_no_session_reports_rather_than_reading() {
-        let error = read(json!({ "name": "Rust house style" }), None).expect_err("no database");
-        assert!(error.contains("conversation"), "{error}");
+        .expect("draft");
+        assert_eq!(draft.name, "Rust house style");
     }
 
     #[test]
-    fn creating_stores_the_instructions_as_a_generated_skill() {
-        let database = database();
-        manage(
-            json!({
-                "action": "create",
-                "name": "Test checklist",
-                "description": "what to check before calling something done",
-                "instructions": "Run the tests. Read the diff."
-            }),
-            Some(database.as_ref()),
-        )
-        .expect("create");
-
-        let stored = database
-            .list_skills()
-            .expect("list")
-            .into_iter()
-            .find(|skill| skill.name == "Test checklist")
-            .expect("stored");
-        assert_eq!(stored.instructions, "Run the tests. Read the diff.");
-        // The origin is what lets the user tell a deliberate skill from one the
-        // model inferred, and a tool-created skill is always inferred.
-        assert_eq!(stored.origin, SkillOrigin::Generated);
+    fn an_empty_name_or_body_is_refused() {
+        assert!(draft_from(&json!({ "name": "x" }), true).is_err());
+        assert!(draft_from(&json!({ "instructions": "x" }), true).is_err());
     }
 
-    /// Editing must not reset a skill's history. A save that looked like the same
-    /// request resetting `use_count` would make editing look like recreating.
+    /// The tools are classified for caching and approval: reads are cached,
+    /// writes are not, and running a script carries a command the prompt can show.
     #[test]
-    fn updating_keeps_the_skills_identity() {
-        let database = database();
-        let original = database
-            .list_skills()
-            .expect("list")
-            .into_iter()
-            .find(|skill| skill.name == "Rust house style")
-            .expect("seeded");
-        database.record_skill_use(&original.id);
-
-        manage(
-            json!({
-                "action": "update",
-                "existing_name": "Rust house style",
-                "name": "Rust house style",
-                "instructions": "Prefer pure functions."
-            }),
-            Some(database.as_ref()),
-        )
-        .expect("update");
-
-        let stored = database
-            .list_skills()
-            .expect("list")
-            .into_iter()
-            .find(|skill| skill.name == "Rust house style")
-            .expect("still there");
-        assert_eq!(stored.id, original.id);
-        assert_eq!(stored.use_count, 1);
-        assert_eq!(stored.instructions, "Prefer pure functions.");
-    }
-
-    #[test]
-    fn updating_an_unknown_skill_is_refused_and_says_what_exists() {
-        let database = database();
-        let error = manage(
-            json!({ "action": "update", "existing_name": "nope", "instructions": "x" }),
-            Some(database.as_ref()),
-        )
-        .expect_err("no such skill");
-        assert!(error.contains("Rust house style"), "{error}");
-    }
-
-    #[test]
-    fn an_unknown_action_is_refused_by_name() {
-        let database = database();
-        let error = manage(
-            json!({ "action": "destroy", "name": "x", "instructions": "y" }),
-            Some(database.as_ref()),
-        )
-        .expect_err("bad action");
-        assert!(error.contains("destroy"), "{error}");
-    }
-
-    /// A model fixing a skill's wording should not have to restate its title, and
-    /// blanking the name would fail validation for a reason it cannot see.
-    #[test]
-    fn an_update_without_a_name_keeps_the_existing_one() {
-        let database = database();
-        manage(
-            json!({ "action": "update", "existing_name": "Rust house style", "instructions": "Prefer small functions." }),
-            Some(database.as_ref()),
-        )
-        .expect("update");
-
-        let stored = database
-            .skill(
-                &database
-                    .list_skills()
-                    .expect("list")
-                    .into_iter()
-                    .find(|skill| skill.name == "Rust house style")
-                    .expect("still there")
-                    .id,
-            )
-            .expect("read")
-            .expect("row");
-        assert_eq!(stored.instructions, "Prefer small functions.");
-    }
-
-    /// A skill with no instructions is refused by the schema's own validation, and
-    /// the message says so rather than reporting a constraint the model cannot see.
-    #[test]
-    fn instructions_are_required() {
-        let database = database();
-        let error = manage(
-            json!({ "action": "create", "name": "Empty" }),
-            Some(database.as_ref()),
-        )
-        .expect_err("no instructions");
-        assert!(error.contains("instructions"), "{error}");
-    }
-
-    #[test]
-    fn a_created_skill_is_readable_by_name_afterwards() {
-        let database = database();
-        manage(
-            json!({ "action": "create", "name": "Fresh", "instructions": "Be brief." }),
-            Some(database.as_ref()),
-        )
-        .expect("create");
-        let out = read(json!({ "name": "Fresh" }), Some(database.as_ref())).expect("read");
-        assert!(out.contains("Be brief."), "{out}");
+    fn the_tools_have_the_effects_the_gate_expects() {
+        assert_eq!(SKILL_READ.effect, super::super::Effect::Read);
+        assert_eq!(SKILL_MANAGE.effect, super::super::Effect::Write);
+        assert_eq!(SKILL_WRITE.effect, super::super::Effect::Write);
+        assert_eq!(SKILL_RUN.effect, super::super::Effect::Write);
+        assert_eq!(SKILL_RUN.command_argument, Some("script"));
+        assert_eq!(SKILL_READ.command_argument, None);
     }
 }

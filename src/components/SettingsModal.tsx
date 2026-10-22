@@ -34,7 +34,7 @@ import { DownloadPage } from "./settings/downloads/DownloadPage";
 import type { SettingsPage } from "./settings/settingsPages";
 import { useAssist } from "../features/assist/useAssist";
 import { useTaste } from "../features/taste/useTaste";
-import SkillFormPage from "./skills/SkillFormPage";
+import SkillDetailPage from "./skills/SkillDetailPage";
 import TitleModelPicker from "./TitleModelPicker";
 import SingleModelPicker from "./ModelSelectionPicker";
 import { ANCHOR_ATTRIBUTE, FlashHighlight, MARKABLE_ATTRIBUTE, SettingsPageTitle, SettingsSearchScope, SettingsSection, SETTINGS_HIGHLIGHT_EVENT } from "./SettingsSection";
@@ -794,6 +794,9 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
     page.view === "model" || page.view === "download" || page.view === "ttsSettings" || page.view === "ttsVoice" || page.view === "sttModel" ? { view: "local" } : page.view === "skill" ? { view: "skills" } : { view: "providers" };
   const backLabel =
     page.view === "model" ? "Back to local models" : page.view === "download" ? "Back to local engines" : page.view === "ttsVoice" ? "Back to speech synthesis" : page.view === "ttsSettings" ? "Back to speech synthesis" : page.view === "sttModel" ? "Back to speech recognition" : page.view === "skill" ? "Back to skills" : "Back to providers";
+  // Held outside the JSX so the save callback can compare against it without
+  // relying on narrowing that does not survive into a closure.
+  const editingSkill = page.view === "skill" ? page.slug : null;
 
   return (
     <dialog
@@ -1252,7 +1255,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                     }
                   />
                 </SettingsSection>
-              </> : page.view === "skills" ? <SkillsPage notify={notify} onOpenForm={(skill) => setPage({ view: "skill", skill })} /> : page.view === "mcp" ? <McpSettingsPage notify={notify} /> : page.view === "skill" ? <SkillFormPage key={page.skill?.id ?? "new"} skill={page.skill} onSaved={() => setPage({ view: "skills" })} onCancel={() => setPage({ view: "skills" })} notify={notify} /> : <>
+              </> : page.view === "skills" ? <SkillsPage notify={notify} onOpenForm={(skill) => setPage({ view: "skill", slug: skill?.slug ?? null })} /> : page.view === "mcp" ? <McpSettingsPage notify={notify} /> : page.view === "skill" ? <SkillDetailPage key={editingSkill ?? "new"} slug={editingSkill} onSaved={(slug) => { if (slug !== editingSkill) setPage({ view: "skill", slug }); }} onCancel={() => setPage({ view: "skills" })} onDeleted={() => setPage({ view: "skills" })} notify={notify} /> : <>
                 <SettingsPageTitle><h2 className="text-[17px] font-semibold tracking-tight">{page.endpoint ? "Edit provider" : "Add provider"}<FlashHighlight anchor="providers.add" /></h2></SettingsPageTitle>
                 <form onSubmit={(event) => void saveEndpoint(event)} className="max-w-xl space-y-4">
                   <label className="block text-sm text-[var(--muted)]">Provider name<input ref={nameRef} required value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} className="mt-1.5 h-10 w-full rounded-md border border-[var(--line)] bg-[var(--rail)] px-3 text-[13px] text-[var(--text)] outline-none placeholder:text-[var(--quiet)] focus:border-[var(--accent)]" placeholder="e.g. Local Ollama" /></label>

@@ -288,6 +288,11 @@ impl ToolRegistry {
                 // way, through the composer.
                 super::skills::SKILL_MANAGE,
                 super::skills::SKILL_READ,
+                // Folder work: a skill can carry scripts and references, so it
+                // needs a write verb beside the read one, and a way to execute a
+                // script the user has trusted.
+                super::skills::SKILL_WRITE,
+                super::skills::SKILL_RUN,
                 super::terminal::RUN_TERMINAL,
                 // Reading and stopping a command `run_terminal` left running.
                 // Split so a poll is a read -- it changes nothing and asks for

@@ -34,7 +34,7 @@ mod todo;
 mod vision;
 mod walk;
 mod websearch;
-mod write;
+pub(crate) mod write;
 
 pub use access::AccessSet;
 pub use approval::{Approval, ApprovalGate, ApprovalRequest, QuestionRequest};
@@ -225,10 +225,13 @@ mod tests {
             let names = registry_for(mode, true).names();
             assert!(!has(&names, "skill_read"), "{names:?}");
             assert!(!has(&names, "skill_manage"), "{names:?}");
+            assert!(!has(&names, "skill_write"), "{names:?}");
+            assert!(!has(&names, "skill_run"), "{names:?}");
         }
         let names = registry_for(ToolMode::Agent, false).names();
-        assert!(has(&names, "skill_read"), "{names:?}");
-        assert!(has(&names, "skill_manage"), "{names:?}");
+        for tool in ["skill_read", "skill_manage", "skill_write", "skill_run"] {
+            assert!(has(&names, tool), "{tool} missing: {names:?}");
+        }
     }
 
     /// Reading and managing skills have the expected effects for cache behavior;
@@ -239,6 +242,8 @@ mod tests {
         let effect = |name: &str| registry.get(name).expect("registered").effect;
         assert_eq!(effect("skill_read"), Effect::Read);
         assert_eq!(effect("skill_manage"), Effect::Write);
+        assert_eq!(effect("skill_write"), Effect::Write);
+        assert_eq!(effect("skill_run"), Effect::Write);
     }
 
     #[test]
@@ -260,6 +265,8 @@ mod tests {
                 "search_web",
                 "skill_manage",
                 "skill_read",
+                "skill_run",
+                "skill_write",
                 "sub_agent",
                 "terminal_kill",
                 "terminal_output",
@@ -320,6 +327,8 @@ mod tests {
                 "search_web",
                 "skill_manage",
                 "skill_read",
+                "skill_run",
+                "skill_write",
                 "sub_agent",
                 "terminal_kill",
                 "terminal_output",
@@ -346,6 +355,8 @@ mod tests {
                 "schedule_job",
                 "skill_manage",
                 "skill_read",
+                "skill_run",
+                "skill_write",
                 "sub_agent",
                 "terminal_kill",
                 "terminal_output",

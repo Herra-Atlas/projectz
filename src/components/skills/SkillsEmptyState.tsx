@@ -16,8 +16,9 @@ export default function SkillsEmptyState({ onCreate }: { onCreate: () => void })
         </span>
         <p className="text-center text-sm text-[var(--text)]">No skills yet</p>
         <p className="mt-1 max-w-sm text-center text-xs leading-5 text-[var(--quiet)]">
-          A skill is a set of instructions kept for reuse — how you want code written, what to
-          check before calling something done, what to avoid.
+          A skill is a folder with a <code>SKILL.md</code> and, if it needs them, scripts and
+          references. The agent reads the instructions when they apply — how you want code
+          written, what to check before calling something done, what to avoid.
         </p>
         <button
           type="button"

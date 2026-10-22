@@ -2,39 +2,26 @@
 //!
 //! # What a bundled skill is
 //!
-//! An ordinary row. It is written into the same `skills` table, shown on the
-//! same Skills screen and read by the agent with `skill_read` exactly like one
-//! the user wrote; nothing downstream has to know where it came from, and only
-//! `origin` records it so the screen can label it.
+//! A folder in `<data>/bundled-skills/<slug>/`, written from the catalogue below
+//! by [`crate::skills::bundled::seed`]. It is read, offered and edited exactly
+//! like one the user wrote; only the root it lives in records where it came
+//! from. Editing one copies it into the user root first, so the shipped set is
+//! never changed in place.
 //!
-//! # Why the seed runs once, and how the text is kept current anyway
+//! # Why the seed keeps a version
 //!
-//! The seed is idempotent by id -- a stable `bundled.*` id and `INSERT OR IGNORE`
-//! -- but it runs **once**, and a setting records that it did, so a re-seed on
-//! every launch cannot keep handing back a row the user removed.
+//! Content is the app's, so a release that improves a body must reach an install
+//! that already has the old one. A per-release version is compared at startup;
+//! if it moved, the whole shipped tree is rewritten. That replaces an edited
+//! bundled skill and retires one dropped from the catalogue, which a merge could
+//! not do for an id it no longer knows about. A user's own skill is in a
+//! different root and is never in scope.
 //!
-//! That left the other half unsolved, and it bit: editing a body here changed
-//! nothing for anyone who had already installed the app, because the flag
-//! short-circuits the seed forever. [`BUNDLED_VERSION`] is what fixes it. A
-//! version bump runs [`refresh`], which **reinstalls the shipped set**: every row
-//! the app previously seeded is deleted and the current catalogue inserted in its
-//! place. So a body edited here reaches every install, a skill dropped from
-//! [`BUNDLED`] disappears instead of lingering as a row nothing ships any more,
-//! and a new one appears -- none of which a merge keyed on ids could do, since a
-//! merge can only see the ids it already knows about.
-//!
-//! It is deliberately not a schema migration. The table's shape does not change
-//! and no existing row moves, and a migration would make every unit test that
-//! builds an in-memory database start with these rows in it -- a cost paid by
-//! tests that have nothing to do with the feature.
-
-mod refresh;
-
-use rusqlite::{params, Connection};
+//! The bodies live in Rust rather than in a `resources/` folder because they are
+//! seven strings and the app already has a single startup step that writes them.
+//! Skills that need binary assets are the user's to install.
 
 use crate::database::Database;
-
-pub use refresh::BUNDLED_VERSION;
 
 /// One skill the app ships.
 pub struct BundledSkill {
@@ -88,7 +75,7 @@ pub struct BundledSkill {
 /// being true of all three, which is the least useful part of each.
 pub const BUNDLED: &[BundledSkill] = &[
     BundledSkill {
-        id: "bundled.code",
+        id: "code-changes",
         name: "Code changes",
         skill_type: "code",
         description: "Use when writing new code or editing, refactoring or removing existing code in this workspace.",
@@ -120,7 +107,7 @@ task did not ask for -- and a comment belongs where the code cannot show its own
 it would restate what the next line does.",
     },
     BundledSkill {
-        id: "bundled.debugging",
+        id: "debugging",
         name: "Debugging",
         skill_type: "code",
         description: "Use when something is broken, failing, or behaving differently from what was expected.",
@@ -145,7 +132,7 @@ passes after. Finish by stating in a sentence what was actually wrong, because t
 read it before they read the diff.",
     },
     BundledSkill {
-        id: "bundled.running",
+        id: "running-and-verifying",
         name: "Running and verifying",
         skill_type: "code",
         description: "Use when running, building, testing or verifying the project in this workspace: \
@@ -181,7 +168,7 @@ done; do not keep probing for more to check. When the user only asked for it to 
 it, and report.",
     },
     BundledSkill {
-        id: "bundled.research",
+        id: "research",
         name: "Research",
         skill_type: "research",
         description: "Use when a question needs checking against sources rather than answering from memory: the user's own material, a document, a paper, or the web.",
@@ -207,7 +194,7 @@ when it was made. When you cannot confirm something, say what you could not conf
 would take to find out, rather than filling the gap with the most plausible answer.",
     },
     BundledSkill {
-        id: "bundled.documentation",
+        id: "documentation",
         name: "Documentation",
         skill_type: "writing",
         description: "Use when writing or updating documentation: a README, a guide, reference \
@@ -234,7 +221,7 @@ Update the documentation the change touches, and only that. Then stop: the page 
 who does not know the system can follow it without a question it should already have answered.",
     },
     BundledSkill {
-        id: "bundled.articles",
+        id: "articles",
         name: "Articles",
         skill_type: "writing",
         description: "Use when writing long-form prose that argues or explains: an article, a blog \
@@ -257,7 +244,7 @@ fix what makes them stumble. Stop when the point is made and supported: a piece 
 repeating itself was finished a paragraph earlier.",
     },
     BundledSkill {
-        id: "bundled.messages",
+        id: "messages",
         name: "Messages",
         skill_type: "writing",
         description: "Use when writing short correspondence: an email, a chat reply, a status update \
@@ -279,132 +266,43 @@ Write it in one pass and send it. Do not draft a long message and then a summary
     },
 ];
 
-/// The setting that records the seed has run.
-///
-/// Read before the insert and written after it. A database that has never been
-/// seeded has no value here, which is exactly the case that seeds.
-const SEEDED_KEY: &str = "app.bundled_skills_seeded";
-
 impl Database {
-    /// Writes the shipped skills on a fresh database, and reinstalls the shipped
-    /// set on one that has already been seeded and is behind the catalogue.
+    /// Writes the shipped skills into the app's bundled root.
     ///
-    /// Safe to call on every startup: the flag short-circuits the insert, the
-    /// version short-circuits the reinstall, and the fresh-seed inserts ignore an
-    /// id that is already there. A failure is reported rather than swallowed,
-    /// because a database that cannot take these rows has a problem worth
-    /// surfacing.
+    /// Kept here so the one startup call site did not have to learn a second
+    /// module path; the work lives in [`crate::skills::bundled::seed`], beside the
+    /// folder rules it has to obey.
     pub fn seed_bundled_skills(&self) -> Result<(), String> {
-        if self.setting::<bool>(SEEDED_KEY).unwrap_or(false) {
-            // Already seeded, so the only remaining question is whether the
-            // catalogue has moved since. A database seeded before this existed has
-            // no version and reads as 1, which is what makes the first bump reach
-            // it.
-            let stored = self
-                .setting::<u32>(refresh::VERSION_KEY)
-                .unwrap_or(refresh::FIRST_VERSION);
-            if stored >= BUNDLED_VERSION {
-                return Ok(());
-            }
-            refresh::reinstall(self)?;
-            return self.set_setting(refresh::VERSION_KEY, &BUNDLED_VERSION);
-        }
-
-        let now = crate::database::utc_now();
-        {
-            let connection = self.connection.lock().map_err(|error| error.to_string())?;
-            insert_all(&connection, &now)?;
-        }
-        // Written last, so a failure part-way through the insert leaves the flag
-        // unset and the seed runs again next launch rather than half-done forever.
-        self.set_setting(SEEDED_KEY, &true)?;
-        // The state of the catalogue just written, so the first later version bump
-        // sees this install is behind and runs the reinstall.
-        self.set_setting(refresh::VERSION_KEY, &BUNDLED_VERSION)
+        crate::skills::bundled::seed(self)
     }
-}
-
-/// Inserts every bundled skill, ignoring any id already present.
-fn insert_all(connection: &Connection, now: &str) -> Result<(), String> {
-    for skill in BUNDLED {
-        connection
-            .execute(
-                "INSERT OR IGNORE INTO skills
-                    (id,name,description,instructions,type,origin,enabled,use_count,created_at,updated_at)
-                 VALUES (?1,?2,?3,?4,?5,'bundled',1,0,?6,?6)",
-                params![
-                    skill.id,
-                    skill.name,
-                    skill.description,
-                    skill.instructions,
-                    skill.skill_type,
-                    now,
-                ],
-            )
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn seeding_adds_every_bundled_skill_and_only_once() {
-        let database = Database::in_memory().expect("db");
-        assert!(
-            database.enabled_skills().expect("before").is_empty(),
-            "an unseeded database should have no skills"
-        );
-
-        database.seed_bundled_skills().expect("seed");
-        assert_eq!(
-            database.enabled_skills().expect("after").len(),
-            BUNDLED.len()
-        );
-
-        // A second call is a no-op -- the flag and the version short-circuit it,
-        // and the stable ids would ignore the rows even without them.
-        database.seed_bundled_skills().expect("seed again");
-        assert_eq!(
-            database.enabled_skills().expect("after twice").len(),
-            BUNDLED.len()
-        );
-    }
-
-    /// A deletion holds until the catalogue moves. The seed runs once rather than
-    /// being re-applied on every launch, so deleting a shipped skill is not undone
-    /// by simply starting the app again -- only a version bump reinstalls the set,
-    /// and that case is covered in `refresh.rs`.
-    #[test]
-    fn a_deleted_bundled_skill_does_not_come_back_before_a_version_bump() {
-        let database = Database::in_memory().expect("db");
-        database.seed_bundled_skills().expect("seed");
-        let first = database
-            .enabled_skills()
-            .expect("after")
-            .into_iter()
-            .next()
-            .expect("a seeded skill");
-
-        database.delete_skill(&first.id).expect("delete");
-        database.seed_bundled_skills().expect("seed again");
-
-        assert!(database.skill(&first.id).expect("read").is_none());
-    }
-
-    /// The catalogue is data, so its shape is asserted: a stable, namespaced id, a
-    /// type to group by, and a description written as a trigger rather than a
-    /// summary. A summary here is the one thing that makes the model skip a skill
-    /// it should have read.
+    /// The catalogue is data, so its shape is asserted: a spec-valid slug, a
+    /// label, a type to group by, and a description written as a trigger rather
+    /// than a summary. A summary here is the one thing that makes the model skip
+    /// a skill it should have read.
     #[test]
     fn every_bundled_skill_is_valid_and_written_as_a_trigger() {
         assert!(!BUNDLED.is_empty(), "the app ships no skills");
         for skill in BUNDLED {
+            // The Agent Skills spec: lowercase letters, digits, single hyphens,
+            // and the folder name is this value.
             assert!(
-                skill.id.starts_with("bundled."),
-                "unstable id: {}",
+                !skill.id.is_empty()
+                    && skill
+                        .id
+                        .chars()
+                        .all(|character| character.is_ascii_lowercase()
+                            || character.is_ascii_digit()
+                            || character == '-')
+                    && !skill.id.starts_with('-')
+                    && !skill.id.ends_with('-')
+                    && !skill.id.contains("--"),
+                "invalid slug: {}",
                 skill.id
             );
             assert!(!skill.name.trim().is_empty(), "{}", skill.id);
@@ -415,9 +313,11 @@ mod tests {
                 skill.id,
                 skill.description
             );
-            // The table's own limit, checked here so an over-long seed fails a
-            // test rather than becoming a row validation would refuse.
-            assert!(skill.instructions.chars().count() <= 8_000, "{}", skill.id);
+            assert!(
+                skill.instructions.chars().count() < 20_000,
+                "{} is longer than the form accepts",
+                skill.id
+            );
         }
     }
 
@@ -437,34 +337,34 @@ mod tests {
                 .instructions
         };
         // A read taken before a write is out of date, including your own.
-        assert!(body("bundled.code").contains("your own edit counts"));
+        assert!(body("code-changes").contains("your own edit counts"));
         // A guard is not a fix.
-        assert!(body("bundled.debugging").contains("is not a fix"));
+        assert!(body("debugging").contains("is not a fix"));
         // Never cite what you did not open.
         assert!(
-            body("bundled.research").contains("never cite a page you did not read"),
+            body("research").contains("never cite a page you did not read"),
             "the research skill lost the citation rule"
         );
         // The user's own material before the web.
-        assert!(body("bundled.research").contains("workspace before the web"));
+        assert!(body("research").contains("workspace before the web"));
         // Running it is not compiling it, and a cause is found before it is fixed.
         assert!(
-            body("bundled.running").contains("watching behaviour, not compiling"),
+            body("running-and-verifying").contains("watching behaviour, not compiling"),
             "the running skill lost the verify-by-behaviour rule"
         );
-        assert!(body("bundled.running").contains("fix the root cause"));
+        assert!(body("running-and-verifying").contains("fix the root cause"));
         // Work out how to run it from the project, not from memory.
-        assert!(body("bundled.running").contains("the project tells you"));
+        assert!(body("running-and-verifying").contains("the project tells you"));
         // Documentation is judged by whether an example runs as written.
-        assert!(body("bundled.documentation").contains("run exactly as written"));
+        assert!(body("documentation").contains("run exactly as written"));
         // A piece argues one point, and is not padded with a preamble.
-        assert!(body("bundled.articles").contains("One piece makes one point"));
+        assert!(body("articles").contains("One piece makes one point"));
         // A message leads with the reason it was written.
-        assert!(body("bundled.messages").contains("Lead with the reason you are writing"));
+        assert!(body("messages").contains("Lead with the reason you are writing"));
     }
 
     /// The ids are the identity, so two skills must not share one -- a duplicate
-    /// would silently drop a skill from the catalogue at seed time.
+    /// would silently overwrite a folder at seed time.
     #[test]
     fn no_two_bundled_skills_share_an_id() {
         let mut ids = BUNDLED.iter().map(|skill| skill.id).collect::<Vec<_>>();
@@ -472,5 +372,20 @@ mod tests {
         let total = ids.len();
         ids.dedup();
         assert_eq!(ids.len(), total, "duplicate id in the shipped catalogue");
+    }
+
+    /// A display name is the one thing the model never sees in the index; the
+    /// `name` it does see is the slug, so the two must not be confused.
+    #[test]
+    fn every_display_name_can_be_humanized_into_its_slug() {
+        for skill in BUNDLED {
+            assert_eq!(
+                crate::skills::slugify(skill.name),
+                skill.id,
+                "{} and {} disagree about identity",
+                skill.name,
+                skill.id
+            );
+        }
     }
 }

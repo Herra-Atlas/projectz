@@ -29,7 +29,7 @@ pub struct Database {
 /// both refer to this, so adding a migration is one edit here plus one in
 /// `migrate`. Before this existed, each new migration silently broke a test that
 /// had hardcoded the old number.
-pub const LATEST_SCHEMA_VERSION: i64 = 17;
+pub const LATEST_SCHEMA_VERSION: i64 = 18;
 
 /// The current time as UTC ISO-8601, the format every timestamp uses.
 ///
@@ -1768,6 +1768,42 @@ fn migrate(connection: &mut Connection) -> Result<(), String> {
                  document TEXT
              );
              CREATE INDEX IF NOT EXISTS idx_taste_runs_started ON taste_runs(started_at DESC);
+             PRAGMA user_version={LATEST_SCHEMA_VERSION};"
+        ))
+        .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+    }
+    // Skill *state*, now that skill *content* lives on disk.
+    //
+    // A skill is a folder -- `SKILL.md` plus whatever scripts and references it
+    // carries -- because that is the only shape that can hold the files. What is
+    // left for the database is the handful of facts that are the app's rather
+    // than the skill's: whether it is offered, whether its scripts may run, and
+    // how often it has been read. Keyed by the folder's slug, which is also the
+    // spec's `name`, so the two can never disagree about identity.
+    //
+    // `trusted` starts at 0 deliberately. Writing a skill is not permission to
+    // execute one: a script is arbitrary code, and the user has to say so once.
+    //
+    // **Unconditional, unlike the blocks above.** Those compare against a version
+    // read before migration 8, which is the last one to stamp the final version
+    // into the database; a fresh install therefore reports the latest number while
+    // still needing the blocks after it. `IF NOT EXISTS` is the idempotent guard
+    // here, and running it on every launch costs one no-op statement.
+    {
+        let tx = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        tx.execute_batch(&format!(
+            "CREATE TABLE IF NOT EXISTS skill_state (
+                 slug TEXT PRIMARY KEY,
+                 enabled INTEGER NOT NULL DEFAULT 1,
+                 trusted INTEGER NOT NULL DEFAULT 0,
+                 use_count INTEGER NOT NULL DEFAULT 0,
+                 created_at TEXT NOT NULL,
+                 updated_at TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_skill_state_enabled ON skill_state(enabled);
              PRAGMA user_version={LATEST_SCHEMA_VERSION};"
         ))
         .map_err(|error| error.to_string())?;

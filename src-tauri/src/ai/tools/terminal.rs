@@ -22,7 +22,7 @@ use super::{ToolContext, ToolSpec};
 ///
 /// Generous enough for `cargo build` on a cold cache and short enough that a
 /// forgotten `sleep` is not a wait the user has to sit through.
-const MAX_RUNTIME_SECS: u64 = 120;
+pub(crate) const MAX_RUNTIME_SECS: u64 = 120;
 
 /// Cap on captured output, before the shared truncation decides what the model
 /// sees.
@@ -307,7 +307,7 @@ async fn run(command: String, timeout_secs: u64, context: ToolContext) -> Result
 /// stderr is included because for a build or a test it holds the part the user
 /// needs; excluding it is why so many agent tools report success on a failing
 /// test.
-fn bounded_output(stdout: &[u8], stderr: &[u8]) -> String {
+pub(crate) fn bounded_output(stdout: &[u8], stderr: &[u8]) -> String {
     let mut text = String::new();
     for (label, bytes) in [("stdout", stdout), ("stderr", stderr)] {
         if bytes.is_empty() {

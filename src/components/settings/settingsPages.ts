@@ -9,7 +9,6 @@
  * reached from their list pages, not from search.
  */
 import type { Endpoint, LocalModel } from "../../features/models/types";
-import type { Skill } from "../../features/skills/types";
 import type { DownloadKind } from "../../features/downloads/types";
 
 export type SettingsPage =
@@ -37,6 +36,6 @@ export type SettingsPage =
   | { view: "downloads" }
   /* What this installation is, what it uses, and the one destructive action. */
   | { view: "system" }
-  | { view: "skill"; skill: Skill | null }
+  | { view: "skill"; slug: string | null }
   | { view: "model"; model: LocalModel }
   | { view: "form"; endpoint: Endpoint | null };

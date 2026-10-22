@@ -103,11 +103,12 @@ enum Capability {
 /// that may already read.
 fn capability(tool_name: &str) -> Capability {
     match tool_name {
-        "write_file" | "edit_file" | "edit_lines" | "skill_manage" | "move_file"
-        | "delete_file" | "write_document" => Capability::Write,
-        // The whole terminal group, so a run without the terminal cannot read or
-        // stop what another run left running either.
-        "run_terminal" | "terminal_output" | "terminal_kill" | "terminal_status" => {
+        "write_file" | "edit_file" | "edit_lines" | "skill_manage" | "skill_write"
+        | "move_file" | "delete_file" | "write_document" => Capability::Write,
+        // A skill's script is a program, so it follows the terminal switch rather
+        // than the write one: a run that may not start a process may not start one
+        // through a skill either. This is the group's whole meaning.
+        "run_terminal" | "terminal_output" | "terminal_kill" | "terminal_status" | "skill_run" => {
             Capability::Terminal
         }
         "search_web" | "web_fetch" => Capability::Web,
@@ -173,7 +174,29 @@ mod tests {
             ..AccessSet::ALL
         };
         assert!(!access.is_allowed("skill_manage"));
+        assert!(!access.is_allowed("skill_write"));
         assert!(access.is_allowed("skill_read"));
+    }
+
+    /// A skill's script is a program, so it follows the terminal switch. A run
+    /// allowed to write files is not thereby allowed to start a process through a
+    /// skill, which is the point of the two capabilities being separate.
+    #[test]
+    fn running_a_skill_script_follows_the_terminal_switch() {
+        let writer = AccessSet {
+            terminal: false,
+            ..AccessSet::ALL
+        };
+        assert!(!writer.is_allowed("skill_run"));
+        assert!(writer.is_allowed("skill_write"));
+
+        let reader = AccessSet {
+            terminal: false,
+            write: false,
+            ..AccessSet::ALL
+        };
+        assert!(!reader.is_allowed("skill_run"));
+        assert!(reader.is_allowed("read_file"));
     }
 
     /// Scheduling work for later is its own switch, because it is the one thing a run

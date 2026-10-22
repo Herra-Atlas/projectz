@@ -3,34 +3,32 @@ import { invoke } from "@tauri-apps/api/core";
 import type { Skill } from "./types";
 
 /**
- * The enabled skills, loaded once the composer picker first opens.
+ * Every skill folder, disabled ones included.
  *
- * `skills_enabled`, not `skills_list`: the management screen needs the disabled
- * ones too, because "where did that skill go" is a question the disabled answer
- * is meant to settle. The composer cannot apply one, so offering it there would
- * be a row that silently does nothing.
- *
- * **Loaded lazily rather than at mount.** A picker that has never been opened has
- * no reason to cost a database read, and skills change rarely -- reading on open
- * also picks up anything written in Settings since the last launch, which is the
- * one moment staleness would actually be noticed.
+ * One read for the whole page rather than one per card: the backend already
+ * merges both roots and the state table in a single pass, so asking twice would
+ * scan twice for the same answer. `reload` is what a switch or a file write calls
+ * to bring the list back in step.
  */
-export function useSkills(active: boolean) {
+export function useSkillList() {
   const [skills, setSkills] = useState<Skill[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState("");
 
   const reload = useCallback(async () => {
-    setLoading(true);
     try {
-      setSkills(await invoke<Skill[]>("skills_enabled"));
+      setSkills(await invoke<Skill[]>("skills_list"));
+      setFailed("");
+    } catch (reason) {
+      setFailed(String(reason));
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    if (active) void reload();
-  }, [active, reload]);
+    void reload();
+  }, [reload]);
 
-  return { skills, loading, reload };
+  return { skills, loading, failed, reload };
 }

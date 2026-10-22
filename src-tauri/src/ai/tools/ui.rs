@@ -274,6 +274,8 @@ fn label_for(tool: &str) -> &'static str {
         "web_fetch" => "Open page",
         "skill_read" => "Read skill",
         "skill_manage" => "Save skill",
+        "skill_write" => "Write skill file",
+        "skill_run" => "Run skill script",
         "sub_agent" => "Run agent",
         "schedule_job" => "Schedule job",
         "ask_user" => "Ask user",

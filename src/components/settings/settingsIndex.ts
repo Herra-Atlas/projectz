@@ -245,7 +245,16 @@ const PAGES: IndexPage[] = [
     view: "skills",
     name: "Skills",
     entries: [
-      { anchor: "skills.list", label: "Skills", keywords: ["skill", "instructions", "bundled", "generated", "managed"] },
+      {
+        anchor: "skills.list",
+        label: "Skills",
+        keywords: ["skill", "instructions", "bundled", "generated", "managed", "folder", "files"],
+      },
+      {
+        anchor: "skills.install",
+        label: "Install a skill",
+        keywords: ["install", "import", "download", "github", "zip", "SKILL.md", "agent skills"],
+      },
     ],
   },
   {

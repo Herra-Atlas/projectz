@@ -10,6 +10,7 @@ mod jobs;
 mod mcp;
 mod observation;
 mod panel;
+mod skills;
 mod stt;
 mod system;
 mod taste;
@@ -320,10 +321,17 @@ pub fn run() {
             commands::taste_reset,
             commands::skills_list,
             commands::skills_enabled,
+            commands::skills_get,
             commands::skills_create,
             commands::skills_update,
             commands::skills_set_enabled,
+            commands::skills_set_trusted,
             commands::skills_delete,
+            commands::skills_write_file,
+            commands::skills_read_file,
+            commands::skills_delete_file,
+            commands::skills_folder,
+            commands::skills_install,
             commands::job_list,
             commands::job_create,
             commands::job_update,

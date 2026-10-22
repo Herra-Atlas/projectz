@@ -1,5 +1,5 @@
 fn main() {
-    // A version alone does not say which build someone is running: `0.4.0` can be
+    // A version alone does not say which build someone is running: `0.5.0` can be
     // a dozen different binaries, and the System page is where that question gets
     // asked. The date is baked in at compile time rather than read from the file
     // system, because an installed copy's timestamp is when it was written, not
