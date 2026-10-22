@@ -94,12 +94,6 @@ pub async fn spawn(arguments: Value, context: ToolContext) -> Result<String, Str
             // is for.
             read: true,
             web: true,
-            // But not the browser, which is grouped with the writes for the same
-            // reason a fetch is not: reading a page and driving one are different
-            // sizes of permission, and a read-only agent gets the first. Its
-            // prompt and its refusals agree, which is the point of narrowing here
-            // rather than only in the prompt.
-            browser: false,
         })
     };
 

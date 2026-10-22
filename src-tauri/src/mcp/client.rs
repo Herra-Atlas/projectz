@@ -417,6 +417,21 @@ fn spawn(server: &McpServer) -> Result<Child, String> {
             // A server must not outlive the app. Without this a quit, a crash or
             // a reload leaves the process behind with no window to close it from.
             .kill_on_drop(true);
+        // The app's own working directory is the source tree in a dev build, and a
+        // server that writes a file to a relative path would put it there --
+        // Playwright MCP's screenshots and traces are the case that surfaced. Give
+        // the process a folder of its own, and point the system temp variables at
+        // it so a temporary file the server makes lands in the same place. A user's
+        // own `TMP` in the server's environment still wins, because it is applied
+        // below.
+        let scratch = super::scratch_dir(server);
+        if std::fs::create_dir_all(&scratch).is_ok() {
+            command
+                .current_dir(&scratch)
+                .env("TMPDIR", &scratch)
+                .env("TMP", &scratch)
+                .env("TEMP", &scratch);
+        }
         for (name, value) in &server.env {
             command.env(name, value);
         }

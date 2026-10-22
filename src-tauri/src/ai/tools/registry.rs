@@ -321,15 +321,6 @@ impl ToolRegistry {
                 // list moves as work progresses so it cannot be cached, and the
                 // agent ticking an item off has not made any file stale.
                 super::todo::TODO,
-                // A real browser, for work that is not on disk -- a page to read,
-                // a form to fill, a result to collect. Agent-only for the same
-                // reason the web tools are: a Chat conversation has no business
-                // reaching a browser on the user's behalf. The tool is one call
-                // with a script inside it rather than one per action, because the
-                // request body is what a provider caches on -- see the cache note
-                // on `ToolSpec` -- and a dozen schemas for click and type would be
-                // paid for on every turn of every conversation.
-                super::browser::spec(),
             ],
         };
         let mut tools = specs.to_vec();

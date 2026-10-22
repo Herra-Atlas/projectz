@@ -28,3 +28,13 @@ pub fn models_root() -> PathBuf {
 pub fn voice_root() -> PathBuf {
     data_root().join("voice")
 }
+
+/// Scratch space for programs this app starts: `<root>/tmp/`.
+///
+/// A child process inherits its parent's working directory, and a dev build of a
+/// Tauri app runs from the source tree -- so a server that writes an unasked-for
+/// file would put it in the repository. Each MCP server gets a folder under here
+/// and is started in it instead. See [`crate::mcp::scratch_dir`].
+pub fn tmp_root() -> PathBuf {
+    data_root().join("tmp")
+}

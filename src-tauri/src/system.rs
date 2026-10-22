@@ -77,7 +77,9 @@ pub fn system_info() -> SystemInfo {
         models_dir: models_root().display().to_string(),
         engines_dir: engines_dir().display().to_string(),
         voice_dir: voice_root().display().to_string(),
-        database_bytes: std::fs::metadata(&database).map(|meta| meta.len()).unwrap_or(0),
+        database_bytes: std::fs::metadata(&database)
+            .map(|meta| meta.len())
+            .unwrap_or(0),
         database_path: database.display().to_string(),
         models_bytes: size_of(&models_root()),
         engines_bytes: size_of(&engines_dir()),
@@ -98,7 +100,6 @@ pub async fn system_clear(database: State<'_, Arc<Database>>) -> Result<(), Stri
     remove_tree(&models_root())?;
     remove_tree(&voice_root())?;
     remove_tree(&engines_dir())?;
-    crate::browser::forget_profile().await?;
     database
         .clear_chat_sessions()
         .map_err(|error| format!("Could not clear the conversations: {error}"))?;

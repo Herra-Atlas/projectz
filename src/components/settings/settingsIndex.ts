@@ -88,16 +88,6 @@ const PAGES: IndexPage[] = [
         keywords: ["enter", "ctrl", "keyboard", "shortcut", "newline"],
       },
       {
-        anchor: "general.browserIdle",
-        label: "Close when idle",
-        keywords: ["browser", "timeout", "keep open", "idle"],
-      },
-      {
-        anchor: "general.browserProfile",
-        label: "Browser profile",
-        keywords: ["cookies", "logins", "sign in", "history", "forget", "delete browser data"],
-      },
-      {
         anchor: "general.clearSessions",
         label: "Clear all sessions",
         keywords: ["delete chats", "wipe", "history", "reset conversations"],
@@ -298,15 +288,9 @@ const PAGES: IndexPage[] = [
 
 /**
  * The rows search can find, in sidebar order.
- *
- * `hasBrowserProfile` is the one piece of live state that changes what the page says, and
- * the row is kept out of the index while there is nothing to forget -- offering a "Browser
- * profile" result that lands on a disabled button is worse than not offering it.
  */
-export function buildSettingsIndex(options: { hasBrowserProfile: boolean }): SettingsEntry[] {
+export function buildSettingsIndex(): SettingsEntry[] {
   return PAGES.flatMap((page) =>
-    page.entries
-      .filter((entry) => entry.anchor !== "general.browserProfile" || options.hasBrowserProfile)
-      .map((entry) => ({ ...entry, view: entry.view ?? page.view, page: page.name })),
+    page.entries.map((entry) => ({ ...entry, view: entry.view ?? page.view, page: page.name })),
   );
 }

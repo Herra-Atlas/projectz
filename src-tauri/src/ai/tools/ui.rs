@@ -234,14 +234,6 @@ fn detail_for(tool: &str, arguments: &Value) -> String {
     if tool == "schedule_job" {
         return string_at(arguments, "name").unwrap_or_default();
     }
-    // A browser call is identified by the script it ran, and a script's first line
-    // is its own summary -- a `goto`, a click, a read. The rest of it is detail the
-    // row has no room for, and a script can be long.
-    if tool == "browser_exec" {
-        return string_at(arguments, "code")
-            .map(|code| first_line(&code).chars().take(60).collect::<String>())
-            .unwrap_or_default();
-    }
     let fields: &[&str] = if matches!(tool, "search_web" | "web_fetch" | "run_terminal") {
         &["query", "url", "command", "path", "pattern"]
     } else {
@@ -280,10 +272,6 @@ fn label_for(tool: &str) -> &'static str {
         "terminal_status" => "Command status",
         "search_web" => "Search the web",
         "web_fetch" => "Open page",
-        // Its own verb rather than sharing "Open page": the two are different
-        // acts -- one reads a URL, the other drives a browser -- and a panel where
-        // both say the same thing cannot be scanned.
-        "browser_exec" => "Browse",
         "skill_read" => "Read skill",
         "skill_manage" => "Save skill",
         "sub_agent" => "Run agent",
@@ -317,9 +305,6 @@ fn outcome_for(tool: &str, result: &str) -> Result<String, String> {
         "move_file" | "delete_file" | "terminal_output" | "terminal_kill" | "terminal_status" => {
             Ok(first_line(result).to_string())
         }
-        // A browser call's own first line is where the page is, which is the figure
-        // that matters on the row: this call acted on *that* page.
-        "browser_exec" => Ok(first_line(result).to_string()),
         // A write says what it did in words that read better than a figure, and
         // so does a line edit -- its own result opens with exactly that, so
         // there is nothing to count here.

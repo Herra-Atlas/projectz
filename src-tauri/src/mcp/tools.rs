@@ -116,7 +116,7 @@ fn model_name(server: &McpServer, tool: &str) -> String {
 /// `./servers/fs` -- and every character a function name cannot hold is folded
 /// to one underscore rather than dropped, so two names that differ only there do
 /// not collapse into one.
-fn slug(text: &str) -> String {
+pub(crate) fn slug(text: &str) -> String {
     let mut out = String::new();
     for character in text.chars() {
         if character.is_ascii_alphanumeric() {

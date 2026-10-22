@@ -21,7 +21,7 @@
 //! native-messaging host -- that is a program on the user's machine launched by the
 //! browser, a much larger thing to install and to trust. A WebSocket back to
 //! `127.0.0.1` is the smallest door that works, it needs nothing new in the dependency
-//! list (`tokio-tungstenite` is already here for the agent's browser), and it is
+//! list (`tokio-tungstenite` is what this bridge needs), and it is
 //! reachable only from this machine.
 //!
 //! # Why this port also serves a page

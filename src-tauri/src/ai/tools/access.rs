@@ -50,20 +50,6 @@ pub struct AccessSet {
     /// nobody there. It is also the one a job's own run is never given, which is what
     /// keeps scheduled work one generation deep.
     pub jobs: bool,
-    /// Driving a real browser: opening pages, clicking, filling forms.
-    ///
-    /// Its own switch rather than a corner of `web`, because it reaches much
-    /// further than reading a page does. A page can log in, submit a form, place an
-    /// order and spend money, and none of that is visible in the arguments of the
-    /// call that did it. A run narrowed to reading -- an explore or plan sub-agent,
-    /// a job allowed to look but not touch -- gets `web` without getting this.
-    ///
-    /// Defaulted when absent because the set round-trips through JSON that may have
-    /// been written before this field existed: a job's `access` column, saved by an
-    /// older build. An absent field reads as *off*, which is the safe direction --
-    /// a job that predates the browser does not quietly acquire one by being loaded.
-    #[serde(default)]
-    pub browser: bool,
 }
 
 impl Default for AccessSet {
@@ -84,7 +70,6 @@ impl AccessSet {
         web: true,
         subagents: true,
         jobs: true,
-        browser: true,
     };
 
     /// Whether a tool name may be used by this run.
@@ -96,7 +81,6 @@ impl AccessSet {
             Capability::Web => self.web,
             Capability::Subagents => self.subagents,
             Capability::Jobs => self.jobs,
-            Capability::Browser => self.browser,
         }
     }
 }
@@ -109,7 +93,6 @@ enum Capability {
     Web,
     Subagents,
     Jobs,
-    Browser,
 }
 
 /// Maps a tool name to its group.
@@ -130,12 +113,6 @@ fn capability(tool_name: &str) -> Capability {
         "search_web" | "web_fetch" => Capability::Web,
         "sub_agent" => Capability::Subagents,
         "schedule_job" => Capability::Jobs,
-        // A browser has a switch of its own rather than riding with `web`, because
-        // the two are not the same size of permission: a fetch reads one page,
-        // while a click can log in, submit a form and pay for something. Grouping
-        // them would make "this run may look at the web" mean "this run may act on
-        // it", which is a distinction the user is entitled to make.
-        "browser_exec" => Capability::Browser,
         // Asking the user reads their intent; it changes nothing, so it belongs
         // with the reads even though it is not cacheable.
         "ask_user" => Capability::Read,
@@ -167,7 +144,6 @@ mod tests {
             "search_web",
             "sub_agent",
             "schedule_job",
-            "browser_exec",
         ] {
             assert!(
                 access.is_allowed(tool),
@@ -212,34 +188,6 @@ mod tests {
         // And the rest of the run is untouched by that narrowing.
         assert!(access.is_allowed("write_file"));
         assert!(access.is_allowed("sub_agent"));
-    }
-
-    /// The browser is its own switch, not a corner of `web`.
-    ///
-    /// A run that may read pages has not thereby been given permission to act on
-    /// them -- a login, a submitted form, a purchase -- and none of that is visible
-    /// in the arguments of the call that did it. The two are different sizes of
-    /// permission, so they are two switches.
-    #[test]
-    fn the_browser_is_its_own_switch() {
-        let no_browser = AccessSet {
-            browser: false,
-            ..AccessSet::ALL
-        };
-        assert!(!no_browser.is_allowed("browser_exec"));
-        // Reading a page is untouched: narrowing one does not narrow the other.
-        assert!(no_browser.is_allowed("search_web"));
-        assert!(no_browser.is_allowed("web_fetch"));
-
-        let no_web = AccessSet {
-            web: false,
-            ..AccessSet::ALL
-        };
-        assert!(!no_web.is_allowed("search_web"));
-        assert!(
-            no_web.is_allowed("browser_exec"),
-            "the browser follows its own switch and not the web one"
-        );
     }
 
     /// An MCP tool follows the *write* switch rather than the read one. The

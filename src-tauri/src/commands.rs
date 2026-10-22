@@ -537,27 +537,6 @@ pub fn workspace_close(
     runtime.close_workspace(&path)
 }
 
-/// What the agent's browser profile is using: its name, its folder, its size.
-///
-/// Read by the settings page so the profile can be *seen*. A saved login is only
-/// trustworthy if the thing holding it can be found, and until this existed the
-/// folder had no name, no size, and no way for a user to look at it or clear it.
-#[tauri::command]
-pub async fn browser_profile_status() -> Result<crate::browser::ProfileStatus, String> {
-    crate::browser::profile_status().await
-}
-
-/// Deletes the agent's browser profile: its cookies, its saved logins, its history.
-///
-/// The driver stops the browser first, because a profile in use cannot be deleted.
-/// Deliberately not a model tool: what this machine is trusted to remember is the
-/// user's decision, of the same kind as adding an MCP server, and not a step in a
-/// task an agent can take on its own initiative.
-#[tauri::command]
-pub async fn browser_profile_forget() -> Result<(), String> {
-    crate::browser::forget_profile().await
-}
-
 /// Every configured MCP server, with what each said last time it answered.
 ///
 /// Reads the last result rather than connecting, so the page paints immediately

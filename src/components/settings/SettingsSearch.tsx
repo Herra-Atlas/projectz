@@ -24,10 +24,10 @@ export function pageForEntry(entry: SettingsEntry): SettingsPage {
  * Scores one entry against a query, or `null` for no match.
  *
  * **Prefix beats contains, label beats keywords, page name matters least.** These are short
- * lists and a hallucinated ranking is worse than a simple one: a user typing "theme" wants
- * Theme, not Browser profile; one typing "browser" wants the browser rows and not the
- * page called Appearance. Ordering by where the match landed is enough to get that right,
- * and it is explainable, which a score nobody can predict never is.
+ * lists and a hallucinated ranking is worse than a simple one: a user typing "session" wants
+ * the session row, not every entry whose keywords mention it. Ordering by where the match
+ * landed is enough to get that right, and it is explainable, which a score nobody can
+ * predict never is.
  */
 function score(entry: SettingsEntry, needle: string): number | null {
   const label = entry.label.toLowerCase();

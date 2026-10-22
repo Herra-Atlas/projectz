@@ -71,7 +71,7 @@ pub struct AiRuntime {
     /// selector is live during a reply, and a level picked there has to reach the
     /// run rather than wait for the next message -- otherwise the screen shows one
     /// level while the run uses another, and a terminal call runs under
-    /// `auto_safe`, or a browser call prompts under `full`. Removed when the run
+    /// `auto_safe`, or a write call prompts under `full`. Removed when the run
     /// ends, so a finished run's id is never re-pointed by a late change.
     live_gates: Arc<Mutex<HashMap<String, crate::ai::tools::ApprovalGate>>>,
 }

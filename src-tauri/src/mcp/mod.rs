@@ -109,6 +109,31 @@ pub fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// The folder a server's process runs in: `<data>/tmp/mcp/<name>-<id>/`.
+///
+/// A child inherits its parent's working directory. This child is given one of
+/// its own instead, because the app's own is the source tree in a dev build --
+/// and a server that writes an automatically named file to a relative path
+/// (Playwright MCP's screenshots are the usual case) would put it in the
+/// repository. The folder is per server, so two of the same kind cannot overwrite
+/// each other's files, and the first eight characters of the id keep two servers
+/// with one name apart.
+pub fn scratch_dir(server: &McpServer) -> std::path::PathBuf {
+    let name = tools::slug(&server.name);
+    let name = if name.is_empty() {
+        "server".to_string()
+    } else {
+        name
+    };
+    let id: String = server.id.chars().take(8).collect();
+    let folder = if id.is_empty() {
+        name
+    } else {
+        format!("{name}-{id}")
+    };
+    crate::app_paths::tmp_root().join("mcp").join(folder)
+}
+
 /// The first `http://` or `https://` address in a command line, if there is one.
 ///
 /// A server that *is* a URL is the obvious case; the scan also catches one
@@ -130,6 +155,27 @@ pub fn url_in(command: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two servers of the same kind must not share a folder, and one with no name
+    /// at all still gets a usable one.
+    #[test]
+    fn each_server_has_its_own_scratch_folder() {
+        let named = |id: &str| McpServer {
+            id: id.into(),
+            name: "Playwright".into(),
+            ..McpServer::default()
+        };
+        let first = scratch_dir(&named("aaaa1111-2222"));
+        let second = scratch_dir(&named("bbbb3333-4444"));
+        assert_ne!(first, second);
+        assert!(first.ends_with(std::path::Path::new("tmp/mcp/playwright-aaaa1111")));
+
+        let unnamed = McpServer {
+            id: "cccc5555-6666".into(),
+            ..McpServer::default()
+        };
+        assert!(scratch_dir(&unnamed).ends_with(std::path::Path::new("tmp/mcp/server-cccc5555")));
+    }
 
     #[test]
     fn a_server_that_is_a_url_has_one() {

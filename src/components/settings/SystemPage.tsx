@@ -149,7 +149,7 @@ export function SystemPage({ notify }: { notify: Notify }) {
           />
           <DeleteRow
             label="Everything"
-            detail="All of the above, plus the speech voices and the browser profile."
+            detail="All of the above, plus the speech voices."
             action="Delete everything"
             danger
             busy={working === "all"}

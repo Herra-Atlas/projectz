@@ -1,7 +1,6 @@
 mod ai;
 mod app_paths;
 mod assist;
-mod browser;
 mod child;
 mod commands;
 mod database;
@@ -182,12 +181,6 @@ pub fn run() {
             // a browser so the first `panel_browser_open` finds live state rather
             // than reporting a page it then forgets.
             panel::browser::install(app.handle());
-            // Told where its profile belongs and where its one setting is read,
-            // before any tool can reach it. A model tool is a bare function with no
-            // app handle and no database, so the things it cannot work out for
-            // itself are handed over at startup.
-            browser::install(app_data_dir.clone());
-            browser::install_database(std::sync::Arc::clone(&database));
 
             let show = MenuItem::with_id(app, "show", "Show ProjectZ", true, None::<&str>)?;
             // A check item that states the situation rather than the action: the
@@ -362,8 +355,6 @@ pub fn run() {
             commands::workspace_open,
             commands::workspace_select,
             commands::workspace_close,
-            commands::browser_profile_status,
-            commands::browser_profile_forget,
             commands::mcp_servers,
             commands::mcp_refresh,
             commands::mcp_save,
@@ -461,11 +452,6 @@ pub fn run() {
                 if let Some(runtime) = app.try_state::<ai::runtime::AiRuntime>() {
                     runtime.local_models().unload();
                 }
-                // The agent's browser is a child of this process, so it goes when
-                // this does -- explicitly, because an orphaned browser is a window
-                // that outlives the app that opened it and cannot be told apart
-                // from a browser the user opened themselves.
-                browser::terminate();
                 // A final write for every exit path that reaches here without
                 // passing through the tray menu -- a normal quit, or a window
                 // closed by the OS at session end.

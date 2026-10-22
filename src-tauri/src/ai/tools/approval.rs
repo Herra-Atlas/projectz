@@ -562,23 +562,23 @@ mod tests {
     /// The composer is live during a reply, so a change that only took effect on
     /// the *next* message left the screen showing one level while the run used
     /// another -- which is exactly what "the level did not work" looks like: a
-    /// terminal call under `auto_safe`, or a browser prompt under `full`. The
+    /// terminal call under `auto_safe`, or a write prompt under `full`. The
     /// gate is per-run, so re-pointing it is how the run catches up.
     #[test]
     fn a_live_run_takes_the_level_it_is_re_pointed_to() {
         let gate = ApprovalGate::new(PermissionMode::Ask).with_mode(PermissionMode::Ask);
-        // Started at `ask`: a browser call would prompt.
+        // Started at `ask`: a write would prompt.
         assert_eq!(gate.mode(), PermissionMode::Ask);
 
         gate.set_mode(PermissionMode::Full);
         assert_eq!(gate.mode(), PermissionMode::Full);
         // And it decides at the new level at once, with no prompt.
         let mut prompted = false;
-        let mut browser = request();
-        browser.tool_name = "browser_exec".into();
-        browser.command = String::new();
+        let mut write = request();
+        write.tool_name = "write_file".into();
+        write.command = String::new();
         let decision = runtime()
-            .block_on(gate.settle("r1", browser, &cancelled(), |_, _| prompted = true))
+            .block_on(gate.settle("r1", write, &cancelled(), |_, _| prompted = true))
             .expect("settled");
         assert_eq!(decision, Decision::Allow);
         assert!(!prompted, "a run re-pointed to full must not be prompted");
