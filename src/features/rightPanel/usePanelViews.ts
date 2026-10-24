@@ -25,21 +25,24 @@ export function usePanelViews() {
     setActiveTerminalId(session.id);
   }, []);
 
-  const closeTerminalSession = useCallback((id: string, serverRunning: boolean) => {
-    const session = terminalSessions.find((entry) => entry.id === id);
-    if (!session || (session.kind === "server" && serverRunning)) return;
+  const closeTerminalSession = useCallback((id: string) => {
     const remaining = terminalSessions.filter((entry) => entry.id !== id);
     setTerminalSessions(remaining);
     if (activeTerminalId === id) setActiveTerminalId(remaining[remaining.length - 1]?.id ?? null);
   }, [activeTerminalId, terminalSessions]);
 
-  const closeAll = useCallback((serverRunning: boolean) => {
+  /**
+   * The panel's own close: views go away, sessions stay.
+   *
+   * A server session is not pruned here no matter what its process is doing --
+   * whether the server lives or dies is the terminal row's own close, which
+   * stops the process first. The panel remembers the sessions so reopening it
+   * shows what was already running rather than an empty strip.
+   */
+  const closeAll = useCallback(() => {
     setOpenViews([]);
     setActiveView(null);
-    const pinned = terminalSessions.filter((entry) => entry.kind === "server" && serverRunning);
-    setTerminalSessions(pinned);
-    setActiveTerminalId(pinned[0]?.id ?? null);
-  }, [terminalSessions]);
+  }, []);
 
   const ensureServerSession = useCallback((id: string, title: string) => {
     setTerminalSessions((current) => current.some((entry) => entry.id === id)

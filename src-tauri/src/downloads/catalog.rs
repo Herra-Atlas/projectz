@@ -139,7 +139,7 @@ pub fn piper_voices(index: &serde_json::Value, query: &str) -> Vec<DownloadFile>
 /// The one repository the Piper voices live in.
 pub const PIPER_REPO: &str = "rhasspy/piper-voices";
 
-/// Where recognition models come from.
+/// The recognition models' repositories.
 ///
 /// Two repositories because they are two model families with two file formats,
 /// both read by the whisper.cpp engine: Whisper's own ggml models, and the
@@ -148,6 +148,50 @@ pub const PIPER_REPO: &str = "rhasspy/piper-voices";
 /// named here rather than left to a search.
 pub const WHISPER_REPO: &str = "ggerganov/whisper.cpp";
 pub const PARAKEET_REPO: &str = "ggml-org/parakeet-GGUF";
+
+/// Where audio.cpp's ready-to-run packages live: one repository, one tree.
+///
+/// The family a package belongs to is carried in its file name -- `Kokoro-...`,
+/// `qwen3-asr-...` -- so a search that reads one tree answers the whole page,
+/// the way the Piper voices do.
+pub const AUDIO_REPO: &str = "audio-cpp/audio.cpp-gguf";
+
+/// The `.gguf` packages an audio.cpp repository offers, labelled by family.
+pub fn audio_packages(repo: &str, tree: &[TreeEntry], query: &str) -> Vec<DownloadFile> {
+    use crate::audio::audiocpp::families::{self, Task};
+
+    let needle = query.trim().to_ascii_lowercase();
+    tree.iter()
+        .filter(|entry| entry.entry_type == "file")
+        .filter(|entry| entry.path.to_ascii_lowercase().ends_with(".gguf"))
+        .filter(|entry| needle.is_empty() || entry.path.to_ascii_lowercase().contains(&needle))
+        .filter_map(|entry| {
+            let name = file_name(&entry.path);
+            // The family is what makes a row usable or not: a package the table
+            // does not name is installable but unusable, and saying so is more
+            // honest than a bare quantisation note.
+            let family = families::classify(name);
+            let note = match &family {
+                Some((family, task)) => format!(
+                    "{} · {}",
+                    family.replace('_', " "),
+                    match task {
+                        Task::Tts => "speech",
+                        Task::Asr => "recognition",
+                    }
+                ),
+                None => "unknown family".to_string(),
+            };
+            Some(DownloadFile {
+                repo: repo.to_string(),
+                path: entry.path.clone(),
+                name: name.to_string(),
+                size: entry.size,
+                note,
+            })
+        })
+        .collect()
+}
 
 /// The `.bin` models a recognition repository offers.
 pub fn stt_models(repo: &str, tree: &[TreeEntry], query: &str) -> Vec<DownloadFile> {

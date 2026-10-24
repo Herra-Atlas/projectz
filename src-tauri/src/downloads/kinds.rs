@@ -20,6 +20,9 @@ pub enum Kind {
     Tts,
     /// A Whisper model: one `ggml-*.bin` file.
     Stt,
+    /// An audio.cpp model: one gguf package under `models/audio`, whose file
+    /// name carries the family it belongs to.
+    Audio,
 }
 
 impl Kind {
@@ -29,6 +32,7 @@ impl Kind {
             Self::Llama => "llama",
             Self::Tts => "tts",
             Self::Stt => "stt",
+            Self::Audio => "audio",
         }
     }
 
@@ -42,6 +46,7 @@ impl Kind {
             Self::Llama => "gguf",
             Self::Tts => "onnx",
             Self::Stt => "bin",
+            Self::Audio => "gguf",
         }
     }
 
@@ -66,10 +71,11 @@ impl Kind {
     pub fn destination(self, repo: &str, path: &str) -> PathBuf {
         let relative = match self {
             Self::Llama => PathBuf::from(path),
-            // A voice and a Whisper model are named for themselves: the repository
-            // path is a packaging detail, and a reader looking for one should not
-            // have to walk the folders it happens to sit in.
-            Self::Tts | Self::Stt => PathBuf::from(file_name(path)),
+            // A voice, a Whisper model and an audio.cpp package are named for
+            // themselves: the repository path is a packaging detail, and a
+            // reader looking for one should not have to walk the folders it
+            // happens to sit in.
+            Self::Tts | Self::Stt | Self::Audio => PathBuf::from(file_name(path)),
         };
         self.install_dir(repo).join(relative)
     }
@@ -78,10 +84,13 @@ impl Kind {
     ///
     /// A voice without its `.onnx.json` cannot be loaded -- that is where Piper
     /// reads the sample rate and the phoneme table -- so the sidecar is not an
-    /// optional extra to fetch later. A Whisper model is one file.
+    /// optional extra to fetch later. A Whisper model is one file. An
+    /// audio.cpp package is one file *as far as the fetch goes*: some of its
+    /// families want several packages to run, and a known-incomplete one is
+    /// still worth installing, because the family's docs name the rest.
     pub fn companions(self, path: &str) -> Vec<String> {
         match self {
-            Self::Llama | Self::Stt => vec![path.to_string()],
+            Self::Llama | Self::Stt | Self::Audio => vec![path.to_string()],
             Self::Tts => vec![path.to_string(), format!("{path}.json")],
         }
     }

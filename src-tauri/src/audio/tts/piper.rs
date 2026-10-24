@@ -20,9 +20,62 @@
 //! thread and this one only reads. Both pipes drain, so neither side waits.
 
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use super::voice::Voice;
+/// A resolved, usable Piper voice: every path this process needs, checked.
+///
+/// Lives beside the process that consumes it, rather than in the shared
+/// registry: every field here is Piper's business (which executable, where its
+/// `espeak-ng-data` sits, which model and at what rate), and the registry
+/// resolves *which* file, not *how* it runs.
+pub struct Voice {
+    pub program: PathBuf,
+    /// The child process' working directory, which is also where its data sits.
+    pub home: PathBuf,
+    pub model: PathBuf,
+    /// The rate of the PCM Piper returns, read from the config beside the model.
+    pub sample_rate: u32,
+}
+
+/// The Piper voice a `.onnx` model resolves to, naming what is missing.
+///
+/// Checks before resolve rather than after: Piper is this app's default voice,
+/// so these are the errors a user sees on an ordinary day, and each names the
+/// file it wants rather than reporting a generic failure.
+pub fn resolve_voice(model: &Path) -> Result<Voice, String> {
+    let home = super::voices::install_dir();
+    let program = home.join("piper.exe");
+    if !program.is_file() {
+        return Err(format!(
+            "Piper is not installed. Expected {}.",
+            program.display()
+        ));
+    }
+    if !model.is_file() {
+        return Err(format!(
+            "The voice is missing. Expected {}.",
+            model.display()
+        ));
+    }
+
+    // `with_extension` replaces the last component, so `x.onnx` becomes
+    // `x.onnx.json` -- the name Piper writes beside the model.
+    let config = model.with_extension("onnx.json");
+    if !config.is_file() {
+        return Err(format!(
+            "The voice's settings are missing. Expected {}.",
+            config.display()
+        ));
+    }
+
+    Ok(Voice {
+        program,
+        home,
+        model: model.to_path_buf(),
+        sample_rate: super::voices::piper_sample_rate(&config)?,
+    })
+}
 
 /// A message long enough to stop being speech and start being an audio file.
 ///

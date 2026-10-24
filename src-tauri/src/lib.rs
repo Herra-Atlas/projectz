@@ -1,6 +1,7 @@
 mod ai;
 mod app_paths;
 mod assist;
+mod audio;
 mod child;
 mod commands;
 mod database;
@@ -12,10 +13,8 @@ mod messaging;
 mod observation;
 mod panel;
 mod skills;
-mod stt;
 mod system;
 mod taste;
-mod tts;
 mod websearch;
 mod window;
 
@@ -440,15 +439,6 @@ pub fn run() {
             panel::browser::panel_browser_back,
             panel::browser::panel_browser_forward,
             panel::browser::panel_browser_close,
-            tts::commands::tts_voice,
-            tts::commands::tts_voices,
-            tts::commands::tts_settings,
-            tts::commands::tts_select_voice,
-            tts::commands::tts_speed,
-            tts::commands::tts_set_speed,
-            tts::commands::tts_set_skip_code,
-            tts::commands::tts_remove_voice,
-            tts::commands::tts_speak,
             downloads::commands::downloads_search,
             downloads::commands::downloads_start,
             downloads::commands::downloads_jobs,
@@ -462,16 +452,42 @@ pub fn run() {
             system::system_clear_engines,
             system::system_clear_sessions,
             system::system_forget_taste,
-            stt::commands::stt_status,
-            stt::commands::stt_install,
-            stt::commands::stt_models,
-            stt::commands::stt_settings,
-            stt::commands::stt_select_model,
-            stt::commands::stt_remove_model,
-            stt::commands::stt_model_language,
-            stt::commands::stt_set_language,
-            stt::commands::stt_recording_start,
-            stt::commands::stt_recording_stop,
+            audio::tts::commands::tts_voice,
+            audio::tts::commands::tts_voices,
+            audio::tts::commands::tts_settings,
+            audio::tts::commands::tts_select_voice,
+            audio::tts::commands::tts_speed,
+            audio::tts::commands::tts_set_speed,
+            audio::tts::commands::tts_set_skip_code,
+            audio::tts::commands::tts_set_skip_markdown,
+            audio::tts::commands::tts_set_auto_speak,
+            audio::tts::commands::tts_set_auto_speak_only_loaded,
+            audio::tts::commands::tts_voice_warm,
+            audio::tts::commands::tts_remove_voice,
+            audio::tts::commands::tts_remove_audio_voice,
+            audio::tts::commands::tts_speak,
+            audio::stt::commands::stt_status,
+            audio::stt::commands::stt_install,
+            audio::stt::commands::stt_models,
+            audio::stt::commands::stt_settings,
+            audio::stt::commands::stt_select_model,
+            audio::stt::commands::stt_remove_model,
+            audio::stt::commands::stt_model_language,
+            audio::stt::commands::stt_set_language,
+            audio::stt::commands::stt_recording_start,
+            audio::stt::commands::stt_recording_stop,
+            audio::audiocpp::commands::audio_status,
+            audio::audiocpp::commands::audio_start,
+            audio::audiocpp::commands::audio_stop,
+            audio::audiocpp::commands::audio_logs,
+            audio::audiocpp::commands::audio_models,
+            audio::audiocpp::commands::audio_model_spec,
+            audio::audiocpp::commands::audio_model_save_options,
+            audio::engines::commands::audio_engines,
+            audio::engines::commands::audio_engines_builtin,
+            audio::engines::commands::audio_engines_install,
+            audio::engines::commands::audio_builtin_install,
+            audio::engines::commands::audio_builtin_uninstall,
         ])
         .build(tauri::generate_context!())
         .expect("error while building application")
@@ -480,6 +496,11 @@ pub fn run() {
                 if let Some(runtime) = app.try_state::<ai::runtime::AiRuntime>() {
                     runtime.local_models().unload();
                 }
+                // The audio.cpp server dies with the app, the way the
+                // llama-server does -- an explicit stop, because the held
+                // child's `kill_on_drop` only runs when its task's state is
+                // dropped, and the static that holds it outlives run loop.
+                tauri::async_runtime::block_on(audio::audiocpp::stop(app));
                 // A final write for every exit path that reaches here without
                 // passing through the tray menu -- a normal quit, or a window
                 // closed by the OS at session end.

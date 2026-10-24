@@ -20,6 +20,8 @@ export type VoiceEntry = {
   name: string;
   sampleRate: number;
   size: number;
+  /** `piper` or `audiocpp` — the engine a path resolves to, told by its folder. */
+  engine: string;
 };
 
 /** The stored speech settings, with the bounds the page draws against. */
@@ -32,6 +34,12 @@ export type TtsSettings = {
   maxSpeed: number;
   /** Whether code is left out of what is spoken. Applies to every voice. */
   skipCode: boolean;
+  /** Whether markdown markup is left out of what is spoken. Applies to every voice. */
+  skipMarkdown: boolean;
+  /** Whether replies are read as they finish, without being pressed. */
+  autoSpeak: boolean;
+  /** Whether the auto read holds off on a voice that would need a cold start. */
+  autoSpeakOnlyLoaded: boolean;
 };
 
 /** One voice's pace, with the bounds its own page draws against. */

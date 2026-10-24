@@ -30,7 +30,12 @@ export function useVoiceTest(onError: (message: string) => void) {
           throw new Error(info.reason ?? "No voice is installed.");
         }
         const bytes = await invoke<ArrayBuffer>("tts_speak", { text: SAMPLE, voice });
-        playPcm(bytes, info.sampleRate, () => undefined);
+        // An audio.cpp voice answers `0` until its first synthesis -- which the
+        // call above is -- so one re-read lands the true figure. Piper's rate
+        // is in the voice's config, and the re-read is skipped for it.
+        const rate =
+          info.sampleRate > 0 ? info.sampleRate : (await invoke<VoiceInfo>("tts_voice", { voice })).sampleRate;
+        playPcm(bytes, rate, () => undefined);
       } catch (reason) {
         onError(reason instanceof Error ? reason.message : String(reason));
       } finally {

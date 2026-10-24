@@ -20,7 +20,9 @@ import { chatRepository } from "./features/chat/chatRepository";
 import { usePreferences } from "./features/models/usePreferences";
 import { useAppearance } from "./features/appearance/useAppearance";
 import { useRightPanel } from "./features/rightPanel/useRightPanel";
+import { displayModelName } from "./features/models/modelName";
 import { useWorkspaces, workspaceLabel } from "./features/workspace/useWorkspaces";
+import { createPortal } from "react-dom";
 import type { ChatMessage, SessionActivity, SessionRunStatus } from "./features/chat/types";
 import type { WorkingMode } from "./features/chat/chatMode";
 import "./App.css";
@@ -41,6 +43,29 @@ function PageFallback() {
 type LocalRuntimeStatus = { loaded_model_id: string | null; loading_model_id: string | null; selected_model_id: string | null; base_url: string };
 type LocalModelEvent = { kind: "loading" | "loaded" | "failed" | "unloaded"; modelId?: string; modelPath?: string; message?: string };
 type StartupProgress = { phase: string; message: string; progress: number };
+
+/**
+ * "Running for 4m 12s", ticking once a second while it shows.
+ *
+ * A fresh stamp arrives through the poll once a server has been started by
+ * this app; an orphaned server from a previous session has no stamp, and its
+ * row deliberately carries no duration rather than one it invented.
+ */
+function ResidentFor({ startedAt }: { startedAt: number }) {
+  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const seconds = Math.max(0, now - startedAt);
+  const parts: string[] = [];
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (hours > 0) parts.push(`${hours}h`);
+  if (minutes > 0 || hours > 0) parts.push(`${minutes}m`);
+  parts.push(`${seconds % 60}s`);
+  return <span> · for {parts.join(" ")}</span>;
+}
 
 /**
  * The host provider sits above the shell so a dialog opened anywhere in the tree
@@ -226,7 +251,7 @@ function AppShell() {
         else unlisten();
       }),
       // A message sent from outside the app writes a conversation with no window
-      // watching, which is the same situation as a job's. `kind: "state"` is the
+      // watching, which is the same situation as a job's. `"state"` is only the
       // settings record moving, which is not a new conversation and must not
       // refetch the list.
       listen<{ kind?: string }>("messaging-event", (event) => {
@@ -359,6 +384,62 @@ function AppShell() {
     try {
       await invoke("local_model_unload");
       setLocalRuntime((current) => ({ ...current, loaded_model_id: null, loading_model_id: null }));
+      setResidentServers((current) => ({ llama: null, audio: current.audio, audioStartedAt: current.audioStartedAt }));
+    } catch (reason) {
+      notify("error", String(reason));
+    }
+  };
+
+  /**
+   * What is resident right now, in the header: the warm llama.cpp model and
+   * the running audio.cpp server. A slow poll of two cheap status reads --
+   * this corner is a glance, not a dashboard -- with the llama name resolved
+   * through the same list the chat page keeps.
+   */
+  const [residentServers, setResidentServers] = useState<{
+    llama: string | null;
+    audio: boolean;
+    audioStartedAt: number | null;
+  }>({ llama: null, audio: false, audioStartedAt: null });
+  const [serversMenuOpen, setServersMenuOpen] = useState(false);
+  /** Where the portaled menu hangs: measured from the chip on every open, so
+      window resizes or a title wrapping to two lines never strand it. */
+  const serversChipRef = useRef<HTMLButtonElement | null>(null);
+  const [serversMenu, setServersMenu] = useState<{ top: number; right: number }>({ top: 60, right: 20 });
+
+  useEffect(() => {
+    let live = true;
+    const poll = async () => {
+      // Each side answers independently; a failure on one must not blank the
+      // other, so the last known figures stay.
+      const [llama, audio] = await Promise.allSettled([
+        invoke<{ loaded_model_id: string | null }>("local_model_status"),
+        invoke<{ running: boolean; startedAt: number | null }>("audio_status"),
+      ]);
+      if (!live) return;
+      const llamaId = llama.status === "fulfilled" ? llama.value.loaded_model_id : null;
+      const llamaName = llamaId ? await invoke<{ id: string; name: string }[]>("local_models_list")
+        .then((models) => models.find((model) => model.id === llamaId)?.name ?? null)
+        .catch(() => null) : null;
+      setResidentServers((current) => ({
+        llama: llamaName ?? (llamaId ? current.llama : null),
+        audio: audio.status === "fulfilled" ? audio.value.running : current.audio,
+        audioStartedAt: audio.status === "fulfilled" ? audio.value.startedAt : current.audioStartedAt,
+      }));
+    };
+    void poll();
+    const timer = window.setInterval(() => { void poll(); }, 4000);
+    return () => {
+      live = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  /** Stops the audio server from its header row; the next poll confirms. */
+  const stopAudioServer = async () => {
+    try {
+      await invoke("audio_stop");
+      setResidentServers((current) => ({ ...current, audio: false, audioStartedAt: null }));
     } catch (reason) {
       notify("error", String(reason));
     }
@@ -397,7 +478,7 @@ function AppShell() {
       {view === "statistics" && <div className="flex min-w-0 flex-1 flex-col"><Suspense fallback={<PageFallback />}><StatisticsPage refreshKey={endpointRefreshKey} sessions={chat.sessions} onOpenOverview={handleOpenOverview} /></Suspense></div>}
       <div className={`min-w-0 flex-1 flex-col ${view === "chat" ? "flex" : "hidden"}`}>
         {view === "chat" && <>
-        <header className="flex min-h-[60px] items-center justify-between gap-4 border-b border-[var(--line)] bg-[var(--page)] px-5 sm:px-7">
+        <header className="relative z-30 flex min-h-[60px] items-center justify-between gap-4 border-b border-[var(--line)] bg-[var(--page)] px-5 sm:px-7">
           <div className="min-w-0">
             {/* The folder name is the trigger, and nothing else is.
                 A second row reading "Change folder" said nothing the name did
@@ -434,7 +515,86 @@ function AppShell() {
           </div>
           <div className="min-w-0 flex-1" />
           {workspaceError && <span className="max-w-56 truncate text-[11px] text-[var(--danger)]">{workspaceError}</span>}
-          {localRuntime.loaded_model_id && <button type="button" onClick={() => void unloadLocalModel()} className="inline-flex min-h-9 items-center gap-2 rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 text-xs font-medium text-[var(--muted)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)]"><Power size={14} />Unload model</button>}
+          {(residentServers.llama !== null || residentServers.audio) && (
+            <div className="relative">
+              <button
+                ref={serversChipRef}
+                type="button"
+                onClick={() => {
+                  const box = serversChipRef.current?.getBoundingClientRect();
+                  if (box) {
+                    // The menu is `fixed`, so the chip's viewport rect is the
+                    // menu's viewport anchor -- measured at open, so the right
+                    // panel squeezing this header, a resize, or a wrapped title
+                    // never strand it at one corner.
+                    setServersMenu({ top: Math.round(box.bottom + 6), right: Math.round(window.innerWidth - box.right) });
+                  }
+                  setServersMenuOpen((open) => !open);
+                }}
+                aria-expanded={serversMenuOpen}
+                aria-haspopup="menu"
+                title="What is resident right now"
+                className="inline-flex min-h-9 items-center gap-2 rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 text-xs font-medium text-[var(--muted)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+              >
+                <ChevronDown size={14} className={`transition-transform ${serversMenuOpen ? "rotate-180" : ""}`} />
+                {residentServers.llama
+                  ? `${displayModelName(residentServers.llama)}${residentServers.audio ? " + audio.cpp" : ""}`
+                  : "audio.cpp"}
+              </button>
+              {/* The menu is portaled to the document body and pinned by the
+                  chip's own measured rect: the chat page directly below this
+                  header is its own stacking layer, and a floating panel that
+                  lives inside the header's subtree can lose the paint order
+                  there. A portaled `fixed` panel cannot. */}
+              {serversMenuOpen && createPortal(
+                <>
+                  {/* Click-away, under the menu, the way every other menu closes. */}
+                  <button type="button" aria-label="Close" tabIndex={-1} onClick={() => setServersMenuOpen(false)} className="fixed inset-0 z-[60] cursor-default" />
+                  <div
+                    role="menu"
+                    style={{ top: serversMenu.top, right: serversMenu.right }}
+                    className="fixed z-[70] w-72 rounded-lg border border-[var(--line)] bg-[var(--panel)] p-1 shadow-lg"
+                  >
+                    {residentServers.llama && (
+                      <div role="menuitem" className="flex min-h-10 items-center gap-3 rounded-md px-2.5 py-1.5">
+                        <div className="min-w-0 flex-1">
+                          <h4 className="truncate text-xs font-medium text-[var(--text)]">{residentServers.llama}</h4>
+                          <p className="truncate text-[11px] text-[var(--quiet)]">llama-server · loaded</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => { void unloadLocalModel(); setServersMenuOpen(false); }}
+                          className="inline-flex min-h-7 shrink-0 items-center gap-1 rounded px-2 text-[11px] text-[var(--text)] hover:bg-[var(--raised)] hover:text-[var(--danger)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+                        >
+                          <Power size={13} />
+                          Unload
+                        </button>
+                      </div>
+                    )}
+                    {residentServers.audio && (
+                      <div role="menuitem" className="flex min-h-10 items-center gap-3 rounded-md px-2.5 py-1.5">
+                        <div className="min-w-0 flex-1">
+                          <h4 className="truncate text-xs font-medium text-[var(--text)]">audiocpp_server</h4>
+                          <p className="truncate text-[11px] text-[var(--quiet)]">
+                            audio.cpp · running
+                            {residentServers.audioStartedAt !== null && <ResidentFor startedAt={residentServers.audioStartedAt} />}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => { void stopAudioServer(); setServersMenuOpen(false); }}
+                          className="inline-flex min-h-7 shrink-0 items-center gap-1 rounded px-2 text-[11px] text-[var(--text)] hover:bg-[var(--raised)] hover:text-[var(--danger)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+                        >
+                          Stop
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </>,
+                document.body,
+              )}
+            </div>
+          )}
         </header>
         <ChatPage
           key="chat-page"
@@ -496,3 +656,4 @@ function AppShell() {
     </div>
   );
 }
+

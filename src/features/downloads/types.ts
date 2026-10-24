@@ -1,5 +1,5 @@
 /** The kinds of file the downloader installs. Mirrors `downloads::Kind`. */
-export type DownloadKind = "llama" | "tts" | "stt";
+export type DownloadKind = "llama" | "tts" | "stt" | "audio";
 
 /** One installable file, as `downloads_search` reports it. */
 export type DownloadFile = {

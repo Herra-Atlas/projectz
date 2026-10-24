@@ -15,6 +15,7 @@ import ModeSelector from "../../components/ModeSelector";
 import SelectionActions, { type SelectionAction } from "./SelectionActions";
 import { SpeechButton } from "./SpeechButton";
 import { useSpeech } from "../../features/tts/useSpeech";
+import type { TtsSettings } from "../../features/tts/types";
 import ToolApproval, { type PendingApproval } from "./ToolApproval";
 import ToolQuestion, { type PendingQuestion } from "./ToolQuestion";
 import TodoStrip, { type TodoEntry } from "./TodoStrip";
@@ -106,7 +107,7 @@ const MODEL_START_KEY = "local-model-start";
  */
 const localModelNames = new Map<string, string>();
 
-async function localModelName(id: string): Promise<string> {
+export async function localModelName(id: string): Promise<string> {
   const known = localModelNames.get(id);
   if (known) return known;
   try {
@@ -432,6 +433,9 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   // Read once on mount from the same SQLite records Settings writes, so the composer
   // matches the preferences without the settings modal having to push them down.
   const [showMetrics, setShowMetrics] = useState(true);
+  // Auto-speak is served by the same read-aloud path a press uses; the finished
+  // reply hands the event listener a ref because the listener registers once.
+  const autoSpeakReplyRef = useRef<(text: string) => Promise<void> | null>(null);
   const [sendKey, setSendKey] = useState<"Enter" | "Ctrl + Enter">("Enter");
   // The empty screen greets by name when one was given; "" keeps the greeting's own wording.
   const [userName, setUserName] = useState("");
@@ -1255,6 +1259,10 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           // the ring reads from here on. Keeping the live one would leave the two
           // disagreeing for a frame.
           setLivePromptTokens(null);
+          // Auto-speak reads only what landed here: a background run's reply
+          // belongs to another conversation, and a voice speaking it would be
+          // narrating a page the reader is not looking at.
+          void autoSpeakReplyRef.current?.(response)?.catch(() => undefined);
         }
         drainQueued(run.sessionId, next);
       } else if (payload.kind === "stopped") {
@@ -1882,6 +1890,28 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   // disables the button instead of failing on the press. A failure here is the
   // synthesis, not the player -- the reason piper gave is what is worth showing.
   const speech = useSpeech((message) => onNotify("error", message));
+
+  /**
+   * Reads a reply that just finished, when auto-speak asks for it.
+   *
+   * The settings are read per reply rather than held: the toggle lives behind
+   * Settings, and a record read over one finished reply is exact in a way a
+   * mount-time copy never is. `only_loaded` is the cold-start rule: a voice
+   * whose engine is down waits, rather than spinning weights up in the reader's
+   * back -- unless the switch says it may.
+   */
+  const autoSpeakReply = async (text: string) => {
+    if (!text.trim()) return;
+    const tts = await invoke<TtsSettings>("tts_settings").catch(() => null);
+    if (!tts?.autoSpeak) return;
+    if (tts.autoSpeakOnlyLoaded) {
+      const warm = await invoke<boolean>("tts_voice_warm").catch(() => false);
+      if (!warm) return;
+    }
+    // A key no press can be on, so the read-aloud guard treats it as its own.
+    speech.toggle(`auto-${Date.now()}`, text);
+  };
+  autoSpeakReplyRef.current = autoSpeakReply;
 
   // Dictation appends rather than replaces: a dictated sentence is usually the
   // start of a message the user was already typing.

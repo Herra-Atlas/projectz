@@ -145,7 +145,10 @@ export function SpeechToTextList({
               <div className="min-w-0 flex-1">
                 <h4 className="truncate text-xs font-medium text-[var(--muted)]">{model.name}</h4>
                 <p className="truncate text-[11px] text-[var(--quiet)]">
-                  {model.parakeet ? "Parakeet" : "Whisper"} · {formatBytes(model.size)}
+                  {model.audio
+                    ? `audio.cpp · ${model.family !== "" ? model.family.replace(/_/g, " ") : "unknown"}`
+                    : model.parakeet ? "Parakeet" : "Whisper"}{" "}
+                  · {formatBytes(model.size)}
                 </p>
               </div>
               {model.path === active && <Check size={14} className="shrink-0 text-[var(--accent)]" />}

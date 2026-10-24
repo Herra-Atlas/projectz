@@ -24,7 +24,6 @@ export default function TerminalTab({ sessions, activeId, workspace, loadedModel
   const scrollRef = useRef<HTMLDivElement>(null);
   const serverId = loadedModelId ?? loadingModelId;
   const active = sessions.find((session) => session.id === activeId);
-  const serverRunning = Boolean(serverId);
 
   useEffect(() => {
     let activeListener = true;
@@ -44,7 +43,11 @@ export default function TerminalTab({ sessions, activeId, workspace, loadedModel
   useEffect(() => {
     if (!serverId) return;
     let mounted = true;
-    void invoke<string[]>("local_model_logs").then((lines) => {
+    // The audio.cpp server answers its own command; llama keeps its own. The
+    // listener above is shared, so lines from either server land on the same
+    // map keyed by the id the session carries.
+    const head = serverId === "audiocpp" ? "audio_logs" : "local_model_logs";
+    void invoke<string[]>(head).then((lines) => {
       if (mounted) setLogs((current) => ({ ...current, [serverId]: lines.slice(-MAX_LINES) }));
     }).catch(() => undefined);
     return () => { mounted = false; };
@@ -77,13 +80,15 @@ export default function TerminalTab({ sessions, activeId, workspace, loadedModel
         {sessions.map((session) => (
           <div key={session.id} className={`group flex shrink-0 items-center gap-1 rounded px-2 py-1 text-xs ${session.id === activeId ? "bg-[var(--raised)] text-[var(--text)]" : "text-[var(--muted)]"}`}>
             <button type="button" onClick={() => onSelect(session.id)} className="truncate" title={session.title}>{session.title}</button>
+            {/* A server row closes for real: its close stops the process first
+                (in the panel, which owns the stop), so the × is never disabled.
+                Closing a dead row is just removing its last output. */}
             <button
               type="button"
               onClick={() => onClose(session.id)}
-              disabled={session.kind === "server" && serverRunning}
               aria-label={`Close ${session.title}`}
-              title={session.kind === "server" && serverRunning ? "Unload the local model before closing its logs" : `Close ${session.title}`}
-              className="rounded p-0.5 text-[var(--quiet)] opacity-0 hover:bg-[var(--line)] hover:text-[var(--text)] disabled:cursor-not-allowed disabled:opacity-40 group-hover:opacity-100 disabled:group-hover:opacity-40"
+              title={session.kind === "server" ? `Stop ${session.title} and close` : `Close ${session.title}`}
+              className="rounded p-0.5 text-[var(--quiet)] opacity-0 hover:bg-[var(--line)] hover:text-[var(--text)] group-hover:opacity-100"
             >×</button>
           </div>
         ))}
@@ -92,7 +97,7 @@ export default function TerminalTab({ sessions, activeId, workspace, loadedModel
       {active?.kind === "server" ? (
         <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto bg-[var(--page)] p-3 font-mono text-[11px] leading-5 text-[var(--text)]">
           {(logs[active.id] ?? []).map((line, index) => <div key={`${index}-${line}`} className="whitespace-pre-wrap break-all">{line}</div>)}
-          {!(logs[active.id]?.length) && <p className="text-[var(--quiet)]">Waiting for llama-server output…</p>}
+          {!(logs[active.id]?.length) && <p className="text-[var(--quiet)]">{active.id === "audiocpp" ? "Waiting for the audio engine…" : "Waiting for llama-server output…"}</p>}
         </div>
       ) : active ? (
         <>

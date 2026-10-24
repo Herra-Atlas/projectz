@@ -16,7 +16,10 @@ import type { SettingsPage } from "./settingsPages";
  * none can be named by a search result and none is a page the index lists. `form`
  * stays: opening it blank is exactly what "Add provider" means.
  */
-export type SettingsView = Exclude<SettingsPage["view"], "model" | "skill" | "download" | "ttsVoice" | "sttModel">;
+export type SettingsView = Exclude<
+  SettingsPage["view"],
+  "model" | "skill" | "download" | "ttsVoice" | "sttModel" | "audioModel"
+>;
 
 /**
  * One findable row, as search sees it.
@@ -374,6 +377,43 @@ const PAGES: IndexPage[] = [
         label: "Skip code blocks",
         keywords: ["code", "spoken", "read aloud", "inline code"],
       },
+      {
+        anchor: "tts.skipMarkdown",
+        label: "Skip markdown syntax",
+        keywords: ["markdown", "asterisk", "symbols", "hash", "read aloud", "text to speech"],
+      },
+      {
+        anchor: "tts.autoSpeak",
+        label: "Auto speak next messages",
+        keywords: ["auto speak", "automatic", "read aloud", "read replies", "text to speech"],
+      },
+      {
+        anchor: "tts.autoSpeakOnlyLoaded",
+        label: "Auto speak — only if the voice is already ready",
+        keywords: ["auto speak", "loaded", "cold start", "warm", "text to speech"],
+      },
+    ],
+  },
+  {
+    view: "audio",
+    name: "Audio engine",
+    entries: [
+      {
+        anchor: "audio.engine",
+        label: "Audio engine",
+        keywords: ["audio.cpp", "engine", "vulkan", "install", "uninstall", "kokoro", "qwen3", "server", "amd", "whisper", "piper"],
+      },
+      { anchor: "audio.server", label: "Engine server", keywords: ["start", "stop", "server", "running", "audio.cpp"] },
+    ],
+  },
+  {
+    view: "audioModels",
+    name: "Audio models",
+    entries: [
+      {
+        anchor: "audio.models",
+        label: "Audio models",
+        keywords: ["audio model", "gguf", "kokoro", "download", "voice", "transcribe", "parakeet", "options"] },
     ],
   },
 ];

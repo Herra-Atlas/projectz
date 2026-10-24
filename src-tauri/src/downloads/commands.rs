@@ -104,6 +104,13 @@ pub async fn downloads_search(kind: Kind, query: String) -> Result<Vec<DownloadF
             });
             rows
         }
+        // One repository tree, the way the Piper voices are: audio.cpp publishes
+        // every ready-to-run package under one account, and each family's file
+        // name carries the family.
+        Kind::Audio => {
+            let tree = client::tree(client.http(), catalog::AUDIO_REPO).await?;
+            catalog::audio_packages(catalog::AUDIO_REPO, &tree, &query)
+        }
     };
     files.truncate(MAX_ROWS);
     Ok(files)
@@ -134,6 +141,21 @@ pub async fn downloads_installed(kind: Kind) -> Result<Vec<InstalledFile>, Strin
     Ok(found)
 }
 
+/// The repository a search row names, recovered from the folder it was installed
+/// under.
+///
+/// Flattened kinds install under `{owner}__{repo}` -- the joiner kinds.rs chose
+/// because no repository name can contain it -- so the search-side key
+/// (`owner/repo/name`) can be rebuilt exactly. Without this, a Piper voice, a
+/// whisper model or an audio.cpp package that *is* on disk never matched the
+/// row that offered it, and the page offered the same file again.
+fn unslug_repo(folder: &str) -> String {
+    match folder.split_once("__") {
+        Some((owner, repo)) => format!("{owner}/{repo}"),
+        None => folder.to_string(),
+    }
+}
+
 fn collect(directory: &std::path::Path, kind: Kind, found: &mut Vec<InstalledFile>) {
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
@@ -162,8 +184,8 @@ fn collect(directory: &std::path::Path, kind: Kind, found: &mut Vec<InstalledFil
             .parent()
             .and_then(|parent| parent.file_name())
             .and_then(|name| name.to_str())
-            .unwrap_or_default()
-            .to_string();
+            .map(unslug_repo)
+            .unwrap_or_default();
         found.push(InstalledFile {
             name,
             repo,

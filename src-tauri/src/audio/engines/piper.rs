@@ -1,17 +1,18 @@
-//! The whisper.cpp engine, installed from this project's own build release.
+//! The Piper engine, installed from its pinned release.
 //!
-//! # Why a download rather than a bundled binary
+//! # Why a download rather than bundled
 //!
-//! 16 MB packed, 47 MB unpacked, and most of it is the Vulkan backend. Bundling
-//! it would put that in every install, including the machines that never turn
-//! speech on -- so the Local page offers it instead, exactly as it offers a
-//! llama.cpp engine.
+//! `voice/` was "placed by the build" until the pages wanted installs and
+//! uninstalls, which means it had to become a fact on disk the user controls
+//! like every other engine. Piper's releases carry no per-asset digest, so the
+//! verification is the whisper model again: one tag, one asset, one SHA-256
+//! written here and never taken from "whatever is latest".
 //!
-//! # Why the tag, name and digest are constants
+//! # Why the constants are checked together
 //!
-//! This is a verified install: one release, one asset, one SHA-256. A new build
-//! replaces these four values together; nothing trusts "whatever the latest
-//! release happens to be".
+//! A new build replaces all five values as one edit, so a release that changed
+//! its packaging (a different root folder, a second exe) cannot fail only at
+//! the hash check while claiming the layout above.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -21,56 +22,35 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter};
 use zip::ZipArchive;
 
-use crate::app_paths::data_root;
-
 /// The release this app installs, and the name it shows.
-pub const RELEASE_TAG: &str = "whisper-vulkan-b5454";
+pub const RELEASE_TAG: &str = "2023.11.14-2";
+/// The binary the TTS path runs.
+pub const PIPER_EXE: &str = "piper.exe";
 
-/// What the engine can be asked to run. It comes from the same archive as
-/// `parakeet-cli.exe`, which the transcription step will use for Parakeet models.
-pub const WHISPER_EXE: &str = "whisper-cli.exe";
-
-/// Parakeet models are read by their own executable, shipped in the same archive.
-pub const PARAKEET_EXE: &str = "parakeet-cli.exe";
-
-const ASSET: &str = "whisper-vulkan-b5454.zip";
-const ASSET_URL: &str = "https://github.com/Herra-Atlas/vulkan-builds/releases/download/whisper-vulkan-b5454/whisper-vulkan-b5454.zip";
-const ASSET_SHA256: &str = "ee21a1617bbc54a325c0b3978f9abeadf9c521f88c7325c86ee56ea32cfe4f41";
+const ASSET: &str = "piper_windows_amd64.zip";
+const ASSET_URL: &str =
+    "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_windows_amd64.zip";
+const ASSET_SHA256: &str = "f3c58906402b24f3a96d92145f58acba6d86c9b5db896d207f78dc80811efcea";
 /// The packed size, used only to refuse an archive that is obviously not this one.
-const ASSET_BYTES: u64 = 16_105_093;
+const ASSET_BYTES: u64 = 22_477_236;
 
-/// Guards on unpacking. The real archive holds a dozen files and 47 MB; these
-/// exist so a replaced asset cannot fill the disk.
+/// Guards on unpacking: the real archive is 363 entries and 39 MB unpacked; a
+/// replaced asset cannot fill a disk through this path.
 const MAX_EXTRACTED_BYTES: u64 = 256 * 1024 * 1024;
-const MAX_FILES: usize = 256;
+const MAX_FILES: usize = 1024;
 
-/// Where the engine lives, named after the release -- the same shape the
-/// llama.cpp engines use, so a second build lands beside this one rather than
-/// overwriting it.
+/// Where the engine lives. `voice/piper` is the root the synthesis path already
+/// names, so an install places it exactly where `piper::resolve_voice` looks.
 pub fn install_dir() -> PathBuf {
-    data_root().join("engines").join(RELEASE_TAG)
+    crate::app_paths::voice_root().join("piper")
 }
 
-/// One of the engine's executables, if the install is complete.
-pub fn executable(name: &str) -> Option<PathBuf> {
-    let path = install_dir().join(name);
-    path.is_file().then_some(path)
-}
-
-/// Whether the engine is unpacked and runnable.
+/// Whether the install is complete enough to speak.
 pub fn is_installed() -> bool {
-    executable(WHISPER_EXE).is_some()
+    install_dir().join(PIPER_EXE).is_file()
 }
 
-/// What the installing row is told while the archive arrives.
-#[derive(Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Progress {
-    pub received: u64,
-    pub total: Option<u64>,
-}
-
-/// Downloads and unpacks the engine.
+/// Downloads, verifies and unpacks the engine.
 ///
 /// Returns at once when it is already installed, so the button can be pressed
 /// twice without costing a second download.
@@ -96,19 +76,53 @@ pub async fn install(app: &AppHandle) -> Result<(), String> {
         let _ = std::fs::remove_dir_all(&staging);
         return Err(error);
     }
-    if let Err(error) = unpack(&staging, &destination) {
+    let unpack_to = staging.join("files");
+    if let Err(error) = unpack(&staging, &unpack_to) {
         let _ = std::fs::remove_dir_all(&destination);
         return Err(error);
     }
-    // The unpacked copy is what matters; the archive has done its job.
+    // The archive's own shape is a root folder (`piper/`), and the install root
+    // is named already: the folder inside the archive is what moves in.
+    let source = find_root(&unpack_to)?;
+    for entry in std::fs::read_dir(&source)
+        .map_err(|error| format!("Could not read the unpacked engine: {error}"))?
+    {
+        let entry =
+            entry.map_err(|error| format!("Could not read the unpacked engine: {error}"))?;
+        std::fs::rename(entry.path(), destination.join(entry.file_name()))
+            .map_err(|error| format!("Could not place {}: {error}", entry.path().display()))?;
+    }
     let _ = std::fs::remove_dir_all(&staging);
 
     if !is_installed() {
+        let _ = std::fs::remove_dir_all(&destination);
         return Err(format!(
-            "The engine was unpacked but {WHISPER_EXE} is not in it."
+            "The engine was unpacked but {PIPER_EXE} is not in it."
         ));
     }
     Ok(())
+}
+
+/// Removes the engine, refusing while voices can still use it.
+///
+/// A voice for which the runtime is gone fails at speak time with a message
+/// about an engine rather than about the delete that caused it, so the delete
+/// is what refuses first.
+pub fn uninstall() -> Result<(), String> {
+    // Only Piper voices tell the engine apart from audio.cpp ones: an audio.cpp
+    // voice does not need this folder, and its files are not a reason to refuse.
+    if crate::audio::tts::voices::piper_voices_installed() {
+        return Err(
+            "Piper voices are installed. Delete them from the Text to speech page first."
+                .to_string(),
+        );
+    }
+    let directory = install_dir();
+    if !directory.exists() {
+        return Err("Piper is not installed.".to_string());
+    }
+    std::fs::remove_dir_all(&directory)
+        .map_err(|error| format!("Piper could not be removed: {error}"))
 }
 
 /// Streams the archive into `staging`, hashing as it goes.
@@ -126,10 +140,10 @@ async fn fetch(app: &AppHandle, staging: &Path) -> Result<(), String> {
         .get(ASSET_URL)
         .send()
         .await
-        .map_err(|error| format!("Could not download the speech engine: {error}"))?;
+        .map_err(|error| format!("Could not download the voice engine: {error}"))?;
     if !response.status().is_success() {
         return Err(format!(
-            "Could not download the speech engine: GitHub answered {}",
+            "Could not download the voice engine: GitHub answered {}",
             response.status().as_u16()
         ));
     }
@@ -151,7 +165,10 @@ async fn fetch(app: &AppHandle, staging: &Path) -> Result<(), String> {
             .map_err(|error| format!("Could not write the engine: {error}"))?;
         hasher.update(&chunk);
         received += chunk.len() as u64;
-        let _ = app.emit("stt-progress", Progress { received, total });
+        let _ = app.emit(
+            "audio-engine-progress",
+            serde_json::json!({ "id": "piper", "downloaded": received, "total": total }),
+        );
     }
     archive
         .flush()
@@ -163,14 +180,14 @@ async fn fetch(app: &AppHandle, staging: &Path) -> Result<(), String> {
     // that as a mismatch without saying why.
     if received < ASSET_BYTES / 2 {
         return Err(format!(
-            "The speech engine download looks incomplete ({received} bytes)."
+            "The voice engine download looks incomplete ({received} bytes)."
         ));
     }
 
     let digest = format!("{:x}", hasher.finalize());
     if digest != ASSET_SHA256 {
         return Err(
-            "The speech engine did not match its published checksum, so it was not installed."
+            "The voice engine did not match its published checksum, so it was not installed."
                 .to_string(),
         );
     }
@@ -184,7 +201,7 @@ fn unpack(staging: &Path, destination: &Path) -> Result<(), String> {
     let mut zip = ZipArchive::new(archive)
         .map_err(|error| format!("The downloaded engine is not a readable archive: {error}"))?;
     if zip.len() > MAX_FILES {
-        return Err("The speech engine archive has more files than expected.".to_string());
+        return Err("The voice engine archive has more files than expected.".to_string());
     }
 
     std::fs::create_dir_all(destination)
@@ -209,7 +226,7 @@ fn unpack(staging: &Path, destination: &Path) -> Result<(), String> {
         }
         written += entry.size();
         if written > MAX_EXTRACTED_BYTES {
-            return Err("The speech engine archive is larger than expected.".to_string());
+            return Err("The voice engine archive is larger than expected.".to_string());
         }
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)
@@ -223,29 +240,15 @@ fn unpack(staging: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// How many recognition models are installed.
-pub fn installed_models() -> usize {
-    let mut found = 0;
-    count_models(&crate::app_paths::models_root().join("stt"), &mut found);
-    found
-}
-
-fn count_models(directory: &Path, found: &mut usize) {
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return;
-    };
+/// The single top-level folder the archive carries, which is where its files
+/// sit for the move into the install root.
+fn find_root(unpacked: &Path) -> Result<PathBuf, String> {
+    let entries = std::fs::read_dir(unpacked)
+        .map_err(|error| format!("Could not read the unpacked engine: {error}"))?;
     for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            count_models(&path, found);
-            continue;
-        }
-        if path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("bin"))
-        {
-            *found += 1;
+        if entry.path().is_dir() {
+            return Ok(entry.path());
         }
     }
+    Ok(unpacked.to_path_buf())
 }

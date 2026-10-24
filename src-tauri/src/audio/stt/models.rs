@@ -1,18 +1,25 @@
 //! The recognition models on disk, and which one transcribes.
 //!
-//! A model is one `ggml-*.bin` file. Whisper models come from
-//! `ggerganov/whisper.cpp` and Parakeet ones from `ggml-org/parakeet-GGUF`; the
-//! two are read by different executables in the same engine install, which is
-//! why the model -- not the engine -- is what the user chooses.
+//! A whisper.cpp model is one `ggml-*.bin` file, and audio.cpp's models are
+//! gguf packages under `models/audio`: two folders, one registry. `resolve`
+//! walks both, prefers the whisper.cpp folder because that is the engine this
+//! app shipped with, and answers a `Selected` that says which engine the file
+//! belongs to -- which is the only caller that ever needs to know.
+//!
+//! Whisper models come from `ggerganov/whisper.cpp` and Parakeet ones from
+//! `ggml-org/parakeet-GGUF`; the two are read by different executables in the
+//! same engine install, which is why the model -- not the engine -- is what the
+//! user chooses.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::app_paths::models_root;
+use crate::audio::audiocpp::families;
 use crate::database::Database;
 
-use super::engine::{PARAKEET_EXE, WHISPER_EXE};
+use crate::audio::engines::whisper::{PARAKEET_EXE, WHISPER_EXE};
 
 /// The settings key, beside `app.tts`.
 const KEY: &str = "app.stt";
@@ -102,20 +109,58 @@ pub fn list() -> Vec<Model> {
     found
 }
 
+/// The model a recording should be transcribed with, whichever engine owns it.
+///
+/// The stored path is the primary answer; the whisper.cpp folder is the
+/// fallback, then the audio.cpp folder -- so a user who has only ever installed
+/// a whisper model resolves exactly as before, and the audio engine only ever
+/// answers when there is nothing else installed from the one this app shipped
+/// with.
+pub enum Selected {
+    /// whisper.cpp (or its Parakeet port), via the pinned build's CLI.
+    WhisperFile(Model),
+    /// audio.cpp's server, one family and one file.
+    Audiocpp(families::Model),
+}
+
+impl Selected {
+    pub fn path(&self) -> String {
+        match self {
+            Self::WhisperFile(model) => model.path.clone(),
+            Self::Audiocpp(model) => model.path.display().to_string(),
+        }
+    }
+}
+
 /// The model a recording should be transcribed with.
 ///
 /// Falls back to the first installed model when the stored choice is gone -- a
 /// deleted model should not leave the microphone pointing at nothing.
-pub fn resolve(settings: &SttSettings) -> Result<Model, String> {
-    let models = list();
+pub fn resolve(settings: &SttSettings) -> Result<Selected, String> {
+    let whisper_models = list();
+    let audio_models = super::audiocpp::models();
     if let Some(chosen) = settings.model.as_deref() {
-        if let Some(found) = models.iter().find(|model| model.path == chosen) {
-            return Ok(found.clone());
+        if super::audiocpp::owns_path(chosen) {
+            if let Some(found) = audio_models
+                .iter()
+                .find(|model| model.path.display().to_string() == chosen)
+            {
+                return Ok(Selected::Audiocpp(found.clone()));
+            }
+        } else if let Some(found) = whisper_models.iter().find(|model| model.path == chosen) {
+            return Ok(Selected::WhisperFile(found.clone()));
         }
     }
-    models.into_iter().next().ok_or_else(|| {
-        "No recognition model is installed. Download one from Settings > Local.".to_string()
-    })
+    if let Some(first) = whisper_models.into_iter().next() {
+        return Ok(Selected::WhisperFile(first));
+    }
+    // No whisper model installed, or the audio engine's are the only ones:
+    // either way this is the honest next answer rather than a second error
+    // message about an engine the user never asked for.
+    if let Some(first) = audio_models.into_iter().next() {
+        return Ok(Selected::Audiocpp(first));
+    }
+    Err("No recognition model is installed. Download one from Settings > Voice.".to_string())
 }
 
 fn walk(directory: &Path, found: &mut Vec<Model>) {

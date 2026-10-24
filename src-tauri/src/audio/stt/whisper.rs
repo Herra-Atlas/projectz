@@ -17,8 +17,8 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use super::capture::SAMPLE_RATE;
-use super::engine;
-use super::model::Model;
+use super::models::Model;
+use crate::audio::engines::whisper as engine;
 
 /// Transcribes one recording with the model the user chose.
 ///
@@ -90,7 +90,10 @@ fn threads() -> usize {
 }
 
 /// 16-bit mono PCM at the engine's rate, in a 44-byte RIFF header.
-fn write_wav(samples: &[i16]) -> Result<PathBuf, String> {
+///
+/// Public because the audio.cpp path hands the same file to its server over
+/// HTTP: one recording, one WAV, whichever engine takes it.
+pub fn write_wav(samples: &[i16]) -> Result<PathBuf, String> {
     let path = std::env::temp_dir().join(format!("projectz-{}.wav", uuid::Uuid::new_v4()));
     let data_len = (samples.len() * 2) as u32;
     let mut bytes = Vec::with_capacity(44 + samples.len() * 2);

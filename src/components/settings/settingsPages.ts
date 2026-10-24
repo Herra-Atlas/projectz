@@ -21,6 +21,15 @@ export type SettingsPage =
      and its own installs. */
   | { view: "stt" }
   | { view: "tts" }
+  /* The audio.cpp engine, beside the two native ones: a second voice set and a
+     second recognition set, installed the way the llama.cpp engines are. */
+  | { view: "audio" }
+  /* Audio.cpp's models, reached from the engine page: they serve both speech
+     and recognition, so they belong to neither of the two lists. */
+  | { view: "audioModels" }
+  /* One audio.cpp model's options, carried by its model path and named by its
+     family's spec. */
+  | { view: "audioModel"; model: string }
   | { view: "general" }
   | { view: "appearance" }
   | { view: "assist" }

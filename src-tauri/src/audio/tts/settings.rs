@@ -40,6 +40,17 @@ pub struct TtsSettings {
     /// mostly not worth hearing, and the one time it is, the switch is right here.
     #[serde(default = "yes")]
     pub skip_code: bool,
+    /// Leave markdown markup out of what is spoken, so the voice reads what the
+    /// reader sees -- the words, not the `**` and `#` that styled them.
+    #[serde(default = "yes")]
+    pub skip_markdown: bool,
+    /// The selected voice reads replies as they finish, without being pressed.
+    #[serde(default)]
+    pub auto_speak: bool,
+    /// The auto-speak caveat: keep a voice that would need a cold start waiting
+    /// rather than starting one in the reader's back. Off, the voice may load.
+    #[serde(default = "yes")]
+    pub auto_speak_only_loaded: bool,
     /// Written by the first version of this record, when there was one pace for
     /// every voice. Folded into `speeds` on load and never written again.
     #[serde(default, rename = "speed", skip_serializing)]
@@ -52,6 +63,9 @@ impl Default for TtsSettings {
             voice: None,
             speeds: BTreeMap::new(),
             skip_code: true,
+            skip_markdown: true,
+            auto_speak: false,
+            auto_speak_only_loaded: true,
             legacy_speed: None,
         }
     }
@@ -142,6 +156,12 @@ pub struct TtsSettingsView {
     pub max_speed: f32,
     /// Whether code is left out of what is spoken.
     pub skip_code: bool,
+    /// Whether markdown markup is left out of what is spoken.
+    pub skip_markdown: bool,
+    /// Whether replies are read as they finish.
+    pub auto_speak: bool,
+    /// Whether the auto read waits for an already-warm voice.
+    pub auto_speak_only_loaded: bool,
 }
 
 impl TtsSettingsView {
@@ -152,6 +172,9 @@ impl TtsSettingsView {
             min_speed: MIN_SPEED,
             max_speed: MAX_SPEED,
             skip_code: settings.skip_code,
+            skip_markdown: settings.skip_markdown,
+            auto_speak: settings.auto_speak,
+            auto_speak_only_loaded: settings.auto_speak_only_loaded,
         }
     }
 }

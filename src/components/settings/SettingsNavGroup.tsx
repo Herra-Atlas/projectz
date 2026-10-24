@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 
 /**
@@ -22,10 +22,22 @@ export function SettingsNavGroup({
   anyActive: boolean;
   children: ReactNode;
 }) {
-  // Open by default: the sidebar is short enough that showing the children costs
-  // nothing, and a group a reader has never used hidden behind its own chevron
-  // is a section they may never find.
-  const [open, setOpen] = useState(true);
+  // Closed when the modal opens: the whole rail folds to its parents, which is
+  // what a list of sections reads as. A child reached from *outside* the rail
+  // (a search result, a gear somewhere) opens its group on arrival -- the page
+  // being visible is the proof the reader is there, and a closed group that
+  // hides what a jump just requested is a wrong turn the rail cannot take back.
+  const [open, setOpen] = useState(false);
+  const everActive = useRef(false);
+  useEffect(() => {
+    if (!anyActive) {
+      everActive.current = false;
+      return;
+    }
+    if (everActive.current) return;
+    everActive.current = true;
+    setOpen(true);
+  }, [anyActive]);
   return (
     <div>
       <button

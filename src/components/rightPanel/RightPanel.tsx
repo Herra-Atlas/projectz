@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { PanelRightClose } from "lucide-react";
 import PanelTabs from "./PanelTabs";
 import RightPanelEmpty from "./RightPanelEmpty";
@@ -191,7 +192,6 @@ export default function RightPanel({ open, width, workspace, sessionId = null, l
     closeTerminalSession, closeAll: closeAllViews, ensureServerSession,
   } = usePanelViews();
   const serverModelId = loadedModelId ?? loadingModelId;
-  const serverRunning = Boolean(serverModelId);
   // A file:// URL asked for by the Files view. Object rather than a bare string
   // so opening the same file twice still re-navigates -- the nonce changes.
   const [browserRequest, setBrowserRequest] = useState<{ url: string; nonce: number } | null>(null);
@@ -218,19 +218,98 @@ export default function RightPanel({ open, width, workspace, sessionId = null, l
     onOpen();
   }, [serverModelId, ensureServerSession, openView, onOpen]);
 
+  // The audio.cpp server, learned the same way the llama server is -- from a
+  // prop-like source that answers on mount. It is in-module state rather than an
+  // `App` prop because the audio server starts itself wherever a voice runs, and
+  // threading one more piece through `App` buys nothing the event cannot carry.
+  const [audioRunning, setAudioRunning] = useState(false);
+  const audioRunningRef = useRef(false);
+
+  // The mount probe is what makes a session survive a closed panel: the start
+  // event fired while this component was still mounted, but the *panel* was
+  // closed, and on reopen nothing would otherwise re-ensure the audiocpp
+  // session. Asking the backend once per mount covers every reopen.
+  useEffect(() => {
+    let live = true;
+    void invoke<{ running: boolean }>("audio_status")
+      .then((status) => {
+        if (!live) return;
+        setAudioRunning(status.running);
+        if (status.running) {
+          audioRunningRef.current = true;
+          ensureServerSession("audiocpp", "audiocpp_server · audio.cpp");
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [ensureServerSession]);
+
+  useEffect(() => {
+    let live = true;
+    const unlisten = listen<{ running: boolean }>("audio-server-state", ({ payload }) => {
+      if (!live || payload.running === audioRunningRef.current) return;
+      audioRunningRef.current = payload.running;
+      setAudioRunning(payload.running);
+      if (payload.running) {
+        ensureServerSession("audiocpp", "audiocpp_server · audio.cpp");
+        openView("terminal");
+        onOpen();
+      }
+    });
+    return () => {
+      live = false;
+      void unlisten.then((stop) => stop());
+    };
+  }, [ensureServerSession, openView, onOpen]);
+
+  // A server terminal is pinned for as long as *any* server process answers:
+  // the llama one is a prop the app already tracks, the audio one is the state
+  // this module keeps. When both are down every session is closable, and the
+  // last one to close unpins the Terminal view with it.
+  const serverProcessesRunning = Boolean(serverModelId) || audioRunning;
+
+  /**
+   * Closing a server's terminal row stops the process it was showing.
+   *
+   * The row is the process's only on-screen identity, so its close is where
+   * the stop belongs -- a remote log with the process still running would be
+   * two answers to one question. Only a confirmed stop closes the session; a
+   * failed one is reported and the row stays so the user still sees the
+   * process's last words.
+   */
+  const handleCloseTerminal = useCallback((id: string) => {
+    const session = terminalSessions.find((entry) => entry.id === id);
+    if (!session) return;
+    if (session.kind !== "server") {
+      closeTerminalSession(id);
+      return;
+    }
+    const stopAndClose =
+      session.id === "audiocpp"
+        ? invoke("audio_stop")
+        : invoke("local_model_unload");
+    void Promise.resolve(stopAndClose)
+      .then(() => closeTerminalSession(id))
+      .catch((reason: unknown) =>
+        onNotify?.("error", `The server could not be stopped: ${String(reason)}`),
+      );
+    }, [terminalSessions, closeTerminalSession, onNotify]);
+
   const handleClosePanel = useCallback(() => {
-    closeAllViews(serverRunning);
+    closeAllViews();
     setBrowserRequest(null);
     onUrlRequestHandled?.();
     onRequestHandled?.();
     onClose();
     void invoke("panel_browser_close").catch(() => undefined);
-  }, [closeAllViews, serverRunning, onClose, onRequestHandled, onUrlRequestHandled]);
+  }, [closeAllViews, onClose, onRequestHandled, onUrlRequestHandled]);
 
   const handleCloseView = useCallback((view: PanelViewId) => {
-    if (view === "terminal" && serverRunning) return;
+    if (view === "terminal" && serverProcessesRunning) return;
     closeView(view);
-  }, [closeView, serverRunning]);
+  }, [closeView, serverProcessesRunning]);
 
   const handleNewTerminal = useCallback(() => {
     const id = crypto.randomUUID();
@@ -238,10 +317,6 @@ export default function RightPanel({ open, width, workspace, sessionId = null, l
     openView("terminal");
     onOpen();
   }, [openTerminalSession, openView, onOpen, terminalSessions]);
-
-  const handleCloseTerminal = useCallback((id: string) => {
-    closeTerminalSession(id, serverRunning);
-  }, [closeTerminalSession, serverRunning]);
 
   /**
    * Shows an HTML file in the Browser view.
@@ -369,7 +444,7 @@ export default function RightPanel({ open, width, workspace, sessionId = null, l
               onSelect={(view) => { setActiveView(view); setActiveTerminalId(null); }}
               onClose={handleCloseView}
               onNew={() => setActiveView(null)}
-              pinnedViews={serverRunning ? ["terminal"] : []}
+              pinnedViews={serverProcessesRunning ? ["terminal"] : []}
             />
             <button
               type="button"

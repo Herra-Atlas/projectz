@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open as openFile } from "@tauri-apps/plugin-dialog";
-import { ArrowLeft, AudioLines, BookMarked, Bot, Brain, ChevronDown, ChevronRight, CircleDot, Cpu, Download, GripVertical, Info, Lightbulb, Mic, MoveRight, Palette, Pencil, Plug, Plus, Scissors, Search, Server, Settings2, SlidersHorizontal, Smartphone, Sparkles, Trash2, Volume2, X, Zap } from "lucide-react";
+import { ArrowLeft, AudioLines, BookMarked, Bot, Brain, ChevronDown, ChevronRight, CircleDot, Cpu, Disc3, Download, GripVertical, Info, Lightbulb, Mic, MoveRight, Palette, Pencil, Plug, Plus, Scissors, Search, Server, Settings2, SlidersHorizontal, Smartphone, Sparkles, Trash2, Volume2, X, Zap } from "lucide-react";
 import { resolveTheme, type Appearance } from "../features/appearance/appearance";
 import AccentPicker from "./appearance/AccentPicker";
 import ThemePicker from "./appearance/ThemePicker";
@@ -22,6 +22,9 @@ import SettingsSearch, { pageForEntry } from "./settings/SettingsSearch";
 import { buildSettingsIndex, type SettingsEntry } from "./settings/settingsIndex";
 import { LocalAddMenu } from "./settings/local/LocalAddMenu";
 import { SpeechToTextPage } from "./settings/voice/SpeechToTextPage";
+import { AudioEnginePage } from "./settings/voice/AudioEnginePage";
+import { AudioModelsPage } from "./settings/voice/AudioModelsPage";
+import { AudioModelSettingsPage } from "./settings/voice/AudioModelSettingsPage";
 import { SttModelSettingsPage } from "./settings/voice/SttModelSettingsPage";
 import { SettingsNavGroup, navButtonClass } from "./settings/SettingsNavGroup";
 import { DownloadsPage } from "./settings/downloads/DownloadsPage";
@@ -770,20 +773,24 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
   // standing in for a list -- so the header treats them the same way. A download
   // returns to the page whose engine offered it: llama.cpp's models, or one of
   // the two voice pages.
-  const isSubPage = page.view === "form" || page.view === "model" || page.view === "skill" || page.view === "download" || page.view === "ttsVoice" || page.view === "sttModel";
+  const isSubPage = page.view === "form" || page.view === "model" || page.view === "skill" || page.view === "download" || page.view === "ttsVoice" || page.view === "sttModel" || page.view === "audioModel";
   const backTarget: SettingsPage =
     page.view === "model" ? { view: "local" }
       : page.view === "download"
-        ? page.kind === "stt" ? { view: "stt" } : page.kind === "tts" ? { view: "tts" } : { view: "local" }
+        ? page.kind === "stt" ? { view: "stt" } : page.kind === "tts" ? { view: "tts" } : page.kind === "audio" ? { view: "audioModels" } : { view: "local" }
       : page.view === "ttsVoice" ? { view: "tts" }
       : page.view === "sttModel" ? { view: "stt" }
+      : page.view === "audioModels" ? { view: "audio" }
+      : page.view === "audioModel" ? { view: "audioModels" }
       : page.view === "skill" ? { view: "skills" }
       : { view: "providers" };
   const backLabel =
     page.view === "model" ? "Back to local models"
-      : page.view === "download" ? (page.kind === "stt" ? "Back to speech to text" : page.kind === "tts" ? "Back to text to speech" : "Back to local models")
+      : page.view === "download" ? (page.kind === "stt" ? "Back to speech to text" : page.kind === "tts" ? "Back to text to speech" : page.kind === "audio" ? "Back to audio models" : "Back to local models")
       : page.view === "ttsVoice" ? "Back to text to speech"
       : page.view === "sttModel" ? "Back to speech to text"
+      : page.view === "audioModels" ? "Back to audio engine"
+      : page.view === "audioModel" ? "Back to audio models"
       : page.view === "skill" ? "Back to skills"
       : "Back to providers";
   // Held outside the JSX so the save callback can compare against it without
@@ -797,8 +804,8 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
     page.view === "providers" || page.view === "local" || page.view === "engines" || page.view === "model" ||
     (page.view === "download" && page.kind === "llama");
   const voiceGroupActive =
-    page.view === "stt" || page.view === "tts" || page.view === "sttModel" || page.view === "ttsVoice" ||
-    (page.view === "download" && (page.kind === "stt" || page.kind === "tts"));
+    page.view === "stt" || page.view === "tts" || page.view === "audio" || page.view === "sttModel" || page.view === "ttsVoice" || page.view === "audioModels" || page.view === "audioModel" ||
+    (page.view === "download" && (page.kind === "stt" || page.kind === "tts" || page.kind === "audio"));
   // The Model section's four pages tint its parent together: like Providers and
   // Voice, the group stays findable while any page it owns is showing, which is
   // what keeps a reader on the Context page from wondering which heading
@@ -871,6 +878,8 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
             <SettingsNavGroup label="Voice" icon={<AudioLines size={16} />} anyActive={voiceGroupActive}>
               <button type="button" data-settings-nav="stt" aria-label="Speech to text" onClick={() => setPage({ view: "stt" })} className={navButtonClass(page.view === "stt" || page.view === "sttModel", true)}><Mic size={14} />Speech to text</button>
               <button type="button" data-settings-nav="tts" aria-label="Text to speech" onClick={() => setPage({ view: "tts" })} className={navButtonClass(page.view === "tts" || page.view === "ttsVoice", true)}><Volume2 size={14} />Text to speech</button>
+              <button type="button" data-settings-nav="audio" aria-label="Audio engine" onClick={() => setPage({ view: "audio" })} className={navButtonClass(page.view === "audio", true)}><Disc3 size={14} />Audio engine</button>
+              <button type="button" data-settings-nav="audioModels" aria-label="audio.cpp models" onClick={() => setPage({ view: "audioModels" })} className={navButtonClass(page.view === "audioModels" || page.view === "audioModel", true)}><Server size={14} />audio.cpp</button>
             </SettingsNavGroup>
             {/* The conversation's own runtime, next to where its models are
                 chosen: what opens a chat (Main model), what delegations run on
@@ -1109,7 +1118,10 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
                 </div>}
               </>
               : page.view === "stt" ? <SpeechToTextPage onDownload={() => setPage({ view: "download", kind: "stt" })} onModelSettings={(model) => setPage({ view: "sttModel", model })} notify={notify} />
-              : page.view === "tts" ? <TextToSpeechPage onDownload={() => setPage({ view: "download", kind: "tts" })} onVoiceSettings={(voice) => setPage({ view: "ttsVoice", voice })} notify={notify} />
+              : page.view === "tts" ? <TextToSpeechPage onDownload={(engine) => setPage({ view: "download", kind: engine })} onVoiceSettings={(voice, engine) => setPage(engine === "audiocpp" ? { view: "audioModel", model: voice } : { view: "ttsVoice", voice })} notify={notify} />
+              : page.view === "audio" ? <AudioEnginePage notify={notify} />
+              : page.view === "audioModels" ? <AudioModelsPage onDownload={() => setPage({ view: "download", kind: "audio" })} onModelSettings={(model) => setPage({ view: "audioModel", model })} notify={notify} />
+              : page.view === "audioModel" ? <AudioModelSettingsPage modelPath={page.model} onBack={() => setPage({ view: "audioModels" })} notify={notify} />
               : page.view === "download" ? <DownloadPage kind={page.kind} notify={notify} onModelInstalled={() => void refreshLocalModels()} />
               : page.view === "ttsVoice" ? <TtsVoiceSettingsPage voice={page.voice} notify={notify} />
               : page.view === "sttModel" ? <SttModelSettingsPage model={page.model} notify={notify} />

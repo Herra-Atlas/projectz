@@ -85,7 +85,15 @@ export function useSpeech(onError: (message: string) => void): Speech {
             throw new Error(current.reason ?? "No voice is installed.");
           }
           const bytes = await invoke<ArrayBuffer>("tts_speak", { text });
-          playPcm(bytes, current.sampleRate, () => {
+          // An audio.cpp voice answers `0` until its first synthesis: the rate
+          // only exists once the engine has spoken. The synthesis above is that
+          // first synthesis, so one re-read lands the true figure — and for
+          // Piper the re-read is skipped, because nothing changed.
+          const rate =
+            current.sampleRate > 0
+              ? current.sampleRate
+              : (await invoke<VoiceInfo>("tts_voice")).sampleRate;
+          playPcm(bytes, rate, () => {
             activeKey.current = null;
             setSpeaking(null);
           });
