@@ -1,5 +1,6 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 /** One row of the workspace listing, as `panel_fs_list` returns it. */
 export type TreeEntry = {
@@ -32,6 +33,9 @@ export function parentOf(path: string): string {
   return slash === -1 ? "" : path.slice(0, slash);
 }
 
+/** The Files panel's realtime event, emitted by `panel/watch.rs`. Payload: `{ folders }`. */
+const WATCH_EVENT = "panel_fs_changed";
+
 /**
  * The absolute, on-disk path of a workspace-relative entry.
  *
@@ -60,11 +64,11 @@ export async function listFolder(relative: string): Promise<TreeEntry[]> {
  * costs no IPC. It is also what keeps a folder's rows mounted in a stable order
  * rather than re-appearing from a pending state on every expand.
  *
- * The cache is keyed by path and never invalidated, which is honest here: a tree
- * is a snapshot of a folder, and a file the agent writes afterwards is picked up
- * when the panel reopens or the user collapses and re-expands that folder. Adding
- * invalidation now would mean deciding when to drop it, and a wrong answer either
- * discards rows the user is reading or hides ones that just appeared.
+ * The cache is not invalidated wholesale. What keeps it honest is the watcher:
+ * the backend reports which folders' *listings* have changed, and every one this
+ * tree has already drawn is re-fetched by name (see the `panel_fs_changed`
+ * effect below). A folder it has never expanded costs nothing to leave cached,
+ * because expanding it always fetches.
  */
 export function useFileTree() {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
@@ -72,12 +76,22 @@ export function useFileTree() {
   const [root, setRoot] = useState<TreeEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loadingPath, setLoadingPath] = useState<string | null>(null);
+  /**
+   * The folders the cache holds, as a mirror the event handler can read without
+   * being a closure over state that has since changed.
+   *
+   * A ref rather than state because its one reader fires from the backend and
+   * needs the *current* truth, not the truth of the render that installed the
+   * listener; re-rendering on it would be work nothing depends on.
+   */
+  const loadedRef = useRef<Set<string>>(new Set());
 
   const load = useCallback(async (relative: string) => {
     setLoadingPath(relative);
     setError(null);
     try {
       const entries = await listFolder(relative);
+      loadedRef.current.add(relative);
       setChildrenByPath((current) => ({ ...current, [relative]: entries }));
       if (relative === "") {
         setRoot(entries);
@@ -85,6 +99,7 @@ export function useFileTree() {
       return entries;
     } catch (reason) {
       setError(String(reason));
+      loadedRef.current.delete(relative);
       return null;
     } finally {
       setLoadingPath(null);
@@ -140,12 +155,46 @@ export function useFileTree() {
    *
    * The `refreshKey` is bumped by the caller when it knows something changed --
    * a run finishing is the obvious case, since the agent writes files while the
-   * tree is open and the user cannot see that.
+   * tree is open and the user cannot see that. The mirror forgets with the
+   * cache: a folder the tree has dropped must not answer a later event, because
+   * there is nothing left to refresh.
    */
   const refresh = useCallback(async () => {
+    loadedRef.current = new Set();
     setChildrenByPath({});
     setRoot(null);
     await load("");
+  }, [load]);
+
+  /**
+   * Follows the disk while the tree is showing.
+   *
+   * The backend watches the workspace and emits `panel_fs_changed` with the
+   * folders whose listings changed (the root is `""`). Only folders this tree
+   * has already drawn are re-fetched: the rest is cache the user is not looking
+   * at, and expanding any folder always fetches fresh from disk anyway. The
+   * reload is by name, so every *other* folder keeps its open state and its
+   * rows exactly as they are.
+   *
+   * The listener lives with this hook rather than in `FilesTab` because the
+   * tree is the state it updates; where this hook is mounted decides whether
+   * the panel can hear the disk -- the Files view hides when the panel is
+   * switched, and a hidden view has nothing to keep current.
+   */
+  useEffect(() => {
+    let disposed = false;
+    void listen<{ folders: string[] }>(WATCH_EVENT, (event) => {
+      for (const folder of event.payload?.folders ?? []) {
+        // The root is always drawn, so it is always worth a re-read; a folder
+        // in the cache is drawn wherever it stands in the tree.
+        if (folder === "" || loadedRef.current.has(folder)) void load(folder);
+      }
+    }).then((off) => {
+      if (disposed) off();
+    });
+    return () => {
+      disposed = true;
+    };
   }, [load]);
 
   /**

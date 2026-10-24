@@ -414,7 +414,11 @@ impl LocalRuntimeSettings {
 pub fn quote_arguments(args: &[String]) -> String {
     args.iter()
         .map(|arg| {
-            if arg.is_empty() || arg.chars().any(|character| character.is_whitespace() || character == '"') {
+            if arg.is_empty()
+                || arg
+                    .chars()
+                    .any(|character| character.is_whitespace() || character == '"')
+            {
                 format!("\"{}\"", arg.replace('"', "\\\""))
             } else {
                 arg.clone()
@@ -430,41 +434,74 @@ pub const RESERVED_ARGUMENTS: [&str; 4] = ["--model", "--alias", "--host", "--po
 /// Splits a command line into arguments, honouring quotes.
 ///
 /// Only what a person types into one box: single and double quotes group a value
-/// with a space in it, and a backslash escapes the next character outside single
-/// quotes. Not a shell -- no variables, no globbing, no operators, because the
-/// string is arguments, not a script.
+/// with a space in it. Not a shell -- no variables, no globbing, no operators,
+/// because the string is arguments, not a script.
+///
+/// **A backslash is a path separator here, not an escape.** Windows paths are
+/// nothing but backslashes, so treating every one as an escape deleted them from
+/// both quoted and unquoted values -- `--model-draft "C:\Models\draft.gguf"`
+/// arrived at `llama-server` as `C:Modelsdraft.gguf`. A backslash now escapes
+/// only a character it could not otherwise be: the active quote, another
+/// backslash, or (outside quotes) whitespace. Every other one is kept verbatim.
 fn split_arguments(text: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut current = String::new();
     let mut quote: Option<char> = None;
-    let mut escaped = false;
     let mut started = false;
+    let mut characters = text.chars().peekable();
 
-    for character in text.chars() {
-        if escaped {
-            current.push(character);
-            escaped = false;
-            continue;
+    fn escaped_next(quote: Option<char>, next: char) -> bool {
+        match quote {
+            // Inside quotes only the quote itself needs an escape. A backslash
+            // before another backslash stays two, so a UNC path survives.
+            Some(open) => next == open,
+            // Outside quotes whitespace and either quote would end the token.
+            None => next.is_whitespace() || next == '"' || next == '\'',
         }
-        match (quote, character) {
-            (Some(open), close) if close == open => quote = None,
-            (Some(_), '\\') => escaped = true,
-            (Some(_), other) => current.push(other),
-            (None, '"') | (None, '\'') => {
-                quote = Some(character);
-                started = true;
-            }
-            (None, '\\') => escaped = true,
-            (None, character) if character.is_whitespace() => {
-                if started || !current.is_empty() {
-                    args.push(std::mem::take(&mut current));
-                    started = false;
+    }
+
+    while let Some(character) = characters.next() {
+        match quote {
+            Some(open) => {
+                if character == open {
+                    quote = None;
+                } else if character == '\\'
+                    && characters
+                        .peek()
+                        .is_some_and(|next| escaped_next(quote, *next))
+                {
+                    current.push(characters.next().unwrap_or_default());
+                } else {
+                    current.push(character);
                 }
             }
-            (None, other) => {
-                current.push(other);
-                started = true;
-            }
+            None => match character {
+                '"' | '\'' => {
+                    quote = Some(character);
+                    started = true;
+                }
+                '\\' => {
+                    if characters
+                        .peek()
+                        .is_some_and(|next| escaped_next(None, *next))
+                    {
+                        current.push(characters.next().unwrap_or_default());
+                    } else {
+                        current.push(character);
+                    }
+                    started = true;
+                }
+                other if other.is_whitespace() => {
+                    if started || !current.is_empty() {
+                        args.push(std::mem::take(&mut current));
+                        started = false;
+                    }
+                }
+                other => {
+                    current.push(other);
+                    started = true;
+                }
+            },
         }
     }
     if started || !current.is_empty() {
@@ -528,13 +565,19 @@ mod tests {
         settings.draft_model = Some("draft.gguf".to_string());
 
         let args = settings.to_args();
-        assert_eq!(followed(&args, "--chat-template").as_deref(), Some("chatml"));
+        assert_eq!(
+            followed(&args, "--chat-template").as_deref(),
+            Some("chatml")
+        );
         assert!(args.contains(&"--jinja".to_string()));
         assert!(args.contains(&"--mlock".to_string()));
         assert!(args.contains(&"--no-mmap".to_string()));
         assert_eq!(followed(&args, "--temp").as_deref(), Some("0.7"));
         assert_eq!(followed(&args, "-b").as_deref(), Some("2048"));
-        assert_eq!(followed(&args, "--model-draft").as_deref(), Some("draft.gguf"));
+        assert_eq!(
+            followed(&args, "--model-draft").as_deref(),
+            Some("draft.gguf")
+        );
     }
 
     #[test]
@@ -577,6 +620,45 @@ mod tests {
             "--jinja".to_string(),
         ];
         assert_eq!(split_arguments(&quote_arguments(&args)), args);
+    }
+
+    /// **A Windows path keeps its separators**, quoted or not.
+    ///
+    /// A backslash used to escape whatever followed it, so every path typed into
+    /// the custom list arrived at `llama-server` with its directories glued
+    /// together -- `C:\Models\draft.gguf` became `C:Modelsdraft.gguf`. The quotes
+    /// are the box's syntax; the backslashes are the path.
+    #[test]
+    fn a_windows_path_keeps_its_backslashes() {
+        assert_eq!(
+            split_arguments(r#"--model-draft "C:\Models\Qwen Draft\qwen.gguf" --threads 4"#),
+            vec![
+                "--model-draft",
+                r"C:\Models\Qwen Draft\qwen.gguf",
+                "--threads",
+                "4",
+            ]
+        );
+        assert_eq!(
+            split_arguments(r"--mmproj C:\models\mmproj.gguf"),
+            vec!["--mmproj", r"C:\models\mmproj.gguf"]
+        );
+        // A quoted path round-trips through the box without being rewritten.
+        let args = vec![
+            "--model-draft".to_string(),
+            r"C:\Models\Qwen Draft\qwen.gguf".to_string(),
+        ];
+        assert_eq!(split_arguments(&quote_arguments(&args)), args);
+    }
+
+    /// A quote can still be escaped inside a quoted value, which is the one thing
+    /// a backslash is for here.
+    #[test]
+    fn an_escaped_quote_is_unquoted() {
+        assert_eq!(
+            split_arguments(r#"--chat-template "say \"hello\"""#),
+            vec!["--chat-template", "say \"hello\""]
+        );
     }
 
     /// One slot means the context shown is the context each conversation gets.

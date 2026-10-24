@@ -88,9 +88,19 @@ pub async fn downloads_search(kind: Kind, query: String) -> Result<Vec<DownloadF
             // Whisper first: it is the smaller, English-capable default, and a
             // mixed list sorted by name would open on Parakeet.
             rows.sort_by(|left, right| {
-                let left_rank = if left.repo == catalog::WHISPER_REPO { 0 } else { 1 };
-                let right_rank = if right.repo == catalog::WHISPER_REPO { 0 } else { 1 };
-                left_rank.cmp(&right_rank).then_with(|| left.name.cmp(&right.name))
+                let left_rank = if left.repo == catalog::WHISPER_REPO {
+                    0
+                } else {
+                    1
+                };
+                let right_rank = if right.repo == catalog::WHISPER_REPO {
+                    0
+                } else {
+                    1
+                };
+                left_rank
+                    .cmp(&right_rank)
+                    .then_with(|| left.name.cmp(&right.name))
             });
             rows
         }
@@ -178,9 +188,24 @@ pub async fn downloads_start(
     let client = Client::new()?;
     let name = path.rsplit('/').next().unwrap_or(&path).to_string();
     let destination = kind.destination(&repo, &path);
-    let (id, flags) = jobs.add(kind, &repo, &path, &name, &destination.display().to_string());
+    let (id, flags) = jobs.add(
+        kind,
+        &repo,
+        &path,
+        &name,
+        &destination.display().to_string(),
+    );
     let _ = app.emit("downloads-state", jobs.list());
-    spawn(app, Arc::clone(&jobs), client.files().clone(), kind, repo, path, id.clone(), flags);
+    spawn(
+        app,
+        Arc::clone(&jobs),
+        client.files().clone(),
+        kind,
+        repo,
+        path,
+        id.clone(),
+        flags,
+    );
     Ok(id)
 }
 
@@ -201,7 +226,11 @@ pub fn downloads_pause(app: AppHandle, jobs: State<'_, Arc<Jobs>>, id: String) -
 
 /// Continues a paused download from the bytes already on disk.
 #[tauri::command]
-pub fn downloads_resume(app: AppHandle, jobs: State<'_, Arc<Jobs>>, id: String) -> Result<bool, String> {
+pub fn downloads_resume(
+    app: AppHandle,
+    jobs: State<'_, Arc<Jobs>>,
+    id: String,
+) -> Result<bool, String> {
     let Some(job) = jobs.resume(&id) else {
         return Ok(false);
     };
@@ -215,7 +244,11 @@ pub fn downloads_resume(app: AppHandle, jobs: State<'_, Arc<Jobs>>, id: String) 
         job.repo,
         job.path,
         job.id,
-        Arc::clone(&jobs.flags(&id).ok_or("The download is no longer in the list.")?),
+        Arc::clone(
+            &jobs
+                .flags(&id)
+                .ok_or("The download is no longer in the list.")?,
+        ),
     );
     Ok(true)
 }
@@ -298,7 +331,9 @@ fn spawn(
                 if kind == Kind::Llama {
                     use tauri::Manager;
                     let runtime = app.state::<crate::ai::runtime::AiRuntime>();
-                    let _ = runtime.local_models().add(destination.display().to_string());
+                    let _ = runtime
+                        .local_models()
+                        .add(destination.display().to_string());
                 }
                 let _ = app.emit("downloads-installed", kind);
             }

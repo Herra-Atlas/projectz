@@ -8,6 +8,7 @@ mod documents;
 mod downloads;
 mod jobs;
 mod mcp;
+mod messaging;
 mod observation;
 mod panel;
 mod skills;
@@ -166,6 +167,21 @@ pub fn run() {
             let taste = taste::Taste::new(std::sync::Arc::clone(&database));
             app.manage(taste.clone());
             taste.start(app.handle().clone(), runtime.clone());
+            // The messaging hub. Every channel's loop parks itself while its
+            // switch is off, so starting it here costs nothing until the user
+            // configures a token -- and a later save wakes it without a restart,
+            // which is why the hub is managed rather than owned by the loop.
+            let messaging = messaging::Messaging::new(
+                app.handle().clone(),
+                runtime.clone(),
+                std::sync::Arc::clone(&database),
+            );
+            app.manage(std::sync::Arc::clone(&messaging));
+            messaging.start();
+            // The Files panel's watcher. It points itself at whatever folder the
+            // tools are working in, and re-checks each turn of its loop, so a
+            // workspace opened after setup is picked up without a hook here.
+            panel::watch::start(app.handle().clone());
             app.manage(runtime);
             app.manage(scheduler);
             // Reaches the configured MCP servers once, in the background. Not
@@ -302,6 +318,7 @@ pub fn run() {
             commands::ai_chat,
             commands::ai_cancel_chat,
             commands::ai_compact_session,
+            commands::ai_recap_messages,
             commands::ai_set_run_permission,
             commands::ai_skip_local_reasoning,
             commands::ai_answer_approval,
@@ -312,13 +329,16 @@ pub fn run() {
             commands::assist_settings,
             commands::assist_save_settings,
             commands::assist_set_enabled,
+            commands::messaging_status,
+            commands::messaging_save_settings,
+            commands::messaging_set_enabled,
+            commands::messaging_save_channel,
             commands::taste_status,
             commands::taste_save_settings,
             commands::taste_run_now,
             commands::taste_runs,
             commands::taste_update_item,
             commands::taste_delete_item,
-            commands::taste_reset,
             commands::skills_list,
             commands::skills_enabled,
             commands::skills_get,

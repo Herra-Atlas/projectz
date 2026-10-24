@@ -87,8 +87,7 @@ pub fn remove(path: &str) -> Result<(), String> {
     if !file.is_file() {
         return Err("That model is already gone.".to_string());
     }
-    std::fs::remove_file(&file)
-        .map_err(|error| format!("The model could not be deleted: {error}"))
+    std::fs::remove_file(&file).map_err(|error| format!("The model could not be deleted: {error}"))
 }
 
 /// Every model installed, Whisper first because that is what most machines run.

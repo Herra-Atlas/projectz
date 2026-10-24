@@ -8,9 +8,10 @@ import type { Notify } from "../../../features/notifications/types";
 import type { SttModel, SttSettings } from "../../../features/stt/types";
 import { useStt } from "../../../features/stt/useStt";
 import { HoldToDelete } from "../../HoldToDelete";
+import { ANCHOR_ATTRIBUTE } from "../../SettingsSection";
 
 /**
- * The recognition half of the Local page.
+ * The recognise half of the Speech to text page.
  *
  * Two things to install, and they are separate on purpose: the engine is a
  * whisper.cpp build with the Vulkan backend (16 MB packed, one per machine), and
@@ -20,7 +21,7 @@ import { HoldToDelete } from "../../HoldToDelete";
  *
  * Nothing downloads on its own: the engine is a button, the models are a page.
  */
-export function SpeechRecognitionCategory({
+export function SpeechToTextList({
   onDownload,
   onModelSettings,
   notify,
@@ -88,7 +89,9 @@ export function SpeechRecognitionCategory({
 
   return (
     <article>
-      <div className="flex min-h-[68px] items-center gap-2 px-4 py-3">
+      {/* Anchors exist on the rows themselves, so search lands where the setting is
+          rather than on the page's top edge. */}
+      <div className="flex min-h-[68px] items-center gap-2 px-4 py-3" {...{ [ANCHOR_ATTRIBUTE]: "stt.engine" }}>
         <span className="grid size-9 shrink-0 place-items-center rounded-md text-[var(--muted)]">
           <Cpu size={16} />
         </span>
@@ -125,7 +128,7 @@ export function SpeechRecognitionCategory({
         )}
       </div>
 
-      <div className="mb-3 ml-[2.75rem] border-l border-[var(--line)] py-1 pl-3">
+      <div className="mb-3 ml-[2.75rem] border-l border-[var(--line)] py-1 pl-3" {...{ [ANCHOR_ATTRIBUTE]: "stt.models" }}>
         {models.map((model) => (
           <div key={model.path} className="flex items-center gap-1">
             <button

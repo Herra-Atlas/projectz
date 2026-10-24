@@ -60,6 +60,13 @@ export type AiEvent = {
     diff?: ToolDiff;
     created?: boolean;
     /**
+     * A retry of a reply that failed before it changed anything: which attempt this
+     * is, how many are allowed, and how long the backend is waiting.
+     */
+    attempt?: number;
+    attempts?: number;
+    delay_seconds?: number;
+    /**
      * The `ask_user` prompt: the id the answer is keyed on, the question, and
      * any suggested answers offered as buttons.
      */
@@ -183,6 +190,15 @@ export type BackgroundRun = {
   completionId?: string;
   localModel: boolean;
   isReasoning: boolean;
+  /**
+   * True for a run started outside this window -- a message from a channel.
+   *
+   * It is drawn live exactly like a local run, but it is never written back from
+   * here: the backend owns that transcript and saves it when the run ends, and a
+   * second writer carrying whatever this page had cached would be a race over
+   * the same rows.
+   */
+  external?: boolean;
 };
 
 /** Text the user highlighted inside a reply, with where to anchor the toolbar. */

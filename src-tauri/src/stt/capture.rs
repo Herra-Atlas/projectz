@@ -69,7 +69,10 @@ pub fn start() -> Result<Session, String> {
     })
 }
 
-fn record(stop: mpsc::Receiver<()>, ready: mpsc::Sender<Result<(), String>>) -> Result<Vec<i16>, String> {
+fn record(
+    stop: mpsc::Receiver<()>,
+    ready: mpsc::Sender<Result<(), String>>,
+) -> Result<Vec<i16>, String> {
     let host = cpal::default_host();
     let device = host
         .default_input_device()
@@ -78,7 +81,8 @@ fn record(stop: mpsc::Receiver<()>, ready: mpsc::Sender<Result<(), String>>) -> 
     let channels = config.channels as usize;
     let rate = config.sample_rate.0;
 
-    let collected: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::with_capacity(rate as usize * 30)));
+    let collected: Arc<Mutex<Vec<f32>>> =
+        Arc::new(Mutex::new(Vec::with_capacity(rate as usize * 30)));
     let sink = Arc::clone(&collected);
     let failed = |error| eprintln!("microphone: {error}");
 
@@ -101,7 +105,11 @@ fn record(stop: mpsc::Receiver<()>, ready: mpsc::Sender<Result<(), String>>) -> 
             failed,
             None,
         ),
-        other => return Err(format!("This microphone reports {other}, which the app cannot read.")),
+        other => {
+            return Err(format!(
+                "This microphone reports {other}, which the app cannot read."
+            ))
+        }
     }
     .map_err(|error| format!("The microphone could not be opened: {error}"))?;
 
@@ -160,7 +168,9 @@ fn push_i16(sink: &Arc<Mutex<Vec<f32>>>, data: &[i16], channels: usize) {
 
 fn push_u16(sink: &Arc<Mutex<Vec<f32>>>, data: &[u16], channels: usize) {
     if let Ok(mut values) = sink.lock() {
-        values.extend(mix(data, channels, |value| (value as f32 - 32768.0) / 32768.0));
+        values.extend(mix(data, channels, |value| {
+            (value as f32 - 32768.0) / 32768.0
+        }));
     }
 }
 

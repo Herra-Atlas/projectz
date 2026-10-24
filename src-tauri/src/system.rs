@@ -131,10 +131,14 @@ pub fn system_clear_sessions(database: State<'_, Arc<Database>>) -> Result<(), S
 }
 
 #[tauri::command]
-pub fn system_forget_taste(database: State<'_, Arc<Database>>) -> Result<(), String> {
-    database
-        .reset_taste()
-        .map_err(|error| format!("Could not forget the tasted profile: {error}"))
+pub fn system_forget_taste(
+    app: tauri::AppHandle,
+    taste: State<'_, crate::taste::Taste>,
+) -> Result<(), String> {
+    // Through the feature rather than straight at the database: the forget also
+    // invalidates the cached Taste prompt block and tells any open views. The
+    // raw table write would leave a memory the next conversation still sees.
+    taste.reset(&app).map(|_status| ())
 }
 
 /// Removes a folder and everything in it, naming it when it cannot.

@@ -130,8 +130,7 @@ pub async fn fetch(
         return Ok(Ending::Stopped);
     }
 
-    std::fs::rename(&partial, destination).map_err(|error| {
-        format!("Could not put {} in place: {error}", destination.display())
-    })?;
+    std::fs::rename(&partial, destination)
+        .map_err(|error| format!("Could not put {} in place: {error}", destination.display()))?;
     Ok(Ending::Done)
 }

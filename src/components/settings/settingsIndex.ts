@@ -68,6 +68,11 @@ const PAGES: IndexPage[] = [
     name: "General",
     entries: [
       {
+        anchor: "general.you",
+        label: "Your name",
+        keywords: ["greeting", "welcome screen", "username", "how i am addressed"],
+      },
+      {
         anchor: "general.instructions",
         label: "Instructions for ProjectZ",
         keywords: ["system prompt", "custom instructions", "rules", "personality", "context"],
@@ -87,11 +92,6 @@ const PAGES: IndexPage[] = [
         label: "Send with",
         keywords: ["enter", "ctrl", "keyboard", "shortcut", "newline"],
       },
-      {
-        anchor: "general.clearSessions",
-        label: "Clear all sessions",
-        keywords: ["delete chats", "wipe", "history", "reset conversations"],
-      },
     ],
   },
   {
@@ -103,29 +103,44 @@ const PAGES: IndexPage[] = [
     ],
   },
   {
-    view: "preferences",
-    name: "Preferences",
+    view: "mainModel",
+    name: "Main model",
     entries: [
-      {
-        anchor: "preferences.titleModels",
-        label: "Conversation titles",
-        keywords: ["title model", "naming", "rename chat", "fallback"],
-      },
-      {
-        anchor: "preferences.subagentModel",
-        label: "Sub-agent model",
-        keywords: ["subagent", "agent model", "delegate"],
-      },
-      {
-        anchor: "preferences.visionModel",
-        label: "Vision model",
-        keywords: ["image", "picture", "screenshot", "read image", "multimodal"],
-      },
-      {
-        anchor: "preferences.compaction",
-        label: "Context compaction",
-        keywords: ["trim", "long conversation", "context window", "summarise", "off", "fast"],
-      },
+      { anchor: "mainModel.model", label: "Main model", keywords: ["new chat", "default model", "chat model"] },
+      { anchor: "mainModel.reasoning", label: "Reasoning", keywords: ["reasoning effort", "thinking", "effort"] },
+      { anchor: "mainModel.context", label: "Context window override", keywords: ["context window", "override", "tokens"] },
+      { anchor: "mainModel.messaging", label: "Messaging models", keywords: ["telegram model", "messaging", "chat app", "fallback", "chain"] },
+      { anchor: "mainModel.steps", label: "Step limit", keywords: ["turn limit", "tool rounds", "steps", "budget"] },
+    ],
+  },
+  {
+    view: "subagents",
+    name: "Subagents",
+    entries: [
+      { anchor: "subagents.model", label: "Sub-agent model", keywords: ["subagent", "agent model", "delegate"] },
+      { anchor: "subagents.steps", label: "Step limit", keywords: ["turn limit", "tool rounds", "steps", "budget"] },
+      { anchor: "subagents.parallel", label: "Parallel sub-agents", keywords: ["concurrent", "parallel", "running", "cap"] },
+      { anchor: "subagents.reasoning", label: "Reasoning effort", keywords: ["reasoning", "thinking", "effort"] },
+    ],
+  },
+  {
+    view: "auxiliary",
+    name: "Auxiliary models",
+    entries: [
+      { anchor: "auxiliary.vision", label: "Vision model", keywords: ["image", "picture", "screenshot", "read image", "multimodal"] },
+      { anchor: "auxiliary.title", label: "Title generation", keywords: ["title model", "naming", "rename chat", "fallback"] },
+    ],
+  },
+  {
+    view: "context",
+    name: "Context",
+    entries: [
+      { anchor: "context.autoCompact", label: "Auto-compression", keywords: ["compaction", "compress", "trim", "on", "off", "summarise", "elide"] },
+      { anchor: "context.compressAt", label: "When to compress", keywords: ["trigger", "percent", "80", "window"] },
+      { anchor: "context.target", label: "Compression target", keywords: ["aim", "fraction", "down to", "tokens"] },
+      { anchor: "context.reach", label: "Compression reach", keywords: ["threshold", "older", "rewrite", "fraction"] },
+      { anchor: "context.protect", label: "Protect recent messages", keywords: ["keep", "verbatim", "recent", "last messages"] },
+      { anchor: "context.timeout", label: "Compression model timeout", keywords: ["timeout", "seconds", "summarise", "local"] },
     ],
   },
   {
@@ -238,7 +253,47 @@ const PAGES: IndexPage[] = [
       { anchor: "taste.runNow", label: "Next run", keywords: ["run now", "learn now", "schedule", "next"] },
       { anchor: "taste.profile", label: "What ProjectZ knows", keywords: ["facts", "profile", "learned", "memory", "edit"] },
       { anchor: "taste.runs", label: "Runs", keywords: ["history", "reports", "past runs"] },
-      { anchor: "taste.reset", label: "Forget the learned profile", keywords: ["reset", "delete", "forget", "clear memory"] },
+    ],
+  },
+  {
+    view: "communications",
+    name: "Communications",
+    entries: [
+      {
+        anchor: "communications.enabled",
+        label: "Messaging",
+        keywords: ["telegram", "bot", "phone", "remote", "on", "off"],
+      },
+      {
+        anchor: "communications.telegram.status",
+        label: "Telegram",
+        keywords: ["connected", "bot", "status", "@projectz_bot"],
+      },
+      {
+        anchor: "communications.telegram.token",
+        label: "Bot token",
+        keywords: ["botfather", "token", "secret", "telegram", "connect"],
+      },
+      {
+        anchor: "communications.telegram.allowed",
+        label: "Who may message",
+        keywords: ["allowlist", "user id", "permissions", "strangers", "security"],
+      },
+      {
+        anchor: "communications.mode",
+        label: "Agent or chat",
+        keywords: ["tools", "mode", "telegram", "chat"],
+      },
+      {
+        anchor: "communications.permission",
+        label: "What it may do unattended",
+        keywords: ["permission", "approval", "auto writes", "full", "allow", "deny"],
+      },
+      {
+        anchor: "communications.localStart",
+        label: "Let Telegram start a local model",
+        keywords: ["local model", "load", "start", "gguf", "telegram"],
+      },
     ],
   },
   {
@@ -280,7 +335,7 @@ const PAGES: IndexPage[] = [
   },
   {
     view: "local",
-    name: "Local",
+    name: "Local models",
     entries: [
       { anchor: "local.list", label: "Local models", keywords: ["gguf", "llama", "local", "download", "models"] },
       { anchor: "local.add", label: "Add models", keywords: ["add model", "gguf", "browse file"] },
@@ -291,6 +346,34 @@ const PAGES: IndexPage[] = [
     name: "Engines",
     entries: [
       { anchor: "engines.list", label: "Engines", keywords: ["llama.cpp", "runtime", "engine", "version", "install"] },
+    ],
+  },
+  {
+    view: "stt",
+    name: "Speech to text",
+    entries: [
+      {
+        anchor: "stt.engine",
+        label: "Recognition engine",
+        keywords: ["whisper", "parakeet", "engine", "vulkan", "install", "speech to text", "dictation", "microphone"],
+      },
+      { anchor: "stt.models", label: "Recognition models", keywords: ["whisper model", "parakeet model", "transcribe", "language"] },
+    ],
+  },
+  {
+    view: "tts",
+    name: "Text to speech",
+    entries: [
+      {
+        anchor: "tts.voices",
+        label: "Voices",
+        keywords: ["piper", "voice", "speech synthesis", "read aloud", "tts"],
+      },
+      {
+        anchor: "tts.skipCode",
+        label: "Skip code blocks",
+        keywords: ["code", "spoken", "read aloud", "inline code"],
+      },
     ],
   },
 ];

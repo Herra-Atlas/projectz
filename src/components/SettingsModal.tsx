@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open as openFile } from "@tauri-apps/plugin-dialog";
-import { ArrowLeft, BookMarked, Brain, ChevronDown, ChevronRight, Cpu, Download, GripVertical, Info, Lightbulb, LoaderCircle, MoveRight, Palette, Pencil, Plug, Plus, Search, Server, Settings2, SlidersHorizontal, Sparkles, Trash2, X, Zap } from "lucide-react";
+import { ArrowLeft, AudioLines, BookMarked, Bot, Brain, ChevronDown, ChevronRight, CircleDot, Cpu, Download, GripVertical, Info, Lightbulb, Mic, MoveRight, Palette, Pencil, Plug, Plus, Scissors, Search, Server, Settings2, SlidersHorizontal, Smartphone, Sparkles, Trash2, Volume2, X, Zap } from "lucide-react";
 import { resolveTheme, type Appearance } from "../features/appearance/appearance";
 import AccentPicker from "./appearance/AccentPicker";
 import ThemePicker from "./appearance/ThemePicker";
@@ -17,29 +17,32 @@ import SkillsPage from "./SkillsPage";
 import McpSettingsPage from "./McpSettingsPage";
 import AssistSettingsPage from "./assist/AssistSettingsPage";
 import TasteSettingsPage from "./taste/TasteSettingsPage";
+import { CommunicationsPage } from "./communications/CommunicationsPage";
 import SettingsSearch, { pageForEntry } from "./settings/SettingsSearch";
 import { buildSettingsIndex, type SettingsEntry } from "./settings/settingsIndex";
-import { LocalCategoryTabs, LOCAL_TITLES, type LocalCategory } from "./settings/local/LocalCategoryTabs";
 import { LocalAddMenu } from "./settings/local/LocalAddMenu";
-import { SpeechRecognitionCategory } from "./settings/local/SpeechRecognitionCategory";
-import { SttModelSettingsPage } from "./settings/local/SttModelSettingsPage";
+import { SpeechToTextPage } from "./settings/voice/SpeechToTextPage";
+import { SttModelSettingsPage } from "./settings/voice/SttModelSettingsPage";
+import { SettingsNavGroup, navButtonClass } from "./settings/SettingsNavGroup";
 import { DownloadsPage } from "./settings/downloads/DownloadsPage";
 import { SystemPage } from "./settings/SystemPage";
 import { HoldToDelete } from "./HoldToDelete";
 import type { DownloadJob } from "../features/downloads/types";
-import { SpeechSynthesisCategory } from "./settings/local/SpeechSynthesisCategory";
-import { TtsSettingsPage } from "./settings/local/TtsSettingsPage";
-import { TtsVoiceSettingsPage } from "./settings/local/TtsVoiceSettingsPage";
+import { TtsVoiceSettingsPage } from "./settings/voice/TtsVoiceSettingsPage";
+import { TextToSpeechPage } from "./settings/voice/TextToSpeechPage";
 import { DownloadPage } from "./settings/downloads/DownloadPage";
 import type { SettingsPage } from "./settings/settingsPages";
 import { useAssist } from "../features/assist/useAssist";
 import { useTaste } from "../features/taste/useTaste";
+import { useMessaging } from "../features/communications/useMessaging";
 import SkillDetailPage from "./skills/SkillDetailPage";
-import TitleModelPicker from "./TitleModelPicker";
-import SingleModelPicker from "./ModelSelectionPicker";
-import { ANCHOR_ATTRIBUTE, FlashHighlight, MARKABLE_ATTRIBUTE, SettingsPageTitle, SettingsSearchScope, SettingsSection, SETTINGS_HIGHLIGHT_EVENT } from "./SettingsSection";
+import { ANCHOR_ATTRIBUTE, FlashHighlight, SettingsPageTitle, SettingsSearchScope, SettingsSection, SETTINGS_HIGHLIGHT_EVENT } from "./SettingsSection";
 import { SettingRow, Segmented, Toggle } from "./SettingsSection";
-import { COMPACTION_LABELS, type Compaction, type Preferences } from "../features/models/usePreferences";
+import MainPage from "./settings/model/MainPage";
+import SubagentsPage from "./settings/model/SubagentsPage";
+import AuxiliaryPage from "./settings/model/AuxiliaryPage";
+import ContextPage from "./settings/model/ContextPage";
+import type { Preferences } from "../features/models/usePreferences";
 import type { Endpoint, LocalModel } from "../features/models/types";
 import type { InstalledEngine } from "../features/models/useInstalledEngines";
 import { useClaimNotificationHost } from "../features/notifications/notificationHost";
@@ -63,19 +66,20 @@ function fileLabel(path: string): string {
 }
 
 type EndpointDraft = { id: string; name: string; base_url: string; api_key: string; models: string[]; enabled: boolean };
-type SettingsModalProps = { open: boolean; onClose: () => void; onEndpointsChanged: () => void; onClearSessions: () => Promise<number>; preferences: Preferences; onPreferencesChange: (preferences: Preferences) => void; appearance: Appearance; onAppearanceChange: (appearance: Appearance) => void; notify: Notify };
+type SettingsModalProps = { open: boolean; onClose: () => void; onEndpointsChanged: () => void; preferences: Preferences; onPreferencesChange: (preferences: Preferences) => void; appearance: Appearance; onAppearanceChange: (appearance: Appearance) => void; notify: Notify };
 // The page union lives in `settings/settingsPages.ts` so the search index can name a page
 // without importing this modal. Re-exported here for the components that already imported it.
 export type { SettingsPage } from "./settings/settingsPages";
 
 type GeneralSettings = {
+  userName: string;
   instructions: string;
   responseNotifications: boolean;
   showMetrics: boolean;
   sendWith: "Enter" | "Ctrl + Enter";
 };
 
-const DEFAULT_GENERAL: GeneralSettings = { instructions: "", responseNotifications: false, showMetrics: true, sendWith: "Enter" };
+const DEFAULT_GENERAL: GeneralSettings = { userName: "", instructions: "", responseNotifications: false, showMetrics: true, sendWith: "Enter" };
 
 /** Fills in defaults for any key the stored record predates. */
 const withGeneralDefaults = (saved: Partial<GeneralSettings> | null | undefined): GeneralSettings => ({ ...DEFAULT_GENERAL, ...(saved ?? {}) });
@@ -107,7 +111,7 @@ const DRAG_THRESHOLD = 4;
  */
 const HIGHLIGHT_MS = 2000;
 
-export default function SettingsModal({ open, onClose, onEndpointsChanged, onClearSessions, preferences, onPreferencesChange, appearance, onAppearanceChange, notify }: SettingsModalProps) {
+export default function SettingsModal({ open, onClose, onEndpointsChanged, preferences, onPreferencesChange, appearance, onAppearanceChange, notify }: SettingsModalProps) {
   // This dialog is the app's only `showModal()` window, and the browser paints
   // that in the top layer -- above any z-index on the page. Claiming the host
   // while it is open is what puts the notification stack on top of it rather
@@ -164,14 +168,6 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
     };
   }, []);
   /**
-   * Which engine kind the Local page is showing.
-   *
-   * Held here rather than in the tab strip so it survives a trip to a model's
-   * settings page and back -- coming back to llama.cpp because the page happened
-   * to remount would lose the user's place.
-   */
-  const [localCategory, setLocalCategory] = useState<LocalCategory>("llama");
-  /**
    * Which engine groups are open on the Local models page.
    *
    * Engine ids rather than group indices, so a group's expansion survives a
@@ -207,8 +203,6 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
    */
   const [engineNames, setEngineNames] = useState<Pick<InstalledEngine, "id" | "version" | "source" | "installed">[]>([]);
   const [generalSettings, setGeneralSettings] = useState<GeneralSettings>(DEFAULT_GENERAL);
-  const [confirmClear, setConfirmClear] = useState(false);
-  const [clearingSessions, setClearingSessions] = useState(false);
   const [instructionExampleIndex, setInstructionExampleIndex] = useState(0);
   const [page, setPage] = useState<SettingsPage>({ view: "providers" });
   /**
@@ -227,6 +221,9 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
    */
   const assistStore = useAssist(open);
   const tasteStore = useTaste(open);
+  // Messaging follows the same rule: the dialog outlives the page, so the read
+  // starts when the dialog opens rather than on the click that selects the page.
+  const messagingStore = useMessaging(open);
   /**
    * The row a search result landed on, highlighted for a moment.
    *
@@ -248,9 +245,10 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
   // raised it, and where it does not scroll out of view.
   const [formError, setFormError] = useState("");
 
-  // Preferences is its own page, but it shares the provider list already
-  // loaded here so the model field renders the same options as the chat picker.
-  // `endpoint.models` holds the available ones, so nothing is filtered here.
+  // The Model pages are their own section now, and they share the provider list
+  // already loaded here so their pickers render the same options the chat
+  // picker does. `endpoint.models` holds the available ones, so nothing is
+  // filtered here.
   const providerModelGroups = endpoints
     .filter((endpoint) => endpoint.enabled)
     .map((endpoint) => ({ endpoint, models: endpoint.models }))
@@ -552,25 +550,6 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
     void invoke("database_set_setting", { key: "app.general", value: next }).catch((reason) => notify("error", `Preferences could not be saved: ${String(reason)}`, "settings:general"));
   };
 
-  // Two steps on purpose: the row button only arms the confirmation, and the dialog
-  // inside it is the thing that actually deletes. Closing resets the armed state.
-  const clearSessions = async () => {
-    setClearingSessions(true);
-    try {
-      const removed = await onClearSessions();
-      setConfirmClear(false);
-      // "Nothing to delete" is a success, not a failure: the delete did what was
-      // asked, which was to leave no sessions behind. It is reported at all only
-      // because a confirmation dialog that closes in silence reads as a dismissal.
-      notify("success", removed === 0 ? "No sessions to delete" : `${removed} session${removed === 1 ? "" : "s"} deleted`);
-    } catch (reason) {
-      setConfirmClear(false);
-      notify("error", `Sessions could not be deleted: ${String(reason)}`);
-    } finally {
-      setClearingSessions(false);
-    }
-  };
-
   /**
    * Re-reads the local model list from the backend.
    *
@@ -630,7 +609,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
    * dropped anywhere else cannot quietly register a model.
    */
   useEffect(() => {
-    if (page.view !== "local" || localCategory !== "llama") return;
+    if (page.view !== "local") return;
     let live = true;
     let stop: (() => void) | undefined;
     const scale = () => window.devicePixelRatio || 1;
@@ -665,7 +644,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
     // rebuilt with it; re-binding on the two things that decide whether a drop is
     // welcome is enough.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page.view, localCategory]);
+  }, [page.view]);
 
   const addLocalModel = async () => {
     const selected = await openFile({
@@ -788,15 +767,44 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
 
   // Where each drilled-in page returns to, and what the back control is called.
   // The provider form and the skill form are the same shape -- a whole page
-  // standing in for a list -- so the header treats them the same way.
-  const isSubPage = page.view === "form" || page.view === "model" || page.view === "skill" || page.view === "download" || page.view === "ttsSettings" || page.view === "ttsVoice" || page.view === "sttModel";
+  // standing in for a list -- so the header treats them the same way. A download
+  // returns to the page whose engine offered it: llama.cpp's models, or one of
+  // the two voice pages.
+  const isSubPage = page.view === "form" || page.view === "model" || page.view === "skill" || page.view === "download" || page.view === "ttsVoice" || page.view === "sttModel";
   const backTarget: SettingsPage =
-    page.view === "model" || page.view === "download" || page.view === "ttsSettings" || page.view === "ttsVoice" || page.view === "sttModel" ? { view: "local" } : page.view === "skill" ? { view: "skills" } : { view: "providers" };
+    page.view === "model" ? { view: "local" }
+      : page.view === "download"
+        ? page.kind === "stt" ? { view: "stt" } : page.kind === "tts" ? { view: "tts" } : { view: "local" }
+      : page.view === "ttsVoice" ? { view: "tts" }
+      : page.view === "sttModel" ? { view: "stt" }
+      : page.view === "skill" ? { view: "skills" }
+      : { view: "providers" };
   const backLabel =
-    page.view === "model" ? "Back to local models" : page.view === "download" ? "Back to local engines" : page.view === "ttsVoice" ? "Back to speech synthesis" : page.view === "ttsSettings" ? "Back to speech synthesis" : page.view === "sttModel" ? "Back to speech recognition" : page.view === "skill" ? "Back to skills" : "Back to providers";
+    page.view === "model" ? "Back to local models"
+      : page.view === "download" ? (page.kind === "stt" ? "Back to speech to text" : page.kind === "tts" ? "Back to text to speech" : "Back to local models")
+      : page.view === "ttsVoice" ? "Back to text to speech"
+      : page.view === "sttModel" ? "Back to speech to text"
+      : page.view === "skill" ? "Back to skills"
+      : "Back to providers";
   // Held outside the JSX so the save callback can compare against it without
   // relying on narrowing that does not survive into a closure.
   const editingSkill = page.view === "skill" ? page.slug : null;
+
+  // The two collapsible nav groups stay tinted while *any* page they own is the
+  // one showing -- including the drill-down pages (a model, a voice, a
+  // download) that belong to one of their children.
+  const providersGroupActive =
+    page.view === "providers" || page.view === "local" || page.view === "engines" || page.view === "model" ||
+    (page.view === "download" && page.kind === "llama");
+  const voiceGroupActive =
+    page.view === "stt" || page.view === "tts" || page.view === "sttModel" || page.view === "ttsVoice" ||
+    (page.view === "download" && (page.kind === "stt" || page.kind === "tts"));
+  // The Model section's four pages tint its parent together: like Providers and
+  // Voice, the group stays findable while any page it owns is showing, which is
+  // what keeps a reader on the Context page from wondering which heading
+  // produced it.
+  const modelGroupActive =
+    page.view === "mainModel" || page.view === "subagents" || page.view === "auxiliary" || page.view === "context";
 
   return (
     <dialog
@@ -832,29 +840,55 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
         <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
           {/* No bottom hairline in the stacked layout either: the title band already draws
               one directly under it, and two rules a few pixels apart is the duplicate. */}
-          <nav aria-label="Settings sections" className="flex shrink-0 gap-1 overflow-x-auto bg-[var(--rail)] px-2.5 py-2 sm:min-h-0 sm:w-[200px] sm:flex-col sm:gap-0.5 sm:overflow-y-auto sm:border-r sm:border-[var(--line)] sm:py-3">
+          <nav aria-label="Settings sections" className="flex shrink-0 gap-1 overflow-x-auto bg-[var(--rail)] px-2.5 py-2 sm:min-h-0 sm:flex-col sm:gap-0.5 sm:overflow-y-auto sm:border-r sm:border-[var(--line)] sm:py-3 sm:w-[clamp(176px,18vw,236px)]">
             <p className="hidden px-2.5 pb-1.5 pt-1 text-[11px] font-medium text-[var(--quiet)] sm:block">Application</p>
-            <button type="button" data-settings-nav="general" aria-label="General" onClick={() => setPage({ view: "general" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "general" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><SlidersHorizontal size={16} />General</button>
-            <button type="button" data-settings-nav="appearance" aria-label="Appearance" onClick={() => setPage({ view: "appearance" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "appearance" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Palette size={16} />Appearance</button>
-            <button type="button" data-settings-nav="preferences" aria-label="Preferences" onClick={() => setPage({ view: "preferences" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "preferences" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Sparkles size={16} />Preferences</button>
+            <button type="button" data-settings-nav="general" aria-label="General" onClick={() => setPage({ view: "general" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "general" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><SlidersHorizontal size={16} />General</button>
+            <button type="button" data-settings-nav="appearance" aria-label="Appearance" onClick={() => setPage({ view: "appearance" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "appearance" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Palette size={16} />Appearance</button>
             {/* The assistant's own surfaces: what it does (Assist), what it can load
                 (Skills) and what it can reach (MCP). They were in Application, where a
                 reader looking for "where do I change the browser" found them mixed in
                 with the theme picker. */}
             <p className="hidden px-2.5 pb-1.5 pt-5 text-[11px] font-medium text-[var(--quiet)] sm:block">Assistant</p>
-            <button type="button" data-settings-nav="assist" aria-label="Assist" onClick={() => setPage({ view: "assist" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "assist" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Lightbulb size={16} />Assist</button>
-            <button type="button" data-settings-nav="taste" aria-label="Taste" onClick={() => setPage({ view: "taste" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "taste" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Brain size={16} />Taste</button>
-            <button type="button" data-settings-nav="skills" aria-label="Skills" onClick={() => setPage({ view: "skills" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "skills" || page.view === "skill" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><BookMarked size={16} />Skills</button>
-            <button type="button" data-settings-nav="mcp" aria-label="MCP servers" onClick={() => setPage({ view: "mcp" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "mcp" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Plug size={16} />MCP</button>
+            <button type="button" data-settings-nav="assist" aria-label="Assist" onClick={() => setPage({ view: "assist" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "assist" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Lightbulb size={16} />Assist</button>
+            <button type="button" data-settings-nav="taste" aria-label="Taste" onClick={() => setPage({ view: "taste" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "taste" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Brain size={16} />Taste</button>
+            <button type="button" data-settings-nav="skills" aria-label="Skills" onClick={() => setPage({ view: "skills" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "skills" || page.view === "skill" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><BookMarked size={16} />Skills</button>
+            <button type="button" data-settings-nav="mcp" aria-label="MCP servers" onClick={() => setPage({ view: "mcp" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "mcp" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Plug size={16} />MCP</button>
+            {/* Where the agent can be reached from outside the window. A phone is
+                a second door into the same assistant, which is why it sits with
+                the assistant's other surfaces rather than with the models. */}
+            <button type="button" data-settings-nav="communications" aria-label="Communications" onClick={() => setPage({ view: "communications" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "communications" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Smartphone size={16} />Communications</button>
             <p className="hidden px-2.5 pb-1.5 pt-5 text-[11px] font-medium text-[var(--quiet)] sm:block">Models</p>
-            <button type="button" data-settings-nav="providers" aria-label="Providers" onClick={() => setPage({ view: "providers" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "providers" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Server size={16} />Providers</button>
-            <button type="button" data-settings-nav="local" aria-label="Local models" onClick={() => setPage({ view: "local" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "local" || page.view === "model" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Cpu size={16} />Local</button>
-            <button type="button" data-settings-nav="engines" aria-label="Engines" onClick={() => setPage({ view: "engines" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "engines" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Zap size={16} />Engines</button>
+            {/* Two nested groups in the reference design's shape: a parent that is a
+                disclosure rather than a page, with its pages underneath. Providers
+                is where the models come from (remote, llama.cpp, engines); Voice
+                is what the machine says and hears, and holds none of the GGUF
+                machinery, which is why the old Local tab strip is gone. */}
+            <SettingsNavGroup label="Providers" icon={<Server size={16} />} anyActive={providersGroupActive}>
+              <button type="button" data-settings-nav="providers" aria-label="Providers" onClick={() => setPage({ view: "providers" })} className={navButtonClass(page.view === "providers", true)}><Server size={14} />Providers</button>
+              <button type="button" data-settings-nav="local" aria-label="Local models" onClick={() => setPage({ view: "local" })} className={navButtonClass(page.view === "local" || page.view === "model", true)}><Cpu size={14} />Local</button>
+              <button type="button" data-settings-nav="engines" aria-label="Engines" onClick={() => setPage({ view: "engines" })} className={navButtonClass(page.view === "engines", true)}><Zap size={14} />Engines</button>
+            </SettingsNavGroup>
+            <SettingsNavGroup label="Voice" icon={<AudioLines size={16} />} anyActive={voiceGroupActive}>
+              <button type="button" data-settings-nav="stt" aria-label="Speech to text" onClick={() => setPage({ view: "stt" })} className={navButtonClass(page.view === "stt" || page.view === "sttModel", true)}><Mic size={14} />Speech to text</button>
+              <button type="button" data-settings-nav="tts" aria-label="Text to speech" onClick={() => setPage({ view: "tts" })} className={navButtonClass(page.view === "tts" || page.view === "ttsVoice", true)}><Volume2 size={14} />Text to speech</button>
+            </SettingsNavGroup>
+            {/* The conversation's own runtime, next to where its models are
+                chosen: what opens a chat (Main model), what delegations run on
+                (Subagents), the small jobs around a conversation (Auxiliary
+                models) and how a long conversation fits the window (Context).
+                Fourth in the Models heading, after Providers and Voice, because
+                it is about behaviour rather than supply or speech. */}
+            <SettingsNavGroup label="Model" icon={<Brain size={16} />} anyActive={modelGroupActive}>
+              <button type="button" data-settings-nav="mainModel" aria-label="Main model" onClick={() => setPage({ view: "mainModel" })} className={navButtonClass(page.view === "mainModel", true)}><CircleDot size={14} />Main model</button>
+              <button type="button" data-settings-nav="subagents" aria-label="Subagents" onClick={() => setPage({ view: "subagents" })} className={navButtonClass(page.view === "subagents", true)}><Bot size={14} />Subagents</button>
+              <button type="button" data-settings-nav="auxiliary" aria-label="Auxiliary models" onClick={() => setPage({ view: "auxiliary" })} className={navButtonClass(page.view === "auxiliary", true)}><Sparkles size={14} />Auxiliary models</button>
+              <button type="button" data-settings-nav="context" aria-label="Context" onClick={() => setPage({ view: "context" })} className={navButtonClass(page.view === "context", true)}><Scissors size={14} />Context</button>
+            </SettingsNavGroup>
             {/* Only while something is transferring, or has this session: a permanent
                 "Downloads" entry for a list that is usually empty is a page nobody
                 needs and a row that says nothing. */}
             {transferCount > 0 && (
-              <button type="button" data-settings-nav="downloads" aria-label="Downloads" onClick={() => setPage({ view: "downloads" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "downloads" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}>
+              <button type="button" data-settings-nav="downloads" aria-label="Downloads" onClick={() => setPage({ view: "downloads" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "downloads" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}>
                 <Download size={16} />
                 Downloads
                 <span className="ml-auto text-[11px] tabular-nums text-[var(--quiet)]">{transferCount}</span>
@@ -864,7 +898,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                 apart says so. `mt-auto` pins it once the list fits; when the window
                 is too short, the whole nav scrolls and this comes last. */}
             <div aria-hidden="true" className="hidden sm:mt-auto sm:block sm:h-px sm:bg-[var(--line)]" />
-            <button type="button" data-settings-nav="system" aria-label="System" onClick={() => setPage({ view: "system" })} className={`flex min-h-9 shrink-0 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "system" ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Info size={16} />System</button>
+            <button type="button" data-settings-nav="system" aria-label="System" onClick={() => setPage({ view: "system" })} className={`flex min-h-9 shrink-0 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "system" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Info size={16} />System</button>
           </nav>
 
           <div className="min-w-0 flex-1 overflow-y-auto">
@@ -872,7 +906,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
               {/* No `key`: a search result on the page already open must not remount the
                   scope, or the dim it is about to set is thrown away with the old node. */}
               <SettingsSearchScope>
-              {page.view === "assist" ? <AssistSettingsPage notify={notify} store={assistStore} groups={providerModelGroups} localModels={localModels} /> : page.view === "taste" ? <TasteSettingsPage notify={notify} store={tasteStore} groups={providerModelGroups} localModels={localModels} /> : page.view === "providers" ? <>
+              {page.view === "assist" ? <AssistSettingsPage notify={notify} store={assistStore} groups={providerModelGroups} localModels={localModels} /> : page.view === "communications" ? <CommunicationsPage notify={notify} store={messagingStore} /> : page.view === "taste" ? <TasteSettingsPage notify={notify} store={tasteStore} groups={providerModelGroups} localModels={localModels} /> : page.view === "providers" ? <>
                 <SettingsPageTitle>
                   <h2 className="text-[17px] font-semibold tracking-tight"><FlashHighlight anchor="providers.list" />Providers</h2>
                   <button type="button" {...{ [ANCHOR_ATTRIBUTE]: "providers.add" }} onClick={openAdd} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 text-[13px] font-medium text-[var(--text)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><FlashHighlight anchor="providers.add" /><Plus size={15} />Add provider</button>
@@ -914,19 +948,9 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                 </div>}
               </> : page.view === "engines" ? <EnginesSettingsPage onChanged={() => { onEndpointsChanged(); void refreshEngines(); }} notify={notify} /> : page.view === "local" ? <>
                 <SettingsPageTitle>
-                  <h2 className="text-[17px] font-semibold tracking-tight"><FlashHighlight anchor="local.list" />{LOCAL_TITLES[localCategory]}</h2>
-                  {/* llama.cpp is the only half with something to add. A Whisper
-                      model and a Piper voice are placed by their own installers
-                      rather than chosen from a file dialog, so a picker here would
-                      offer a file the engine cannot load. */}
-                  {localCategory === "llama" && <LocalAddMenu anchor="local.add" onDownload={() => setPage({ view: "download", kind: "llama" })} onAdd={() => void addLocalModel()} />}
+                  <h2 className="text-[17px] font-semibold tracking-tight"><FlashHighlight anchor="local.list" />Local models</h2>
+                  <LocalAddMenu anchor="local.add" onDownload={() => setPage({ view: "download", kind: "llama" })} onAdd={() => void addLocalModel()} />
                 </SettingsPageTitle>
-                {/* The three engines in one page rather than three sidebar entries:
-                    they answer the same question -- "what is installed on this
-                    machine" -- and a reader comparing them should not have to
-                    leave the page to do it. */}
-                <div className="mb-4"><LocalCategoryTabs value={localCategory} onChange={setLocalCategory} /></div>
-                {localCategory === "llama" ? <>
                 {/* Only while a model is armed. The move is a mode, and a mode
                     with no visible state is one the user cannot tell they are
                     in -- or get out of. */}
@@ -1083,9 +1107,10 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                     </div>}
                   </article>)}
                 </div>}
-                </> : localCategory === "stt" ? <SpeechRecognitionCategory onDownload={() => setPage({ view: "download", kind: "stt" })} onModelSettings={(model) => setPage({ view: "sttModel", model })} notify={notify} /> : <SpeechSynthesisCategory onDownload={() => setPage({ view: "download", kind: "tts" })} onSettings={() => setPage({ view: "ttsSettings" })} onVoiceSettings={(voice) => setPage({ view: "ttsVoice", voice })} notify={notify} />}
-              </> : page.view === "download" ? <DownloadPage kind={page.kind} notify={notify} onModelInstalled={() => void refreshLocalModels()} />
-              : page.view === "ttsSettings" ? <TtsSettingsPage notify={notify} />
+              </>
+              : page.view === "stt" ? <SpeechToTextPage onDownload={() => setPage({ view: "download", kind: "stt" })} onModelSettings={(model) => setPage({ view: "sttModel", model })} notify={notify} />
+              : page.view === "tts" ? <TextToSpeechPage onDownload={() => setPage({ view: "download", kind: "tts" })} onVoiceSettings={(voice) => setPage({ view: "ttsVoice", voice })} notify={notify} />
+              : page.view === "download" ? <DownloadPage kind={page.kind} notify={notify} onModelInstalled={() => void refreshLocalModels()} />
               : page.view === "ttsVoice" ? <TtsVoiceSettingsPage voice={page.voice} notify={notify} />
               : page.view === "sttModel" ? <SttModelSettingsPage model={page.model} notify={notify} />
               : page.view === "downloads" ? <DownloadsPage notify={notify} />
@@ -1149,6 +1174,15 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                 </SettingsSection>
               </> : page.view === "general" ? <>
                 <SettingsPageTitle><h2 className="text-[17px] font-semibold tracking-tight">General</h2></SettingsPageTitle>
+                <SettingsSection title="You">
+                  <SettingRow
+                    anchor="general.you"
+                    label="Your name"
+                    description="How the empty conversation screen greets you."
+                    control={<input type="text" value={generalSettings.userName} onChange={(event) => updateGeneralSettings({ ...generalSettings, userName: event.target.value })} maxLength={40} className="h-9 w-56 rounded-md border border-[var(--line)] bg-[var(--rail)] px-2.5 text-[13px] text-[var(--text)] placeholder:text-[var(--quiet)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" placeholder="Sir" />}
+                  />
+                </SettingsSection>
+
                 <SettingsSection title="Instructions">
                   <SettingRow
                     anchor="general.instructions"
@@ -1179,83 +1213,31 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
                     control={<Segmented label="Send with" value={generalSettings.sendWith} options={["Enter", "Ctrl + Enter"]} onChange={(sendWith) => updateGeneralSettings({ ...generalSettings, sendWith })} />}
                   />
                 </SettingsSection>
-
-                <SettingsSection title="Sessions">
-                  <SettingRow
-                    anchor="general.clearSessions"
-                    label="Clear all sessions"
-                    description="Delete every conversation on this device. This cannot be undone."
-                    control={<button type="button" disabled={clearingSessions} onClick={() => { setFormError(""); setConfirmClear(true); }} className="min-h-9 shrink-0 rounded-lg border border-[var(--line)] px-3 text-[13px] text-[var(--muted)] transition-colors hover:border-[var(--danger)] hover:bg-[var(--raised)] hover:text-[var(--danger)] disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]">Clear…</button>}
-                  />
-                </SettingsSection>
-              </> : page.view === "preferences" ? <>
-                <SettingsPageTitle><h2 className="text-[17px] font-semibold tracking-tight">Preferences</h2></SettingsPageTitle>
-                {/* Both model choices are the same kind of setting -- a model
-                    for a background task -- so they are drawn by the same flat
-                    row rules as every `SettingsSection`; there is no panel here
-                    to clip the pickers' popovers either. */}
-                <div className="divide-y divide-[var(--line)]">
-                  <div className="[&>*:first-child]:!border-0" {...{ [ANCHOR_ATTRIBUTE]: "preferences.titleModels", [MARKABLE_ATTRIBUTE]: "" }}>
-                    <TitleModelPicker
-                      models={preferences.sessionTitleModels}
-                      onChange={(sessionTitleModels) => { setFormError(""); onPreferencesChange({ ...preferences, sessionTitleModels }); }}
-                      groups={providerModelGroups}
-                      localModels={localModels}
-                    />
-                  </div>
-                  <div className="flex min-h-[58px] items-center gap-3 px-4 py-3.5" {...{ [ANCHOR_ATTRIBUTE]: "preferences.subagentModel", [MARKABLE_ATTRIBUTE]: "" }}>
-                    <div className="min-w-0 flex-1">
-                      <h3 className="text-[13px]">Sub-agent model</h3>
-                      <p className="mt-0.5 text-[12px] leading-5 text-[var(--muted)]">The model spawned agents run on. Defaults to whatever the chat is using.</p>
-                    </div>
-                    <SingleModelPicker
-                      value={preferences.subagentModel ?? null}
-                      onChange={(subagentModel) => { setFormError(""); onPreferencesChange({ ...preferences, subagentModel }); }}
-                      groups={providerModelGroups}
-                      localModels={localModels}
-                      emptyLabel="Same as chat"
-                      label="Default sub-agent model"
-                    />
-                  </div>
-                  <div className="flex min-h-[58px] items-center gap-3 px-4 py-3.5" {...{ [ANCHOR_ATTRIBUTE]: "preferences.visionModel", [MARKABLE_ATTRIBUTE]: "" }}>
-                    <div className="min-w-0 flex-1">
-                      <h3 className="text-[13px]">Vision model</h3>
-                      <p className="mt-0.5 text-[12px] leading-5 text-[var(--muted)]">The model an image is shown to when a file is read. Leave off and images cannot be read.</p>
-                    </div>
-                    <SingleModelPicker
-                      value={preferences.visionModel ?? null}
-                      onChange={(visionModel) => { setFormError(""); onPreferencesChange({ ...preferences, visionModel }); }}
-                      groups={providerModelGroups}
-                      localModels={localModels}
-                      emptyLabel="Off"
-                      label="Default vision model"
-                    />
-                  </div>
-                </div>
-
-                <SettingsSection title="Context">
-                  <SettingRow
-                    anchor="preferences.compaction"
-                    label="Context compaction"
-                    description="How ProjectZ trims a long conversation before sending it. Off keeps everything; Normal elides old tool output; Fast also drops older turns."
-                    control={
-                      <Segmented
-                        label="Context compaction"
-                        value={COMPACTION_LABELS[preferences.compaction]}
-                        options={["Off", "Normal", "Fast"]}
-                        onChange={(label) => {
-                          // The stored value is the lowercase wire name the backend
-                          // parses, so the display label is mapped back rather than
-                          // saved directly.
-                          const next = (Object.keys(COMPACTION_LABELS) as Compaction[]).find((key) => COMPACTION_LABELS[key] === label) ?? "normal";
-                          setFormError("");
-                          onPreferencesChange({ ...preferences, compaction: next });
-                        }}
-                      />
-                    }
-                  />
-                </SettingsSection>
-              </> : page.view === "skills" ? <SkillsPage notify={notify} onOpenForm={(skill) => setPage({ view: "skill", slug: skill?.slug ?? null })} /> : page.view === "mcp" ? <McpSettingsPage notify={notify} /> : page.view === "skill" ? <SkillDetailPage key={editingSkill ?? "new"} slug={editingSkill} onSaved={(slug) => { if (slug !== editingSkill) setPage({ view: "skill", slug }); }} onCancel={() => setPage({ view: "skills" })} onDeleted={() => setPage({ view: "skills" })} notify={notify} /> : <>
+              </> : page.view === "mainModel" ? <MainPage
+                preferences={preferences}
+                onChange={(next) => { setFormError(""); onPreferencesChange(next); }}
+                groups={providerModelGroups}
+                localModels={localModels}
+              />
+              : page.view === "subagents" ? <SubagentsPage
+                preferences={preferences}
+                onChange={(next) => { setFormError(""); onPreferencesChange(next); }}
+                groups={providerModelGroups}
+                localModels={localModels}
+              />
+              : page.view === "auxiliary" ? <AuxiliaryPage
+                preferences={preferences}
+                onChange={(next) => { setFormError(""); onPreferencesChange(next); }}
+                groups={providerModelGroups}
+                localModels={localModels}
+              />
+              : page.view === "context" ? <ContextPage
+                preferences={preferences}
+                onChange={(next) => { setFormError(""); onPreferencesChange(next); }}
+                groups={providerModelGroups}
+                localModels={localModels}
+              />
+              : page.view === "skills" ? <SkillsPage notify={notify} onOpenForm={(skill) => setPage({ view: "skill", slug: skill?.slug ?? null })} /> : page.view === "mcp" ? <McpSettingsPage notify={notify} /> : page.view === "skill" ? <SkillDetailPage key={editingSkill ?? "new"} slug={editingSkill} onSaved={(slug) => { if (slug !== editingSkill) setPage({ view: "skill", slug }); }} onCancel={() => setPage({ view: "skills" })} onDeleted={() => setPage({ view: "skills" })} notify={notify} /> : <>
                 <SettingsPageTitle><h2 className="text-[17px] font-semibold tracking-tight">{page.endpoint ? "Edit provider" : "Add provider"}<FlashHighlight anchor="providers.add" /></h2></SettingsPageTitle>
                 <form onSubmit={(event) => void saveEndpoint(event)} className="max-w-xl space-y-4">
                   <label className="block text-sm text-[var(--muted)]">Provider name<input ref={nameRef} required value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} className="mt-1.5 h-10 w-full rounded-md border border-[var(--line)] bg-[var(--rail)] px-3 text-[13px] text-[var(--text)] outline-none placeholder:text-[var(--quiet)] focus:border-[var(--accent)]" placeholder="e.g. Local Ollama" /></label>
@@ -1279,16 +1261,6 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, onCle
           </div>
         </div>
       </div>
-      {confirmClear && <div className="fixed inset-0 z-[150] grid place-items-center bg-black/65 p-4">
-        <section role="dialog" aria-modal="true" aria-labelledby="clear-sessions-title" className="w-full max-w-sm rounded-lg border border-[var(--line)] bg-[var(--panel)] p-5 shadow-2xl" onKeyDown={(event) => { if (event.key === "Escape" && !clearingSessions) setConfirmClear(false); }}>
-          <h2 id="clear-sessions-title" className="text-[17px] font-semibold tracking-tight">Delete every session?</h2>
-          <p className="mt-2 text-[13px] leading-5 text-[var(--muted)]">This removes all conversations stored on this device and cannot be undone. Providers, local models, and settings are kept.</p>
-          <div className="mt-5 flex justify-end gap-2">
-            <button type="button" onClick={() => setConfirmClear(false)} disabled={clearingSessions} className="min-h-9 rounded-lg border border-[var(--line)] px-3.5 text-[13px] text-[var(--muted)] transition-colors hover:bg-[var(--raised)] disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]">Cancel</button>
-            <button type="button" onClick={() => void clearSessions()} disabled={clearingSessions} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-[var(--danger)] px-3.5 text-[13px] font-semibold text-[var(--page)] transition-opacity hover:opacity-90 disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--danger)]">{clearingSessions && <LoaderCircle size={15} className="animate-spin" />}{clearingSessions ? "Deleting…" : "Delete all"}</button>
-          </div>
-        </section>
-      </div>}
     </dialog>
   );
 }

@@ -25,7 +25,11 @@ use super::model::Model;
 /// `language` is a code the user set for this model, or `None` to let the engine
 /// detect it. Detection is a second pass through the audio, so pinning it is both
 /// faster and steadier for a microphone that only ever hears one language.
-pub fn transcribe(model: &Model, samples: &[i16], language: Option<&str>) -> Result<String, String> {
+pub fn transcribe(
+    model: &Model,
+    samples: &[i16],
+    language: Option<&str>,
+) -> Result<String, String> {
     let executable = engine::executable(model.executable()).ok_or_else(|| {
         format!(
             "{} is missing from the speech engine. Reinstall it from the Local page.",
@@ -145,7 +149,10 @@ mod tests {
 
     #[test]
     fn the_transcript_keeps_its_sentences_on_one_line() {
-        assert_eq!(clean(" Hello there.\n\n General Kenobi. "), "Hello there. General Kenobi.");
+        assert_eq!(
+            clean(" Hello there.\n\n General Kenobi. "),
+            "Hello there. General Kenobi."
+        );
     }
 
     #[test]

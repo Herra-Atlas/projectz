@@ -151,13 +151,7 @@ async fn fetch(app: &AppHandle, staging: &Path) -> Result<(), String> {
             .map_err(|error| format!("Could not write the engine: {error}"))?;
         hasher.update(&chunk);
         received += chunk.len() as u64;
-        let _ = app.emit(
-            "stt-progress",
-            Progress {
-                received,
-                total,
-            },
-        );
+        let _ = app.emit("stt-progress", Progress { received, total });
     }
     archive
         .flush()

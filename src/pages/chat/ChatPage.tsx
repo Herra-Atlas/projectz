@@ -4,6 +4,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen } from "@tauri-apps/api/event";
 import { ArrowUp, Check, ChevronLeft, ChevronRight, Clipboard, LoaderCircle, Mic, Paperclip, RotateCcw, SkipForward, Square, X } from "lucide-react";
 import ActivityPanel from "./ActivityPanel";
+import Welcome from "./Welcome";
 import { Markdown } from "./Markdown";
 import { PathText } from "./PathText";
 import { expandWorkspacePaths, trimWorkspacePaths } from "../../features/workspace/workspacePaths";
@@ -41,7 +42,6 @@ import {
 } from "../../features/chat/chatMode";
 import { EMPTY_TITLE_MODELS, type AiEvent, type AttachedFile, type BackgroundRun, type LocalModelEvent, type PendingChat, type SelectedText, type WebSearchOutput } from "./types";
 import type { ActivityStep, ChatMessage, ChatSession, SessionRunStatus, ToolStepStats } from "../../features/chat/types";
-import { withToolRecap } from "../../features/chat/toolRecap";
 
 import { closeOpenSteps, closeRunningThought } from "./closeOpenSteps";
 import { useDictation } from "../../features/stt/useDictation";
@@ -51,8 +51,8 @@ import { useAttachments } from "./useAttachments";
 import ContextRing from "./composer/ContextRing";
 import { contextUsage } from "./composer/contextUsage";
 import EffortControl from "./composer/EffortControl";
-import StartModelDialog from "./composer/StartModelDialog";
 import SlashMenu from "./composer/SlashMenu";
+import type { NotifyAction } from "../../features/notifications/types";
 import { exactCommand, matchCommands, slashQuery, type SlashCommand } from "./composer/slashCommands";
 
 /**
@@ -85,6 +85,37 @@ function attachSearch(run: BackgroundRun, search: WebSearchOutput) {
       search,
     });
   }
+}
+
+/**
+ * The notification that asks to start a local model.
+ *
+ * One key for the whole exchange: the ask, the loading row with its Stop, and the
+ * row that clears. Replacing by key is what makes it one card rather than a pile
+ * of stale questions.
+ */
+const MODEL_START_KEY = "local-model-start";
+
+/**
+ * Local model names, read once each.
+ *
+ * The prompt has to name the model it is about to load -- "the selected local
+ * model" asks a question the user cannot answer without going to look. The list
+ * is read on demand and kept for the life of the window; it is the same list the
+ * picker draws, not a second source of truth.
+ */
+const localModelNames = new Map<string, string>();
+
+async function localModelName(id: string): Promise<string> {
+  const known = localModelNames.get(id);
+  if (known) return known;
+  try {
+    const models = await invoke<{ id: string; name: string }[]>("local_models_list");
+    for (const model of models) localModelNames.set(model.id, model.name);
+  } catch {
+    // A name is a courtesy here; the prompt still works without it.
+  }
+  return localModelNames.get(id) ?? "The selected local model";
 }
 
 /**
@@ -132,7 +163,6 @@ type ChatPageProps = {
    * background reply would notify about a conversation the user is watching.
    */
   activeId?: string | null;
-  onOpenSettings: () => void;
   /**
    * Returns the conversation to send into, creating it when nothing is open.
    *
@@ -160,6 +190,16 @@ type ChatPageProps = {
   onWorkingModeChange: (sessionId: string, workingMode: WorkingMode) => void;
   onActivity: (sessionId: string, status: SessionRunStatus | null) => void;
   onNotify: (tone: "success" | "error", message: string) => void;
+  /**
+   * Raises the centred question, or replaces the one already there.
+   *
+   * A separate callback from `onNotify` because this one asks rather than
+   * reports: it carries actions, stays until answered, and is where a send is
+   * parked rather than lost.
+   */
+  onNotifyAction: NotifyAction;
+  /** Removes a notification by key, for a question whose work has ended. */
+  onClearNotification: (key: string) => void;
   onOpenUrl: (url: string) => void;
   /**
    * Opens a workspace-relative file in the right panel.
@@ -174,6 +214,15 @@ type ChatPageProps = {
   titleModels?: ModelSelection[];
   onAutoTitle: (sessionId: string, title: string) => void;
   /**
+   * The reasoning effort the Model section sets as the default for a *new*
+   * conversation. Empty means "let the provider choose" -- the field skips.
+   *
+   * A default, not a lock: it is applied only while the composer still holds
+   * the provider default, and only when the value is one this model actually
+   * accepts (a level one provider listed can be missing on the next one).
+   */
+  defaultEffort?: string;
+  /**
    * The open workspace root, or `null` when no folder is open.
    *
    * Used to shorten a pasted path and to draw a stored one short in the
@@ -183,7 +232,7 @@ type ChatPageProps = {
   workspaceRoot?: string | null;
 };
 
-export default function ChatPage({ endpointId, model, localModelId, session, sessionLoading = false, activeId = null, onOpenSettings, onEnsureSession, onFirstSend, onActivity, onModelSelect, onLocalModelSelect, modelRefreshKey, settingsRefreshKey = 0, onMessagesChange, onWorkingModeChange, onNotify, onOpenUrl, onOpenFile, titleModels, onAutoTitle, workspaceRoot }: ChatPageProps) {
+export default function ChatPage({ endpointId, model, localModelId, session, sessionLoading = false, activeId = null, onEnsureSession, onFirstSend, onActivity, onModelSelect, onLocalModelSelect, modelRefreshKey, settingsRefreshKey = 0, onMessagesChange, onWorkingModeChange, onNotify, onNotifyAction, onClearNotification, onOpenUrl, onOpenFile, titleModels, onAutoTitle, workspaceRoot, defaultEffort }: ChatPageProps) {
   const [messages, setMessages] = useState<ChatMessage[]>(session?.messages ?? []);
   // The latest transcript, for the run listener (a mount-time effect) to build on
   // when something arrives outside the current render -- a background sub-agent's
@@ -313,6 +362,16 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     { sessionId: string; text: string; attachments: AttachedFile[]; hidden?: boolean }[]
   >([]);
   const [queuedCount, setQueuedCount] = useState(0);
+  /** A retry the backend is waiting out: the composer counts it down. */
+  const [retryWait, setRetryWait] = useState<{ seconds: number; attempt: number; total: number } | null>(null);
+  // One tick a second, and no interval left running when there is nothing to count.
+  useEffect(() => {
+    if (!retryWait || retryWait.seconds <= 0) return;
+    const timer = window.setTimeout(() => {
+      setRetryWait((current) => current ? { ...current, seconds: Math.max(0, current.seconds - 1) } : current);
+    }, 1000);
+    return () => window.clearTimeout(timer);
+  }, [retryWait]);
   // `dispatch` is rebuilt every render; the run listener holds this ref so it
   // calls the latest one rather than a stale closure from mount.
   const dispatchRef = useRef<
@@ -346,9 +405,15 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     setQueuedCount(queuedMessagesRef.current.length);
     void dispatchRef.current(item.text, item.attachments, base, sessionId, false, item.hidden ?? false);
   }, []);
-  const [startModelPrompt, setStartModelPrompt] = useState(false);
   const [startingModel, setStartingModel] = useState(false);
   const pendingChatRef = useRef<PendingChat | null>(null);
+  /**
+   * The kind of the open conversation, readable from the mount-time event
+   * listener. A run from another door is only adopted when it belongs to the
+   * transcript on screen, and a channel run is the kind this page mirrors.
+   */
+  const sessionKindRef = useRef(session?.kind);
+  sessionKindRef.current = session?.kind;
   /**
    * Mode and access level per conversation, as last chosen in this window.
    *
@@ -368,6 +433,8 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   // matches the preferences without the settings modal having to push them down.
   const [showMetrics, setShowMetrics] = useState(true);
   const [sendKey, setSendKey] = useState<"Enter" | "Ctrl + Enter">("Enter");
+  // The empty screen greets by name when one was given; "" keeps the greeting's own wording.
+  const [userName, setUserName] = useState("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const backgroundRunsRef = useRef<Map<string, BackgroundRun>>(new Map());
   const sessionRunIdsRef = useRef<Map<string, string>>(new Map());
@@ -397,6 +464,22 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     streamActivityRef.current = [];
     setStreamActivity([]);
   }, []);
+
+  /**
+   * Puts the live bubble away without writing anything.
+   *
+   * Used by a run this window did not start: its transcript is saved by the
+   * backend, so all this page has to do when the run ends is stop drawing.
+   */
+  const clearLiveRunState = useCallback(() => {
+    streamTextRef.current = "";
+    streamReasoningRef.current = "";
+    setStreamText("");
+    setStreamReasoning("");
+    resetStreamActivity();
+    setSearching(false);
+    setRunning(false);
+  }, [resetStreamActivity]);
   const listenerReadyRef = useRef<Promise<void>>(Promise.resolve());
   const onActivityRef = useRef(onActivity);
   onActivityRef.current = onActivity;
@@ -508,9 +591,12 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
 
   useEffect(() => {
     let active = true;
-    invoke<{ showMetrics?: boolean; sendWith?: "Enter" | "Ctrl + Enter" } | null>("database_get_setting", { key: "app.general" })
+    invoke<{ userName?: string; showMetrics?: boolean; sendWith?: "Enter" | "Ctrl + Enter" } | null>("database_get_setting", { key: "app.general" })
       .then((general) => {
         if (!active || !general) return;
+        // Trimmed here rather than in Welcome, so the greeting always draws a
+        // clean name and never the padding a paste left around it.
+        if (general.userName !== undefined) setUserName(general.userName.trim());
         if (general.showMetrics !== undefined) setShowMetrics(general.showMetrics);
         if (general.sendWith) setSendKey(general.sendWith);
       })
@@ -574,6 +660,16 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   useEffect(() => {
     setEffort((current) => (effortValues.includes(current) ? current : EFFORT_PROVIDER_DEFAULT));
   }, [effortValues.join(",")]);
+  // The Model section's default effort, seeded the way the clamp above works:
+  // only while the composer still holds "let the provider choose", and only
+  // when the stored level is one this model actually offers. A conversation
+  // already on its own level is left alone.
+  useEffect(() => {
+    if (!defaultEffort) return;
+    setEffort((current) =>
+      current === EFFORT_PROVIDER_DEFAULT && effortValues.includes(defaultEffort) ? defaultEffort : current,
+    );
+  }, [defaultEffort, activeId, effortValues.join(",")]);
   const canSetEffort = reasoningSupported(capabilities);
   const canUseTools = toolsSupported(capabilities);
   // The level a conversation with no level of its own falls back to: the app-wide
@@ -671,6 +767,25 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       if (event.payload.type === "leave") setDraggingFiles(false);
     });
     return () => { unlistenPromise.then((unlisten) => unlisten()); };
+  }, []);
+
+  // A conversation written by a channel is saved with no window watching. When it
+  // is the one on screen, re-read it rather than waiting for a restart -- and
+  // deliberately without writing it back, since the backend already did.
+  useEffect(() => {
+    const unlisten = listen<{ sessionId?: string; kind?: string }>("messaging-event", async (event) => {
+      const id = event.payload?.sessionId;
+      if (!id || id !== sessionIdRef.current) return;
+      try {
+        const stored = await invoke<ChatMessage[]>("database_list_session_messages", { sessionId: id });
+        if (sessionIdRef.current !== id) return;
+        messagesRef.current = stored;
+        setMessages(stored);
+      } catch {
+        // The transcript is still in the database; the next open will read it.
+      }
+    });
+    return () => { void unlisten.then((off) => off()); };
   }, []);
 
   useEffect(() => {
@@ -793,7 +908,58 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         });
         return;
       }
-      const run = backgroundRunsRef.current.get(payload.run_id);
+      /**
+       * Takes over a run this window did not start.
+       *
+       * A message from a phone is answered by the same backend loop, and its
+       * events carry the conversation it belongs to. When that conversation is
+       * the one on screen, the run is drawn live here rather than waiting for the
+       * transcript to be written at the end -- which is the difference between
+       * watching the agent work and refreshing to find out what happened.
+       *
+       * Only a channel conversation is adopted: a scheduled job's transcript is
+       * opened after the fact, and its events already reach the sidebar's dot.
+       */
+      const adoptExternalRun = (event: AiEvent): BackgroundRun | undefined => {
+        const sessionId = event.session_id;
+        if (!sessionId || sessionId !== sessionIdRef.current) return undefined;
+        if (sessionKindRef.current !== "telegram") return undefined;
+        const claimed = sessionRunIdsRef.current.get(sessionId);
+        if (claimed) return backgroundRunsRef.current.get(claimed);
+        const external: BackgroundRun = {
+          sessionId,
+          // Seeded from the transcript on screen only to give the run a base to
+          // draw over. Nothing is written back from here -- the backend owns the
+          // save -- so this array is never persisted.
+          baseMessages: messagesRef.current,
+          text: "",
+          reasoning: "",
+          activity: [],
+          searching: false,
+          modelLabel: event.metrics?.model ?? "",
+          providerLabel: event.metrics?.provider,
+          requestStartedAt: 0,
+          generationStartedAt: 0,
+          localModel: false,
+          isReasoning: false,
+          external: true,
+        };
+        backgroundRunsRef.current.set(event.run_id, external);
+        sessionRunIdsRef.current.set(sessionId, event.run_id);
+        runIdRef.current = event.run_id;
+        streamTextRef.current = "";
+        streamReasoningRef.current = "";
+        setStreamText("");
+        setStreamReasoning("");
+        resetStreamActivity();
+        setSearching(false);
+        setRunning(true);
+        setLivePromptTokens(null);
+        onActivityRef.current(sessionId, "streaming");
+        return external;
+      };
+
+      const run = backgroundRunsRef.current.get(payload.run_id) ?? adoptExternalRun(payload);
       if (!run) return;
       const isActive = run.sessionId === sessionIdRef.current;
       const finishRun = () => {
@@ -803,6 +969,34 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           sessionRunIdsRef.current.delete(run.sessionId);
         }
       };
+      // The backend is waiting out a failed attempt before trying again. The wait is
+      // shown twice on purpose: a row inside "Worked for ..." like a tool call, and a
+      // countdown above the composer, which is where the eye already is when a reply
+      // seems to have stalled.
+      if (payload.kind === "retrying") {
+        const attempt = Number(payload.metrics?.attempt ?? 1);
+        const total = Number(payload.metrics?.attempts ?? 4);
+        const delay = Number(payload.metrics?.delay_seconds ?? 0);
+        run.activity.push({
+          kind: "tool",
+          tool: "retrying",
+          label: "Retrying",
+          detail: `attempt ${attempt} of ${total} · retrying in ${delay}s`,
+          outcome: payload.text ?? "",
+          failed: false,
+          running: false,
+        });
+        if (isActive) {
+          setRetryWait({ seconds: delay, attempt, total });
+          streamActivityRef.current = [...run.activity];
+          scheduleStreamFlush();
+        }
+        return;
+      }
+      // Any real progress means the wait is over.
+      if (["delta", "tool_call", "completed", "failed", "stopped"].includes(payload.kind)) {
+        setRetryWait(null);
+      }
       // The backend compacted the request before this reply's first call. The
       // notice belongs in the transcript, marked hidden: it is drawn as a centred
       // line, and adding it to the run's own base means every terminating path --
@@ -1033,6 +1227,18 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         // activity is what the next request's tool recap is derived from, so the
         // model would read a call that never finished.
         finishRun();
+        // A channel run's transcript is written by the backend a moment from now,
+        // and the `messaging-event` that follows re-reads it. Storing a copy built
+        // here would race that write with a base array this page may have loaded
+        // before the user's message was saved.
+        if (run.external) {
+          onActivityRef.current(run.sessionId, isActive ? null : "done");
+          if (isActive) {
+            clearLiveRunState();
+            setLivePromptTokens(null);
+          }
+          return;
+        }
         const next = [...run.baseMessages, { role: "assistant" as const, content: response, reasoning: run.reasoning || undefined, ...(run.activity.length > 0 ? { activity: run.activity } : {}), modelId: run.modelLabel, providerId: run.providerLabel, metrics: { prompt_seconds: promptSeconds, generation_seconds: generationSeconds, elapsed_seconds: elapsedSeconds, tokens_per_second: generationTokensPerSecond, generation_rate_estimated: payload.metrics?.generation_tokens_per_second == null, completion_tokens: completionTokens, ...(promptTokens !== undefined ? { prompt_tokens: promptTokens } : {}), ...(usedPromptTokens !== undefined ? { used_prompt_tokens: usedPromptTokens } : {}), ...(usedCompletionTokens !== undefined ? { used_completion_tokens: usedCompletionTokens } : {}), ...(promptEvalTokensPerSecond !== undefined ? { prompt_eval_tokens_per_second: promptEvalTokensPerSecond } : {}) } }];
         onActivityRef.current(run.sessionId, isActive ? null : "done");
         onMessagesChangeRef.current(run.sessionId, next);
@@ -1065,6 +1271,15 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         // gets the closed steps, since `finishRun` is what closes them.
         finishRun();
         onActivityRef.current(run.sessionId, null);
+        // A stopped channel run is finished by the backend's own save: there is
+        // nothing this page may write, and its base array is not the record.
+        if (run.external) {
+          if (isActive) {
+            clearLiveRunState();
+            setLivePromptTokens(null);
+          }
+          return;
+        }
         let base: ChatMessage[] = run.baseMessages;
         // Text **or** steps. A reply stopped while it was still working has no text
         // yet -- the answer is the last thing it writes -- so gating on text alone
@@ -1098,6 +1313,14 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         // still counting. This is what the next request's recap is built from,
         // which is how the model knows an action it already took must not repeat.
         finishRun();
+        if (run.external) {
+          onActivityRef.current(run.sessionId, isActive ? null : "error");
+          if (isActive) {
+            clearLiveRunState();
+            setLivePromptTokens(null);
+          }
+          return;
+        }
         const next = [...run.baseMessages, { role: "assistant" as const, content: run.text, reasoning: run.reasoning || undefined, ...(run.activity.length > 0 ? { activity: run.activity } : {}), modelId: run.modelLabel, providerId: run.providerLabel }];
         onActivityRef.current(run.sessionId, isActive ? null : "error");
         onMessagesChangeRef.current(run.sessionId, next);
@@ -1132,6 +1355,9 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       // work the user paid for and never asked to stop.
       for (const [runId, run] of backgroundRunsRef.current) {
         backgroundRunsRef.current.delete(runId);
+        // A channel run's transcript is the backend's to write. Unmounting this
+        // page must not push this window's copy over it.
+        if (run.external) continue;
         // The same test as the stop path: a run that got as far as calling a tool
         // did something worth keeping, whether or not it had started writing.
         if (hasPartialReply(run)) {
@@ -1145,7 +1371,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       sessionRunIdsRef.current.clear();
       unlistenPromise.then((unlisten) => unlisten());
     };
-  }, [onNotify, drainQueued]);
+  }, [onNotify, drainQueued, clearLiveRunState]);
 
   /**
    * Writes out an in-flight reply when the window is going away.
@@ -1160,7 +1386,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   useEffect(() => {
     const persistLiveRuns = () => {
       for (const run of backgroundRunsRef.current.values()) {
-        if (!hasPartialReply(run)) continue;
+        if (run.external || !hasPartialReply(run)) continue;
         onMessagesChangeRef.current(run.sessionId, [
           ...run.baseMessages,
           partialReplyMessage({ ...run, activity: closeOpenSteps(run.activity) }),
@@ -1236,25 +1462,15 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     onMessagesChange(sessionId, requestMessages);
 
     await listenerReadyRef.current;
-    let instructions = "";
-    try {
-      const general = await invoke<{ instructions?: string } | null>("database_get_setting", { key: "app.general" });
-      instructions = general?.instructions?.trim() ?? "";
-    } catch {
-      instructions = "";
-    }
-    // What each earlier reply did, carried on that reply's own text. The provider
-    // is sent only `{role, content}`, so without this the model remembers what it
-    // said and not what it saw -- see `toolRecap.ts`. Derived on every send, from
-    // the stored steps, so the bytes are identical from one turn to the next and
-    // a provider's cache still matches.
-    const wireMessages = requestMessages.map(withToolRecap);
-    const messagesWithInstructions = instructions
-      ? [{ role: "system" as const, content: instructions }, ...wireMessages]
-      : wireMessages;
+    // What each earlier reply did, carried on that reply's own text. The backend is
+    // sent only `{role, content}`, so without this the model remembers what it said
+    // and not what it saw. Derived here from the stored steps, so the bytes are
+    // identical every turn -- and the same Rust function does it for a job and for a
+    // message from a phone, which is what keeps all three prefixes alike.
+    const wireMessages = await invoke<ChatMessage[]>("ai_recap_messages", { messages: requestMessages });
     try {
       await invoke("ai_chat", {
-        request: { run_id: runId, session_id: sessionId, session_title: sessionTitle || undefined, messages: messagesWithInstructions, endpoint_id: endpointId || null, local_model: Boolean(localModelId), model: localModelId ? "projectz-local" : model || null, // Sent verbatim when there is a level to send: the value came from the
+        request: { run_id: runId, session_id: sessionId, session_title: sessionTitle || undefined, messages: wireMessages, endpoint_id: endpointId || null, local_model: Boolean(localModelId), model: localModelId ? "projectz-local" : model || null, // Sent verbatim when there is a level to send: the value came from the
         // provider's own list of accepted levels, so translating or guessing it
         // here is what causes HTTP 400. An empty value is the provider's own default
         // and sends **no field at all**, which is what lets the provider choose --
@@ -1298,17 +1514,60 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   const sendMessagesRef = useRef(sendMessages);
   sendMessagesRef.current = sendMessages;
 
+  /** Puts a parked send back in the composer, exactly as it was typed. */
+  const restorePendingChat = () => {
+    const pending = pendingChatRef.current;
+    pendingChatRef.current = null;
+    if (!pending) return;
+    const lastUserMessage = [...pending.messages].reverse().find((message) => message.role === "user");
+    if (lastUserMessage) setInput(lastUserMessage.content);
+    addAttachments(pending.attachments);
+  };
+
+  /**
+   * Sends the message that was waiting for the engine.
+   *
+   * Through the ref, so the reply goes out at the mode and access level in force
+   * now rather than the ones the listener captured at mount.
+   */
+  const resumePendingChat = () => {
+    const pending = pendingChatRef.current;
+    pendingChatRef.current = null;
+    setStartingModel(false);
+    onClearNotification(MODEL_START_KEY);
+    if (!pending) return;
+    setInput("");
+    void sendMessagesRef.current(pending.messages, pending.sessionId, pending.attachments, pending.skillIds);
+  };
+
   const startOrQueueChat = async (requestMessages: ChatMessage[], sessionId: string, requestAttachments: AttachedFile[], skillIds: string[], clearDraft = true) => {
     if (!localModelId) return sendMessages(requestMessages, sessionId, requestAttachments, skillIds, clearDraft);
     try {
-      const status = await invoke<{ loaded_model_id: string | null }>("local_model_status");
+      const status = await invoke<{ loaded_model_id: string | null; loading_model_id: string | null }>("local_model_status");
       if (status.loaded_model_id === localModelId) return sendMessages(requestMessages, sessionId, requestAttachments, skillIds, clearDraft);
       // Carried through the model-start pause rather than read at send time. The
       // skill was chosen for this message, and it is still that message when the
       // engine finally comes up -- reading a later state here would drop it.
       pendingChatRef.current = { messages: requestMessages, sessionId, attachments: requestAttachments, skillIds };
       setInput("");
-      setStartModelPrompt(true);
+      const name = await localModelName(localModelId);
+      // A load already in flight is not asked about again: the answer would be
+      // the same one the user already gave, and the card is already showing it.
+      if (status.loading_model_id === localModelId) {
+        showStartingModel(name);
+        return true;
+      }
+      setStartingModel(false);
+      onNotifyAction({
+        key: MODEL_START_KEY,
+        title: "Start local model?",
+        message: `${name} is not loaded. Loading it stops any other local model the app is using.`,
+        actions: [
+          { label: "Not now", onSelect: cancelStartModel },
+          { label: "Start model", primary: true, onSelect: () => void confirmStartModel() },
+        ],
+        onDismiss: cancelStartModel,
+      });
       return true;
     } catch (reason) {
       onNotify("error", `Could not check local model status: ${String(reason)}`);
@@ -1316,64 +1575,120 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     }
   };
 
-  useEffect(() => {
-    const unlistenPromise = listen<LocalModelEvent>("local-model-event", (event) => {
-      const payload = event.payload;
-      if (!pendingChatRef.current || payload.modelId !== localModelId) return;
-      if (payload.kind === "loaded") {
-        const pending = pendingChatRef.current;
-        pendingChatRef.current = null;
-        setStartModelPrompt(false);
-        setStartingModel(false);
-        setInput("");
-        // Through the ref, so the reply goes out at the mode and access level in
-        // force now rather than the ones this listener captured at mount.
-        void sendMessagesRef.current(pending.messages, pending.sessionId, pending.attachments, pending.skillIds);
-      } else if (payload.kind === "failed") {
-        setStartingModel(false);
-        if (pendingChatRef.current) {
-          const lastUserMessage = [...pendingChatRef.current.messages].reverse().find((message) => message.role === "user");
-          if (lastUserMessage) setInput(lastUserMessage.content);
-          addAttachments(pendingChatRef.current.attachments);
-        }
-        onNotify("error", payload.message || "The local model could not be started.");
-      setStartModelPrompt(false);
-      pendingChatRef.current = null;
-      }
+  /** The centred row for a load that is underway, with a way out of it. */
+  const showStartingModel = (name: string) => {
+    setStartingModel(true);
+    onNotifyAction({
+      key: MODEL_START_KEY,
+      tone: "loading",
+      title: `Starting ${name}`,
+      message: "This can take a minute. Your message will be sent as soon as it answers.",
+      actions: [{ label: "Stop loading", onSelect: stopModelStart }],
+      onDismiss: stopModelStart,
     });
-    return () => { unlistenPromise.then((unlisten) => unlisten()); };
-  }, [localModelId, onMessagesChange]);
+  };
 
   const confirmStartModel = async () => {
-    if (!localModelId || startingModel) return;
-    setStartModelPrompt(false);
-    setStartingModel(true);
+    if (!localModelId || startingModel || !pendingChatRef.current) return;
+    const name = await localModelName(localModelId);
+    showStartingModel(name);
     try {
       await invoke("local_model_load", { id: localModelId });
     } catch (reason) {
+      // The synchronous failures -- a missing engine, a port already taken, a
+      // file that has moved -- are reported by the call itself, so the question
+      // is taken down and the draft put back here. An engine that dies later is
+      // the `failed` event below, which goes through the same reset.
       setStartingModel(false);
-      if (pendingChatRef.current) {
-        const pending = pendingChatRef.current;
-        const lastUserMessage = [...pending.messages].reverse().find((message) => message.role === "user");
-        if (lastUserMessage) setInput(lastUserMessage.content);
-        addAttachments(pending.attachments);
-        pendingChatRef.current = null;
-      }
+      onClearNotification(MODEL_START_KEY);
+      restorePendingChat();
       onNotify("error", String(reason));
     }
   };
 
   const cancelStartModel = () => {
-    setStartModelPrompt(false);
     setStartingModel(false);
-    if (pendingChatRef.current) {
-      const pending = pendingChatRef.current;
-      const lastUserMessage = [...pending.messages].reverse().find((message) => message.role === "user");
-      if (lastUserMessage) setInput(lastUserMessage.content);
-      addAttachments(pending.attachments);
-    }
-    pendingChatRef.current = null;
+    onClearNotification(MODEL_START_KEY);
+    restorePendingChat();
   };
+
+  /** Stops a load the user no longer wants to wait for. */
+  const stopModelStart = () => {
+    setStartingModel(false);
+    onClearNotification(MODEL_START_KEY);
+    restorePendingChat();
+    // Stopping a load is the same reach as starting one: it frees the process
+    // this card began.
+    void invoke("local_model_unload").catch(() => undefined);
+  };
+
+  // A finished load, or a failed one, must end the question. Both are handled by
+  // model id rather than by whether a send is parked, because a load raised in
+  // Settings still has to clear this page's card -- and a failure must never
+  // leave the card reading "Starting…" with no way out, which is what a stuck
+  // `starting` flag used to do.
+  useEffect(() => {
+    const unlistenPromise = listen<LocalModelEvent>("local-model-event", (event) => {
+      const payload = event.payload;
+      if (payload.modelId && payload.modelId !== localModelId) return;
+      if (payload.kind === "loaded") {
+        resumePendingChat();
+        return;
+      }
+      if (payload.kind === "failed") {
+        setStartingModel(false);
+        onClearNotification(MODEL_START_KEY);
+        if (pendingChatRef.current) {
+          restorePendingChat();
+          // The corner error is raised by the app shell's own listener; this page
+          // only puts the message back where the user left it.
+        }
+      }
+    });
+    return () => { unlistenPromise.then((unlisten) => unlisten()); };
+  }, [localModelId, onClearNotification, onMessagesChange]);
+
+  // A status check while a load is in flight, as a backstop for an event that
+  // never arrives (a process killed from outside, a webview that missed the
+  // emit). It only acts on a settled answer: loaded resumes the send, and
+  // neither figure set means the engine is gone -- the exact state that used to
+  // leave the prompt spinning forever.
+  useEffect(() => {
+    if (!startingModel || !localModelId) return;
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const status = await invoke<{ loaded_model_id: string | null; loading_model_id: string | null }>("local_model_status");
+        if (cancelled) return;
+        if (status.loaded_model_id === localModelId) {
+          resumePendingChat();
+          return;
+        }
+        if (!status.loading_model_id) {
+          setStartingModel(false);
+          onClearNotification(MODEL_START_KEY);
+          if (pendingChatRef.current) {
+            restorePendingChat();
+            onNotify("error", "The local model stopped before it finished loading.");
+          }
+        }
+      } catch {
+        // A status read that fails is not evidence the load failed; the next
+        // tick asks again.
+      }
+    };
+    const timer = window.setInterval(() => { void check(); }, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [startingModel, localModelId, onClearNotification, onNotify]);
+
+  // Names the model before the prompt needs it, so the card does not appear with
+  // a generic label while a list is read.
+  useEffect(() => {
+    if (localModelId) void localModelName(localModelId);
+  }, [localModelId]);
 
   /**
    * Starts a reply for `messageText` on top of `baseMessages`.
@@ -1488,26 +1803,34 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     // managed, because the transcript is the record and a cancelled reply that
     // dropped its work misreports what happened, including one stopped while it was
     // still reading files, where the steps *are* everything it did.
+    // A channel run owns its transcript on the backend; stopping it only stops
+    // drawing here, and the saved stopped turn arrives through `messaging-event`.
+    const external = run?.external === true;
     let base: ChatMessage[] = run?.baseMessages ?? messagesRef.current;
-    if (run && hasPartialReply(run)) {
+    if (run && !external && hasPartialReply(run)) {
       base = [...run.baseMessages, partialReplyMessage(run)];
       persistMessages(run.sessionId, base);
     }
     if (run && run.sessionId === sessionIdRef.current) {
-      setMessages(base);
-      streamTextRef.current = "";
-      streamReasoningRef.current = "";
-      setStreamText("");
-      setStreamReasoning("");
-      resetStreamActivity();
-      setSearching(false);
+      if (external) {
+        clearLiveRunState();
+      } else {
+        setMessages(base);
+        streamTextRef.current = "";
+        streamReasoningRef.current = "";
+        setStreamText("");
+        setStreamReasoning("");
+        resetStreamActivity();
+        setSearching(false);
+      }
       setLivePromptTokens(null);
     }
     // A message queued while this reply ran is sent now, not left waiting for the
     // `stopped` event: this handler removes the run before that event arrives, so
     // the listener's run lookup discards it and the queue would otherwise sit until
-    // some later reply happened to end.
-    if (run) drainQueued(run.sessionId, base);
+    // some later reply happened to end. A channel run's queue is left alone --
+    // the next turn from the app is a message, not a continuation of that run.
+    if (run && !external) drainQueued(run.sessionId, base);
     void invoke("ai_cancel_chat", { runId });
   };
 
@@ -1779,22 +2102,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       {draggingFiles && <div aria-hidden="true" className="pointer-events-none absolute inset-3 z-30 grid place-items-center rounded-xl border-2 border-dashed border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_8%,var(--page))] text-sm font-medium text-[var(--text)]">Drop files to attach</div>}
       <div ref={threadRef} onScroll={handleThreadScroll} onMouseUp={handleThreadSelection} className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-5 py-8 sm:px-8">
         {messages.length === 0 && !streamText ? (
-          <section className="mx-auto flex w-full max-w-3xl flex-1 flex-col justify-center pb-16" aria-labelledby="welcome-title">
-            {/* Two lines and nothing else. The empty screen is a moment of
-                indecision, and it is resolved by the composer below, not by
-                either a wall of suggested prompts or a description of the
-                software. The headline asks the question; the line under it says
-                only what the user needs to know to answer it. */}
-            <h2 id="welcome-title" className="max-w-xl text-[28px] font-medium leading-[1.15] tracking-[-0.035em] sm:text-[34px]">What are we working on?</h2>
-            <p className="mt-3 max-w-md text-[14px] leading-6 text-[var(--muted)]">
-              {endpointId || localModelId
-                ? "Ask a question, or switch to Agent to let the model read and edit your workspace."
-                : "Choose a model below to begin. Your conversations stay on this device."}
-            </p>
-            {!endpointId && !localModelId && (
-              <button type="button" onClick={onOpenSettings} className="mt-6 inline-flex min-h-9 w-fit items-center rounded-lg border border-[var(--line)] px-3.5 text-[13px] font-medium text-[var(--text)] transition-colors hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]">Set up a provider</button>
-            )}
-          </section>
+          <Welcome hasModel={Boolean(endpointId || localModelId)} mode={mode} userName={userName} />
         ) : (
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-7 py-3">
             {/* User and assistant only. A web search used to be stored as its own `tool`
@@ -1967,6 +2275,11 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
             {slashMatches.length > 0 && (
               <SlashMenu commands={slashMatches} activeIndex={slashActive} onChoose={runSlashCommand} />
             )}
+            {retryWait && (
+              <div role="status" className="px-2.5 pt-2 text-[11px] text-[var(--muted)]">
+                Retrying{retryWait.seconds > 0 ? ` in ${retryWait.seconds}s` : "…"} (attempt {retryWait.attempt} of {retryWait.total})
+              </div>
+            )}
             {queuedCount > 0 && (
               <div className="px-2.5 pt-2 text-[11px] text-[var(--quiet)]">
                 {queuedCount} {queuedCount === 1 ? "message" : "messages"} queued — sent when this reply ends
@@ -2091,7 +2404,6 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           </div>
         </form>
       </div>
-      {startModelPrompt && <StartModelDialog starting={startingModel} onConfirm={() => void confirmStartModel()} onCancel={cancelStartModel} />}
     </main>
   );
 }

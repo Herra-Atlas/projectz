@@ -202,7 +202,10 @@ mod tests {
         assert_eq!(settings.speed_for(None), 1.5);
         // A voice nobody has touched speaks at its own pace rather than borrowing
         // another's.
-        assert_eq!(settings.speed_for(Some("C:/voices/new.onnx")), DEFAULT_SPEED);
+        assert_eq!(
+            settings.speed_for(Some("C:/voices/new.onnx")),
+            DEFAULT_SPEED
+        );
     }
 
     #[test]
@@ -223,7 +226,10 @@ mod tests {
 
         // Back to the built-in voice rather than pointing at a file that is gone.
         assert!(settings.voice.is_none());
-        assert_eq!(settings.speed_for(Some("C:/voices/one.onnx")), DEFAULT_SPEED);
+        assert_eq!(
+            settings.speed_for(Some("C:/voices/one.onnx")),
+            DEFAULT_SPEED
+        );
         // The other voice's pace is untouched.
         assert_eq!(settings.speed_for(None), 1.1);
     }

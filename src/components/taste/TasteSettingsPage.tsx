@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ChevronRight, LoaderCircle, Play, RotateCcw } from "lucide-react";
+import { ChevronRight, LoaderCircle, Play } from "lucide-react";
 import HelpMark from "../HelpMark";
 import { ANCHOR_ATTRIBUTE, FlashHighlight, MARKABLE_ATTRIBUTE, SettingRow, SettingsPageTitle, SettingsSection, Toggle } from "../SettingsSection";
 import TitleModelPicker from "../TitleModelPicker";
@@ -33,9 +33,8 @@ type TasteSettingsPageProps = {
  * never be something they cannot correct.
  */
 export default function TasteSettingsPage({ notify, store, groups, localModels }: TasteSettingsPageProps) {
-  const { status, history, error, busy, save, runNow, reset, updateItem, deleteItem } = store;
+  const { status, history, error, busy, save, runNow, updateItem, deleteItem } = store;
   const [days, setDays] = useState("4");
-  const [confirmReset, setConfirmReset] = useState(false);
   const [runsOpen, setRunsOpen] = useState(false);
 
   // The backend clamps the interval and moves the next run when the cadence
@@ -82,13 +81,6 @@ export default function TasteSettingsPage({ notify, store, groups, localModels }
         `Taste updated · ${result.added} added, ${result.updated} updated, ${result.removed} removed`,
       );
     }
-  };
-
-  const forget = async () => {
-    const next = await reset();
-    setConfirmReset(false);
-    if (next) notify("success", "Learned profile deleted. Run history is kept.");
-    else notify("error", "The learned profile could not be deleted.");
   };
 
   const update = async (id: number, text: string) => {
@@ -266,47 +258,6 @@ export default function TasteSettingsPage({ notify, store, groups, localModels }
           )}
         </>
       )}
-
-      <SettingsSection title="Reset">
-        <SettingRow
-          anchor="taste.reset"
-          label="Forget the learned profile"
-          description="Removes every learned fact and makes the next run read the conversations again."
-          control={
-            confirmReset ? (
-              <div className="flex shrink-0 items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setConfirmReset(false)}
-                  disabled={busy || running}
-                  className="min-h-9 rounded-lg px-3 text-[13px] text-[var(--muted)] hover:bg-[var(--raised)] disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void forget()}
-                  disabled={busy || running}
-                  className="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-[var(--danger)] px-3 text-[13px] font-semibold text-[var(--page)] transition-opacity hover:opacity-90 disabled:opacity-50"
-                >
-                  <RotateCcw size={14} />
-                  Delete profile
-                </button>
-              </div>
-            ) : (
-              <button
-                type="button"
-                onClick={() => setConfirmReset(true)}
-                disabled={busy || running}
-                className="inline-flex min-h-9 shrink-0 items-center gap-1.5 rounded-lg border border-[var(--line)] px-3 text-[13px] text-[var(--muted)] transition-colors hover:border-[var(--danger)] hover:text-[var(--danger)] disabled:opacity-50"
-              >
-                <RotateCcw size={14} />
-                Reset…
-              </button>
-            )
-          }
-        />
-      </SettingsSection>
     </>
   );
 }

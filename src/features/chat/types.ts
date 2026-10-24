@@ -326,8 +326,11 @@ export type ChatSessionHeader = {
    * `undefined` reads as `chat`, which is what every conversation saved before
    * sub-agents existed is. `job` is a session a scheduled job ran as: listed like a
    * chat, because its transcript is worth reopening, but started by nobody.
+   * `telegram` is a conversation answered from a messaging channel; it is listed
+   * too, under its own heading, because it is a conversation the user can open
+   * and continue from the app.
    */
-  kind?: "chat" | "subagent" | "job";
+  kind?: "chat" | "subagent" | "job" | "telegram";
   /**
    * The conversation that spawned this run, present only when `kind` is
    * `subagent`. The panel groups runs under the chat they came from.

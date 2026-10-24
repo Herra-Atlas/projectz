@@ -7,3 +7,4 @@
 pub mod browser;
 pub mod fs;
 pub mod terminal;
+pub mod watch;

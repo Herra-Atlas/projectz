@@ -233,7 +233,11 @@ pub async fn stream_chat(
     vision_default: Option<(Endpoint, String)>,
     // How aggressively to elide old context before sending. Read from the stored
     // preference by the runtime and carried on the request, like `reasoning`.
-    compaction: crate::ai::compact::Compaction,
+    compression: crate::ai::compact::Compression,
+    // The run's own ceilings: rounds for this loop, and what a spawned
+    // sub-agent gets for its own rounds, concurrency and effort. Resolved by
+    // the runtime from the stored preferences, like the rest of the knobs.
+    limits: crate::ai::types::RunLimits,
     context_window: Option<u64>,
     local_context_window: Option<u64>,
     previous_prompt_tokens: Option<u64>,
@@ -271,14 +275,22 @@ pub async fn stream_chat(
     // See `ToolCache::next_stamp`.
 
     let mut conversation = prepend_environment(payload, mode, database);
-    // **Compaction is a boundary, never a step.** It is decided once, from the
+    // **Compression is a boundary, never a step.** It is decided once, from the
     // previous reply's measured prompt size, before this run sends anything. The
-    // loop below deliberately does not re-check it: a run that crosses 80%
+    // loop below deliberately does not re-check it: a run that crosses the trigger
     // part-way through is still using the tool output it just received, and
     // eliding that mid-work would remove the evidence the model is reasoning over.
     // A long run is bounded by its step budget and by each tool result's own cap.
-    if crate::ai::compact::should_compact(compaction, previous_prompt_tokens, context_window) {
-        crate::ai::compact::apply(&mut conversation, compaction);
+    let target_tokens = context_window.map(|window| {
+        // The configured target, as a token number. At least one: a target of
+        // zero would demand a request of nothing, and `apply` would strip the
+        // whole protected tail chasing it -- which no setting should mean.
+        (((window as f64) * compression.target) as usize).max(1)
+    });
+    let passes =
+        crate::ai::compact::should_compress(compression, previous_prompt_tokens, context_window);
+    if passes {
+        let outcome = crate::ai::compact::apply(&mut conversation, compression, target_tokens);
         // Tell the transcript. The user asked to see this the way a finished
         // sub-agent is shown, rather than discovering later that context moved.
         on_event(ChatEvent {
@@ -286,10 +298,41 @@ pub async fn stream_chat(
             session_id: None,
             sequence: 0,
             kind: "compaction".into(),
-            text: Some(crate::ai::compact::notice(compaction).to_string()),
+            text: Some(crate::ai::compact::notice().to_string()),
             error: None,
             metrics: None,
         });
+        // The summary is the only depth that costs a model call, and it runs only
+        // when elision and the drop both left the request above the target. The
+        // estimate losing to the *summariser's own output* is fine: whatever comes
+        // back is one bounded message, and a long summary is still far shorter than
+        // the turns it replaced.
+        let still_over = target_tokens
+            .map(|target| crate::ai::compact::estimate_tokens(&conversation) > target)
+            .unwrap_or(false);
+        if still_over && !outcome.dropped.is_empty() {
+            if let Some(summary) = summarise_dropped(
+                &endpoint,
+                model,
+                &outcome.dropped,
+                compression.model_timeout_secs,
+            )
+            .await
+            {
+                // After the system block -- a `user` summary mid-conversation is
+                // a turn the template accepts, a second `system` one may not be.
+                let insert_at = conversation
+                    .iter()
+                    .take_while(|message| {
+                        message.get("role").and_then(Value::as_str) == Some("system")
+                    })
+                    .count();
+                conversation.insert(
+                    insert_at,
+                    json!({ "role": "user", "content": format!("{} {}", crate::ai::compact::SUMMARY_PREFIX, summary) }),
+                );
+            }
+        }
     }
     let mut usage = Value::Null;
     // Tools are advertised on every round rather than only the first. A model
@@ -319,19 +362,23 @@ pub async fn stream_chat(
         emit: Arc::clone(&on_event),
         subagent_default,
         vision_model: vision_default,
-        compaction,
+        compression,
+        limits: limits.clone(),
+        // Counted across the handle so sub-agents spawned by this run still
+        // raise it while they work, and the spawn gate can refuse from anywhere.
+        subagent_running: std::sync::atomic::AtomicUsize::new(0),
         local_context_window,
         // Counted per run, so the ceiling is on what this reply may arrange.
         jobs_created: std::sync::atomic::AtomicUsize::new(0),
     });
-    for round in 0..MAX_TOOL_ROUNDS {
+    for round in 0..limits.rounds {
         if cancelled.load(Ordering::Relaxed) {
             return Ok((String::new(), Value::Null));
         }
         // The budget, stated before the request that will spend it. See
         // `budget_notice` for why this is the only thing that makes the ceiling
         // anything other than a wall the model walks into.
-        let remaining = MAX_TOOL_ROUNDS - round;
+        let remaining = limits.rounds - round;
         if remaining == BUDGET_WARN_REMAINING || remaining == BUDGET_FINAL_REMAINING {
             conversation.push(budget_notice(remaining));
         }
@@ -498,7 +545,8 @@ pub async fn stream_chat(
     }
     if content.trim().is_empty() {
         return Err(format!(
-            "Stopped after {MAX_TOOL_ROUNDS} tool rounds without a final answer"
+            "Stopped after {} tool rounds without a final answer",
+            limits.rounds
         ));
     }
     Ok((content, usage))
@@ -506,15 +554,13 @@ pub async fn stream_chat(
 
 /// How many times a model may call tools before it must answer.
 ///
-/// A ceiling rather than a budget on tokens, because this is what stops a model
-/// that loops on a failing tool from spending the user's money indefinitely.
-/// Raised from twelve to a hundred on the reasoning that a *cached* prefix makes
-/// the repeated turns of a long agentic run nearly free: the system prompt, the
-/// tool schemas and the whole finished transcript sit behind the provider's
-/// breakpoint, so round ninety costs a fraction of round one. The ceiling that
-/// actually protects the bill is `MAX_TOOL_OUTPUT` per result and the cache
-/// below it, not this number.
-const MAX_TOOL_ROUNDS: usize = 100;
+/// The ceiling is [`crate::ai::types::RunLimits::rounds`], read from the stored
+/// preferences and carried on the request, so the setting lives in the Model
+/// section rather than here. What it protects against is unchanged: a model that
+/// loops on a failing tool spends the user's money indefinitely. Its reasoning
+/// survives too -- repeated turns are made cheap by the queued prefix, so the
+/// ceiling that actually protects the bill is each tool result's own cap and the
+/// cache, not this number.
 const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Rounds left when the model is told how much budget it has.
@@ -562,6 +608,95 @@ fn budget_notice(remaining: usize) -> Value {
         )
     };
     json!({ "role": "user", "content": content })
+}
+
+/// How much of the dropped text one summary may read.
+const SUMMARY_MAX_CHARS: usize = 24_000;
+/// How much of any single turn the summary keeps whole.
+const SUMMARY_TURN_CHARS: usize = 4_000;
+/// What a summary may be, in tokens -- a context brief, not an essay.
+const SUMMARY_MAX_TOKENS: u64 = 1_000;
+
+/// Summarises the turns a compression pass dropped, hard-bounded in time.
+///
+/// This is the pass's third depth, reached only when elision and the turn drop
+/// left the request above the configured target, and it is the only part of the
+/// pass that can be *slow* -- which is why it exists at all as a setting. A local
+/// model replies at a handful of tokens per second on a cold build, and a summary
+/// that waits unbounded would park the reply that triggered the pass for the
+/// duration of an engine warm-up. The timeout is the wall: the request is
+/// cancelled there and the caller keeps the elided result.
+///
+/// A plain post, not the streaming loop: the reply is never shown while it is
+/// being written, the endpoint is already known, and a one-shot call with a
+/// hard timeout is smaller than the streaming machinery by an order of
+/// magnitude.
+async fn summarise_dropped(
+    endpoint: &Endpoint,
+    model: &str,
+    dropped: &[(String, String)],
+    timeout_secs: u64,
+) -> Option<String> {
+    if dropped.is_empty() {
+        return None;
+    }
+    // The oldest turns come first (the pass reports them oldest first), and the
+    // budget is spent on whatever fit -- a middle turn that will not fit whole
+    // is clipped, because a cut-off tool log is still worth more in the summary
+    // than its absence.
+    let mut transcript = String::new();
+    let mut budget = SUMMARY_MAX_CHARS;
+    for (role, content) in dropped {
+        if budget == 0 {
+            break;
+        }
+        let mut piece = content.chars().take(SUMMARY_TURN_CHARS).collect::<String>();
+        if content.chars().count() > piece.chars().count() {
+            piece.push_str(" …[cut]… ");
+        }
+        let entry = format!("{role}: {piece}\n\n");
+        if entry.len() >= budget {
+            break;
+        }
+        budget -= entry.len();
+        transcript.push_str(&entry);
+    }
+    if transcript.is_empty() {
+        return None;
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout_secs.max(1)))
+        .build()
+        .ok()?;
+    // A bearer header when the endpoint has a key, nothing when it does not --
+    // the same shape the streaming call uses for the same endpoint.
+    let mut request = client
+        .post(format!(
+            "{}/chat/completions",
+            endpoint.base_url.trim_end_matches('/')
+        ))
+        .json(&serde_json::json!({
+            "model": model,
+            "messages": [
+                { "role": "system", "content": "You compress older parts of an ongoing conversation into a short factual summary for an assistant who never saw them: what was asked, what was found or done, what is decided or still open. Bullet points in the same language as the conversation. Never editorialise, never omit a user request or a decision." },
+                { "role": "user", "content": transcript }
+            ],
+            "max_tokens": SUMMARY_MAX_TOKENS
+        }));
+    if !endpoint.api_key.is_empty() {
+        request = request.bearer_auth(&endpoint.api_key);
+    }
+    let response = request.send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let value: Value = response.json().await.ok()?;
+    value["choices"][0]["message"]["content"]
+        .as_str()
+        .map(str::trim)
+        .filter(|content| !content.is_empty())
+        .map(str::to_string)
 }
 
 /// Folds one round's reported usage into the reply's running figures.
@@ -1339,6 +1474,24 @@ fn prepend_environment(
     let machine_tools = mode == crate::ai::tools::ToolMode::Agent;
     let root = crate::ai::tools::workspace::root_string();
     let mut sections = Vec::new();
+    // The user's own instructions, first and for **both** modes. They used to be
+    // prepended by the chat view, which meant a run started anywhere else -- a job, a
+    // message from a phone -- silently dropped them. The prompt is the app's, so it is
+    // assembled here where every caller gets it.
+    if let Some(instructions) = database.and_then(|database| {
+        database
+            .setting::<serde_json::Value>("app.general")
+            .and_then(|general| {
+                general
+                    .get("instructions")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_string)
+            })
+    }) {
+        sections.push(instructions);
+    }
     if let Some(note) = crate::ai::prompts::chat::environment_note(
         machine_tools,
         (!root.is_empty()).then_some(root.as_str()),

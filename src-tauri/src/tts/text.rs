@@ -77,10 +77,7 @@ mod tests {
 
     #[test]
     fn inline_code_is_left_out() {
-        assert_eq!(
-            for_speech("Call `tts_speak` now.", true),
-            "Call now."
-        );
+        assert_eq!(for_speech("Call `tts_speak` now.", true), "Call now.");
     }
 
     #[test]

@@ -140,7 +140,13 @@ mod tests {
             directory.file_name().and_then(|name| name.to_str()),
             Some("rhasspy__piper-voices")
         );
-        assert_eq!(directory.parent().and_then(|path| path.file_name()).and_then(|name| name.to_str()), Some("tts"));
+        assert_eq!(
+            directory
+                .parent()
+                .and_then(|path| path.file_name())
+                .and_then(|name| name.to_str()),
+            Some("tts")
+        );
     }
 
     #[test]
@@ -161,6 +167,9 @@ mod tests {
     fn a_gguf_keeps_the_repository_layout_so_a_projector_lands_beside_it() {
         let destination = Kind::Llama.destination("acme/tiny", "nested/tiny.gguf");
         assert!(destination.ends_with(Path::new("nested").join("tiny.gguf")));
-        assert_eq!(Kind::Llama.companions("nested/tiny.gguf"), vec!["nested/tiny.gguf"]);
+        assert_eq!(
+            Kind::Llama.companions("nested/tiny.gguf"),
+            vec!["nested/tiny.gguf"]
+        );
     }
 }

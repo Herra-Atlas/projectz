@@ -149,22 +149,6 @@ export function useTaste(enabled: boolean) {
     }
   }, []);
 
-  /** Forgets the profile and how far each conversation was read. */
-  const reset = useCallback(async () => {
-    setBusy(true);
-    try {
-      const next = await invoke<TasteStatus>("taste_reset");
-      if (mounted.current) setStatus(next);
-      await loadHistory();
-      return next;
-    } catch (reason) {
-      setError(String(reason));
-      return null;
-    } finally {
-      setBusy(false);
-    }
-  }, [loadHistory]);
-
   return {
     status,
     history,
@@ -174,7 +158,6 @@ export function useTaste(enabled: boolean) {
     loadHistory,
     save,
     runNow,
-    reset,
     updateItem,
     deleteItem,
   };

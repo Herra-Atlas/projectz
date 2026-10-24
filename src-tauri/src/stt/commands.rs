@@ -81,10 +81,7 @@ pub fn stt_select_model(
 
 /// Removes a model and forgets everything stored about it.
 #[tauri::command]
-pub fn stt_remove_model(
-    database: State<'_, Arc<Database>>,
-    model: String,
-) -> Result<(), String> {
+pub fn stt_remove_model(database: State<'_, Arc<Database>>, model: String) -> Result<(), String> {
     model::remove(&model)?;
     let mut settings = model::settings(&database);
     if settings.model.as_deref() == Some(model.as_str()) {
@@ -136,9 +133,7 @@ pub fn stt_recording_start() -> Result<(), String> {
 /// The work is blocking from end to end — the device closes, then a process runs —
 /// so it is pushed off the async runtime's threads and only the wait is awaited.
 #[tauri::command]
-pub async fn stt_recording_stop(
-    database: State<'_, Arc<Database>>,
-) -> Result<String, String> {
+pub async fn stt_recording_stop(database: State<'_, Arc<Database>>) -> Result<String, String> {
     let session = RECORDING
         .lock()
         .map_err(|_| "The microphone is in an unusable state.".to_string())?

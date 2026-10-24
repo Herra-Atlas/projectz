@@ -138,16 +138,20 @@ export function useChatSessions(enabled: boolean, reloadKey = 0, modelId = "", p
     chatRepository.listHeaders().then((saved) => {
       if (!mounted) return;
       setSessions(sortSessions(saved));
-      // Reopen where the user left off, but only if that conversation is still
-      // here. The stored id is a hint, not a fact: the conversation may have been
-      // deleted since, and opening an id that no longer exists would leave the
-      // view stuck loading a transcript that is never coming.
+      // **A refresh never moves the reader.** The conversation on screen is kept
+      // when it is still in the list; only a launch -- where there is nothing open
+      // yet -- falls back to the remembered id. Before this, every background
+      // reload (a job finishing, a message arriving from a phone) re-applied the
+      // id stored at launch, so opening the new Telegram conversation and letting
+      // its run finish threw the user back to whatever had been open before.
+      const current = activeIdRef.current;
       const remembered = lastActiveIdRef.current;
-      const restore = remembered && saved.some((session) => session.id === remembered) ? remembered : null;
+      const present = (id: string | null) => Boolean(id && saved.some((session) => session.id === id));
+      const restore = present(current) ? current : present(remembered) ? remembered : null;
       // The transcript is fetched only when the open conversation actually changes:
       // a refresh is about the list, and re-reading the messages under the reader
       // would redraw what they are in the middle of reading.
-      if (restore && restore !== activeIdRef.current) void fetchTranscript(restore);
+      if (restore && restore !== current) void fetchTranscript(restore);
       setActiveId(restore);
       loadedRef.current = true;
       setLoaded(true);
@@ -173,6 +177,9 @@ export function useChatSessions(enabled: boolean, reloadKey = 0, modelId = "", p
     // check against the loaded list would have to run each time to discard it.
     if (activeId) localStorage.setItem(LAST_SESSION_KEY, activeId);
     else localStorage.removeItem(LAST_SESSION_KEY);
+    // The state copy is what a refresh falls back to, so it has to follow the
+    // selection rather than stay at the value read on mount.
+    setLastActiveId(activeId);
   }, [activeId]);
 
   // Transcripts survive a header reload on purpose: the list is re-read when a
@@ -400,26 +407,6 @@ export function useChatSessions(enabled: boolean, reloadKey = 0, modelId = "", p
     void chatRepository.remove(id);
   }, []);
 
-  /** Drops every conversation locally first so the sidebar empties straight away, then
-      reports what the database actually removed so the caller can tell the user. A
-      failure re-reads the list, because the optimistic clear may not have persisted. */
-  const clearSessions = useCallback(async () => {
-    setSessions([]);
-    setTranscripts({});
-    setSessionsLoaded({});
-    setActiveId(null);
-    setLastActiveId(null);
-    try {
-      return await chatRepository.clear();
-    } catch (error) {
-      // Re-read headers rather than full sessions: the question is only which
-      // conversations survived, and their transcripts can be fetched when opened.
-      const remaining = await chatRepository.listHeaders().catch(() => [] as ChatSessionHeader[]);
-      setSessions(sortSessions(remaining));
-      throw error;
-    }
-  }, []);
-
   return {
     sessions,
     activeSession,
@@ -438,13 +425,30 @@ export function useChatSessions(enabled: boolean, reloadKey = 0, modelId = "", p
     setSessionWorkingMode,
     togglePinned,
     deleteSession,
-    clearSessions,
   };
 }
 
-/** Pinned first, then most recently changed. */
+/**
+ * By kind, then pinned first, then most recently changed.
+ *
+ * Kind leads because the sidebar draws a heading whenever the label changes, and
+ * a section that interleaves with its neighbours is really two headings with a
+ * list between them. Chats come first, then conversations answered from a phone,
+ * then the transcripts scheduled jobs wrote -- the same order the groups are
+ * read in, and the reason a Telegram conversation no longer alternates with the
+ * chat it was asked beside.
+ */
 function sortSessions(sessions: ChatSessionHeader[]): ChatSessionHeader[] {
-  return [...sessions].sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || b.updatedAt.localeCompare(a.updatedAt));
+  return [...sessions].sort((a, b) =>
+    kindRank(a.kind) - kindRank(b.kind)
+    || Number(Boolean(b.pinned)) - Number(Boolean(a.pinned))
+    || b.updatedAt.localeCompare(a.updatedAt));
+}
+
+function kindRank(kind: ChatSessionHeader["kind"]): number {
+  if (kind === "job") return 2;
+  if (kind === "telegram") return 1;
+  return 0;
 }
 
 /**

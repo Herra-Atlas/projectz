@@ -138,6 +138,41 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+/// The run's own ceilings, read once per run from `app.preferences`.
+///
+/// One struct rather than four request parameters because the four travel
+/// together everywhere a run's bounds go -- into the loop's budget notices, into
+/// each spawned sub-agent's own loop, and into the spawn gate that counts
+/// running agents -- and four extra `stream_chat` arguments would put the same
+/// defaults question in four places instead of one.
+// `Clone`, deliberately not `Copy`: a run's limits carry a reasoning level,
+// which is a `String`.
+#[derive(Debug, Clone)]
+pub struct RunLimits {
+    /// Tool rounds a main reply may spend before the wrap-up-without-tools call.
+    pub rounds: usize,
+    /// Tool rounds a sub-agent may spend.
+    pub subagent_rounds: usize,
+    /// Sub-agents allowed running at once. `0` removes the ceiling.
+    pub subagent_parallel: usize,
+    /// Reasoning effort a sub-agent is sent. `None`: whatever its parent used.
+    pub subagent_effort: Option<ReasoningEffort>,
+}
+
+impl Default for RunLimits {
+    fn default() -> Self {
+        // The same numbers the settings' defaults carry (usePreferences.ts).
+        // Earlier these lived on a `const` in the loop; making them settings
+        // means the constant becomes the fallback, not the rule.
+        Self {
+            rounds: 150,
+            subagent_rounds: 100,
+            subagent_parallel: 5,
+            subagent_effort: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatResult {
     pub run_id: String,

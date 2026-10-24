@@ -74,7 +74,7 @@ function AppShell() {
   // The corner stack lives in its own module rather than here, so a view like the
   // settings modal can be handed a `notify` without the stack's shape being a
   // detail of the app shell. `App` renders it once and owns the wiring.
-  const { notifications, notify, dismiss: dismissNotification } = useNotifications();
+  const { notifications, notify, notifyAction, dismiss: dismissNotification, clearKey: clearNotification } = useNotifications();
   const { copiedId: copiedNotificationId, markCopied } = useCopiedNotification();
   const [sessionActivity, setSessionActivity] = useState<SessionActivity>({});
   // The conversation the right panel's Overview view is showing, plus a nonce so
@@ -191,6 +191,8 @@ function AppShell() {
     let unlistenProgress: (() => void) | null = null;
     let unlistenLocal: (() => void) | null = null;
     let unlistenJob: (() => void) | null = null;
+    let unlistenMessaging: (() => void) | null = null;
+    let unlistenAi: (() => void) | null = null;
     void Promise.all([
       listen<StartupProgress>("startup-progress", (event) => setStartupProgress(event.payload)).then((unlisten) => {
         if (mounted) unlistenProgress = unlisten;
@@ -223,6 +225,41 @@ function AppShell() {
         if (mounted) unlistenJob = unlisten;
         else unlisten();
       }),
+      // A message sent from outside the app writes a conversation with no window
+      // watching, which is the same situation as a job's. `kind: "state"` is the
+      // settings record moving, which is not a new conversation and must not
+      // refetch the list.
+      listen<{ kind?: string }>("messaging-event", (event) => {
+        if (mounted && event.payload?.kind !== "state") setSessionReloadKey((key) => key + 1);
+      }).then((unlisten) => {
+        if (mounted) unlistenMessaging = unlisten;
+        else unlisten();
+      }),
+      // **Any run, whichever door it came through.** The chat view reports its own
+      // activity, but a job or a message from a phone has no view to report from --
+      // its spinner on the sidebar used to appear only after a restart, when the
+      // transcript was finally read. The event carries the session, so this is the
+      // one place that knows a conversation is busy regardless of who started it.
+      listen<{ session_id?: string | null; kind: string }>("ai-event", (event) => {
+        if (!mounted) return;
+        const sessionId = event.payload.session_id;
+        if (!sessionId) return;
+        if (event.payload.kind === "failed") handleSessionActivity(sessionId, "error");
+        else if (event.payload.kind === "completed" || event.payload.kind === "stopped") handleSessionActivity(sessionId, "done");
+        else if (
+          event.payload.kind === "status" ||
+          event.payload.kind === "delta" ||
+          event.payload.kind === "tool_call" ||
+          event.payload.kind === "tool_result" ||
+          event.payload.kind === "reasoning_delta" ||
+          event.payload.kind === "retrying"
+        ) {
+          handleSessionActivity(sessionId, "streaming");
+        }
+      }).then((unlisten) => {
+        if (mounted) unlistenAi = unlisten;
+        else unlisten();
+      }),
     ]).then(() => mounted ? invoke("database_initialize") : Promise.reject(new Error("Startup cancelled"))).then(() => {
       setStartupProgress({ phase: "migration", message: "Importing existing data", progress: 94 });
       return chatRepository.initialize();
@@ -238,8 +275,10 @@ function AppShell() {
       unlistenProgress?.();
       unlistenLocal?.();
       unlistenJob?.();
+      unlistenMessaging?.();
+      unlistenAi?.();
     };
-  }, [notify]);
+  }, [notify, handleSessionActivity]);
 
   useEffect(() => {
     if (!startupDone) return;
@@ -264,10 +303,48 @@ function AppShell() {
         }
         localStorage.removeItem("projectz.selected-model.v1");
       } catch { }
-      const fallbackLocalId = status.selected_model_id ?? status.loaded_model_id ?? "";
-      setLocalModelId(localModels.some((item) => item.id === fallbackLocalId) ? fallbackLocalId : "");
-    }).catch(() => undefined);
+        const fallbackLocalId = status.selected_model_id ?? status.loaded_model_id ?? "";
+        setLocalModelId(localModels.some((item) => item.id === fallbackLocalId) ? fallbackLocalId : "");
+      }).catch(() => undefined);
   }, [startupDone]);
+
+  // The Model section's main choice is what new conversations open on.
+  //
+  // A remembered selection still wins on launch -- the model the previous
+  // session ended on is the honest "where you were" -- so this applies while
+  // the composer has no conversation open, whatever launch remembered. A
+  // mid-conversation switch stays the switcher's decision; the preference is
+  // not a lock on an in-progress chat.
+  useEffect(() => {
+    if (!startupDone || chat.activeId !== null) return;
+    const preferred = preferences.mainModel;
+    if (!preferred) return;
+    if (preferred.localModelId) {
+      // A local selection is honoured only where the model still exists; a
+      // deleted one has no fallback of its own, so it is dropped rather than
+      // guessing a model nobody named.
+      void invoke<{ id: string }[]>("local_models_list")
+        .then((models) => {
+          if (models.some((item) => item.id === preferred.localModelId)) {
+            setLocalModelId(preferred.localModelId!);
+          }
+        })
+        .catch(() => undefined);
+      return;
+    }
+    void invoke<{ id: string; models: string[] }[]>("ai_list_endpoints")
+      .then((providers) => {
+        const provider = providers.find((item) => item.id === preferred.endpointId);
+        // Membership is the whole test: the provider's list already excludes
+        // anything switched off, exactly as the launch read above does.
+        if (provider && preferred.model && provider.models.includes(preferred.model)) {
+          setEndpointId(preferred.endpointId!);
+          setModel(preferred.model);
+          setLocalModelId("");
+        }
+      })
+      .catch(() => undefined);
+  }, [startupDone, chat.activeId, preferences.mainModel]);
 
   const ensureSession = useCallback((messages: ChatMessage[], workingMode: WorkingMode) => {
     if (chat.activeId && chat.activeSession) return chat.activeSession.id;
@@ -367,7 +444,6 @@ function AppShell() {
           session={chat.activeSession}
           activeId={chat.activeId}
           sessionLoading={chat.activeId !== null && !chat.activeLoaded}
-          onOpenSettings={() => setSettingsOpen(true)}
           onEnsureSession={ensureSession}
           onFirstSend={() => setView("chat")}
           onActivity={handleSessionActivity}
@@ -381,11 +457,14 @@ function AppShell() {
           onMessagesChange={handleMessagesChange}
           onWorkingModeChange={chat.setSessionWorkingMode}
           onNotify={notify}
+          onNotifyAction={notifyAction}
+          onClearNotification={clearNotification}
           onOpenUrl={(url) => setRequestedUrl({ url, key: Date.now() })}
           onOpenFile={setRequestedFile}
           titleModels={preferences.sessionTitleModels}
           onAutoTitle={chat.setAutoTitle}
           workspaceRoot={workspaces.selected}
+          defaultEffort={preferences.mainReasoning}
         />
         </>}
       </div>
@@ -413,7 +492,7 @@ function AppShell() {
       />
 
       <NotificationStack notifications={notifications} copiedId={copiedNotificationId} onDismiss={dismissNotification} onCopy={copyNotification} />
-      <SettingsModal open={settingsOpen} onClose={() => { setSettingsOpen(false); setSettingsRefreshKey((key) => key + 1); }} onEndpointsChanged={() => setEndpointRefreshKey((key) => key + 1)} onClearSessions={chat.clearSessions} preferences={preferences} onPreferencesChange={savePreferences} appearance={appearance} onAppearanceChange={saveAppearance} notify={notify} />
+      <SettingsModal open={settingsOpen} onClose={() => { setSettingsOpen(false); setSettingsRefreshKey((key) => key + 1); }} onEndpointsChanged={() => setEndpointRefreshKey((key) => key + 1)} preferences={preferences} onPreferencesChange={savePreferences} appearance={appearance} onAppearanceChange={saveAppearance} notify={notify} />
     </div>
   );
 }

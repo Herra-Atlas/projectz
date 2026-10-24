@@ -6,9 +6,10 @@ import { formatBytes } from "../../../features/downloads/format";
 import type { Notify } from "../../../features/notifications/types";
 import type { TtsSettings, VoiceEntry } from "../../../features/tts/types";
 import { HoldToDelete } from "../../HoldToDelete";
+import { ANCHOR_ATTRIBUTE } from "../../SettingsSection";
 
 /**
- * The synthesis half of the Local page.
+ * The synthesise half of the Text to speech page.
  *
  * Shaped like the llama.cpp list -- an engine, then what is installed on it --
  * because that is the question this page answers. A Piper voice is not a model
@@ -20,15 +21,12 @@ import { HoldToDelete } from "../../HoldToDelete";
  * done here. The tick says which one is in use without tinting the row -- a
  * filled row reads as selected *and* hovered, and this list has both.
  */
-export function SpeechSynthesisCategory({
+export function SpeechSynthesisList({
   onDownload,
-  onSettings,
   onVoiceSettings,
   notify,
 }: {
   onDownload: () => void;
-  /** The engine's own settings. */
-  onSettings: () => void;
   /** One voice's settings, named by its model path. */
   onVoiceSettings: (voice: string) => void;
   notify: Notify;
@@ -111,18 +109,11 @@ export function SpeechSynthesisCategory({
           <Download size={13} />
           <span>Download voice</span>
         </button>
-        <button
-          type="button"
-          onClick={onSettings}
-          aria-label="Speech synthesis settings"
-          title="Speech synthesis settings"
-          className="grid size-8 shrink-0 place-items-center rounded-md border border-[var(--line)] text-[var(--muted)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
-        >
-          <Settings2 size={14} />
-        </button>
       </div>
 
-      <div className="mb-3 ml-[2.75rem] border-l border-[var(--line)] py-1 pl-3">
+      {/* Anchors exist on the rows themselves, so search lands where the setting is
+          rather than on the page's top edge. */}
+      <div className="mb-3 ml-[2.75rem] border-l border-[var(--line)] py-1 pl-3" {...{ [ANCHOR_ATTRIBUTE]: "tts.voices" }}>
         {voices?.map((voice) => {
           const isChosen = selected === voice.id;
           return (

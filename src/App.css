@@ -1,5 +1,13 @@
 @import "tailwindcss";
 
+/* Radius override: the Tailwind default (--radius-lg: 0.5rem) is compiled in
+   from the framework's theme; there is no root.css in this project to edit.
+   A @theme block here replaces the value for both the rounded-lg utility and
+   the variable it emits. */
+@theme {
+  --radius-lg: 0.4em;
+}
+
 /*
   ProjectZ design tokens.
 
@@ -541,6 +549,69 @@ select:focus {
    being disabled. */
 .settings-search-mode [data-settings-title] {
   opacity: 1;
+}
+
+/* ---------- Notifications ----------
+
+   Reports in the corner drop in from above; the question in the middle arrives
+   with a little more weight, because it is holding a send. Both are a single
+   short movement: a toast that travels far enough to be watched is a toast that
+   interrupts the thing it is reporting on.
+*/
+
+@keyframes pz-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes pz-question-in {
+  from {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.pz-toast-in {
+  animation: pz-toast-in 170ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.pz-question-in {
+  animation: pz-question-in 210ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* ---------- Empty conversation ----------
+
+   The greeting, the headline and the line under it arrive as one quiet lift,
+   staggered by a few tens of milliseconds so the eye is led down into the
+   composer instead of reading three lines at once. `both` holds the delayed
+   lines hidden until their turn. Short and short-travelled on purpose: this
+   screen appears every time a conversation starts, and a greeting that performs
+   is one the user learns to wait for.
+*/
+
+@keyframes pz-welcome-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.pz-welcome-in {
+  animation: pz-welcome-in 380ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 @media (prefers-reduced-motion: reduce) {

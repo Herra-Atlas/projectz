@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ChartNoAxesColumn, ChartSpline, Check, ChevronLeft, ChevronRight, CircleDot, Clock, Database, MessageSquareText, MoreHorizontal, Pin, Pencil, Settings2, Trash2, X } from "lucide-react";
+import { ChartNoAxesColumn, ChartSpline, Check, ChevronLeft, ChevronRight, CircleDot, Clock, Database, MessageSquareText, MoreHorizontal, Pin, Pencil, Send, Settings2, Trash2, X } from "lucide-react";
 import type { ChatSessionHeader, SessionActivity, SessionRunStatus } from "../features/chat/types";
 import { SESSION_DOT_COLORS, SESSION_DOT_DEFAULT, SESSION_DOT_DONE, SESSION_DOT_ERROR } from "../features/chat/types";
 import LiveSpinner from "./LiveSpinner";
@@ -8,6 +8,13 @@ import ProjectZCrown from "./ProjectZCrown";
 
 const MENU_WIDTH = 200;
 const DOT_SUBMENU_WIDTH = 152;
+/**
+ * Whether the Telegram section is open, remembered across launches.
+ *
+ * Its own key rather than a general "sections open" record: it is the only
+ * section a person opens and closes, and it is the one that can be empty.
+ */
+const TELEGRAM_OPEN_KEY = "projectz.telegram-open.v1";
 
 /**
  * The recency heading a conversation sits under in the sidebar.
@@ -23,8 +30,9 @@ const DOT_SUBMENU_WIDTH = 152;
  * disagreeing with the reader about what day it is.
  */
 function sessionGroupLabel(session: ChatSessionHeader): string {
-  // Jobs first, and before the pin: a job run belongs in its own section whatever
-  // else is true of it, and the list is ordered so the section is contiguous.
+  // Jobs are their own section before the pin is, and the list is ordered so the
+  // section is contiguous. Telegram is not here at all -- it has its own
+  // collapsible block at the foot of the sidebar.
   if (session.kind === "job") return "Jobs";
   if (session.pinned) return "Pinned";
   const updated = new Date(session.updatedAt);
@@ -73,7 +81,9 @@ type SidebarProps = {
 
 /** One primary-nav entry. The active treatment and the collapsed layout are
     identical across Chat, Database and Statistics, so they live here rather
-    than being repeated in three long class strings. */
+    than being repeated in three long class strings. Active is text colour
+    only: "you are here" reads as a place, not a pressed button, so the rail
+    holds no accent wash under the current view. */
 function NavButton({
   icon,
   label,
@@ -93,7 +103,7 @@ function NavButton({
       onClick={onClick}
       aria-current={active ? "page" : undefined}
       title={collapsed ? label : undefined}
-      className={`flex min-h-9 w-full items-center gap-3 rounded-md px-3 text-[13px] font-medium transition-colors ${collapsed ? "justify-center" : ""} ${active ? "bg-[color-mix(in_srgb,var(--accent)_13%,transparent)] text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}
+      className={`flex min-h-9 w-full items-center gap-3 rounded-md px-3 text-[13px] font-medium transition-colors ${collapsed ? "justify-center" : ""} ${active ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}
     >
       {icon}
       {!collapsed && <span>{label}</span>}
@@ -120,6 +130,13 @@ export default function Sidebar({
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [dotSubmenuOpen, setDotSubmenuOpen] = useState(false);
   const dotSubmenuCloseTimer = useRef<number | null>(null);
+  const [telegramOpen, setTelegramOpen] = useState(() => {
+    try {
+      return localStorage.getItem(TELEGRAM_OPEN_KEY) !== "0";
+    } catch {
+      return true;
+    }
+  });
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
@@ -248,6 +265,89 @@ export default function Sidebar({
     setRenamingId(null);
   };
 
+  /**
+   * Telegram lives in its own block at the foot of the sidebar.
+   *
+   * It is a transport, not a time bucket: its conversations are answered from a
+   * phone and would otherwise interleave with the ones typed here. The block is
+   * outside the scrolling history on purpose -- its heading stays visible while
+   * the list is long, and collapsing it leaves the chats above untouched.
+   */
+  const telegramSessions = sessions.filter((session) => session.kind === "telegram");
+  const otherSessions = sessions.filter((session) => session.kind !== "telegram");
+
+  const toggleTelegram = () => {
+    setTelegramOpen((open) => {
+      const next = !open;
+      try {
+        localStorage.setItem(TELEGRAM_OPEN_KEY, next ? "1" : "0");
+      } catch {
+        // A window-local preference that cannot be stored is still a toggle.
+      }
+      return next;
+    });
+  };
+
+  /** One conversation row, shared by the history list and the Telegram block. */
+  const renderSessionRow = (session: ChatSessionHeader) => {
+    const status: SessionRunStatus | undefined = activity[session.id];
+    const isActive = session.id === activeId;
+    const isLive = status === "streaming" || status === "searching";
+    const menuOpen = openMenuId === session.id;
+    const flipsLeft = menuPos !== null && menuPos.left + MENU_WIDTH + DOT_SUBMENU_WIDTH + 12 > window.innerWidth - 8;
+    const defaultDot = session.dotColor || SESSION_DOT_DEFAULT;
+    /**
+     * A colour the user chose is filled; the default and a status are drawn
+     * separately.
+     *
+     * The default is only ever a ring, because a filled dot on every ordinary
+     * conversation is a mark that says nothing -- it competes with the status
+     * colours, which are the ones worth noticing. Status is always filled, even
+     * over a chosen colour, because it is the reason the row looks different.
+     */
+    const dotFilled = (Boolean(session.dotColor) && session.dotColor !== SESSION_DOT_DEFAULT) || isLive || status === "done" || status === "error";
+    const dot = isLive ? "var(--accent)" : status === "done" ? SESSION_DOT_DONE : status === "error" ? SESSION_DOT_ERROR : defaultDot;
+    return (
+      <div onContextMenu={(event) => openMenuAtPointer(event, session)} className={`group flex items-center gap-1 rounded-md pr-1 ${isActive ? "bg-[var(--raised)] text-[var(--text)]" : "text-[var(--muted)] hover:bg-[color-mix(in_srgb,var(--raised)_65%,transparent)] hover:text-[var(--text)]"}`}>
+        {renamingId === session.id ? <form onSubmit={(event) => { event.preventDefault(); finishRename(session.id); }} className="flex min-h-9 min-w-0 flex-1 items-center gap-1 px-1">
+          <input autoFocus aria-label="Session name" value={renameValue} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") setRenamingId(null); }} className="min-w-0 flex-1 rounded bg-[var(--page)] px-2 py-1 text-[13px] text-[var(--text)] outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]" />
+          <button type="submit" className="grid size-7 place-items-center rounded hover:bg-[var(--page)]" aria-label="Save session name"><Check size={14} /></button>
+          <button type="button" onClick={() => setRenamingId(null)} className="grid size-7 place-items-center rounded hover:bg-[var(--page)]" aria-label="Cancel rename"><X size={14} /></button>
+        </form> : <button type="button" onClick={() => { onSelectSession(session.id); onViewChange("chat"); }} className="flex min-h-9 min-w-0 flex-1 items-center gap-2.5 px-2.5 text-left text-[13px]" title={session.title}>
+          {session.pinned ? <Pin size={14} className="shrink-0 text-[var(--accent)]" /> : <span aria-hidden="true" title={status === "searching" ? "Searching the web" : isLive ? "Streaming response" : status === "done" ? "Response ready" : status === "error" ? "Response failed" : "Conversation"} className="grid size-4 shrink-0 place-items-center"><span className="inline-flex size-1.5 rounded-full border" style={{ borderColor: dot, backgroundColor: dotFilled ? dot : "transparent" }} /></span>}
+          <span className="truncate">{session.title}</span>
+        </button>}
+        <div className="relative shrink-0">
+          {isLive && !menuOpen ? <>
+            <span role="status" aria-label="AI is writing" title="AI is writing" className="grid size-8 place-items-center text-[var(--muted)] group-hover:hidden group-focus-within:hidden"><LiveSpinner gradientId={`pz-spin-${session.id}`} /></span>
+            <button ref={(el) => { if (el) anchorButtons.current.set(session.id, el); else anchorButtons.current.delete(session.id); }} type="button" onClick={() => toggleMenu(session.id)} aria-label={`Actions for ${session.title}`} aria-expanded={false} title="Session actions" className="hidden size-8 place-items-center rounded-md text-[var(--quiet)] hover:bg-[var(--page)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-[var(--accent)] group-hover:grid group-focus-within:grid">
+              <MoreHorizontal size={16} />
+            </button>
+          </> : <button ref={(el) => { if (el) anchorButtons.current.set(session.id, el); else anchorButtons.current.delete(session.id); }} type="button" onClick={() => toggleMenu(session.id)} aria-label={`Actions for ${session.title}`} aria-expanded={menuOpen} title="Session actions" className={`grid size-8 place-items-center rounded-md text-[var(--quiet)] hover:bg-[var(--page)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-[var(--accent)] ${menuOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"}`}>
+            <MoreHorizontal size={16} />
+          </button>}
+          {menuOpen && menuPos && createPortal(<div ref={(el) => { menuRef.current = el; dropdownRef.current = el; }} aria-label={`${session.title} actions`} style={{ position: "fixed", top: menuPos.top, left: menuPos.left, width: MENU_WIDTH }} className="z-[100] overflow-visible rounded-lg border border-[var(--line)] bg-[var(--rail)] p-1 shadow-2xl">
+            <button type="button" onClick={() => { onOpenOverview(session.id); closeMenu(); }} className="flex min-h-8 w-full items-center gap-2.5 rounded-md px-2 text-left text-xs text-[var(--text)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]"><ChartNoAxesColumn size={14} className="text-[var(--muted)]" />Overview</button>
+            <div className="my-1 border-t border-[var(--line)]" />
+            <button type="button" onClick={() => { onTogglePinned(session.id); closeMenu(); }} className="flex min-h-8 w-full items-center gap-2.5 rounded-md px-2 text-left text-xs text-[var(--text)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]"><Pin size={14} className="text-[var(--muted)]" />{session.pinned ? "Unpin" : "Pin"}</button>
+            <button type="button" onClick={() => beginRename(session)} className="flex min-h-8 w-full items-center gap-2.5 rounded-md px-2 text-left text-xs text-[var(--text)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]"><Pencil size={14} className="text-[var(--muted)]" />Rename</button>
+            <div className="relative" onMouseEnter={openDotSubmenu} onMouseLeave={scheduleDotSubmenuClose}>
+              <button type="button" aria-haspopup="menu" aria-expanded={dotSubmenuOpen} onClick={() => setDotSubmenuOpen((open) => !open)} onFocus={openDotSubmenu} className="flex min-h-8 w-full items-center gap-2.5 rounded-md px-2 text-left text-xs text-[var(--text)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]"><CircleDot size={14} className="text-[var(--muted)]" />Dot style<ChevronRight size={13} className="ml-auto text-[var(--quiet)]" /></button>
+              {dotSubmenuOpen && <div role="menu" aria-label="Session dot color" onMouseEnter={openDotSubmenu} onMouseLeave={scheduleDotSubmenuClose} style={{ width: DOT_SUBMENU_WIDTH }} className={`absolute top-0 z-[100] rounded-lg border border-[var(--line)] bg-[var(--rail)] p-2 shadow-2xl ${flipsLeft ? "right-full mr-1" : "left-full ml-1"} ${menuFlipped ? "bottom-0 top-auto" : ""}`}>
+                <div className="grid grid-cols-4 gap-2">
+                  {/* The default swatch is a ring, like the row it produces; every other swatch is filled, because that is what it sets. */}
+                  {SESSION_DOT_COLORS.map((color) => <button key={color} type="button" role="menuitemradio" aria-checked={defaultDot === color} aria-label={`Dot color ${color}`} title={color} onClick={() => { onSetDotColor(session.id, color === SESSION_DOT_DEFAULT ? undefined : color); closeMenu(); }} className={`grid size-7 shrink-0 place-items-center rounded-md hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${defaultDot === color ? "bg-[var(--raised)] ring-1 ring-[var(--accent)]" : ""}`}><span className="size-3.5 shrink-0 rounded-full border" style={{ borderColor: color, backgroundColor: color === SESSION_DOT_DEFAULT ? "transparent" : color }} /></button>)}
+                </div>
+              </div>}
+            </div>
+            <div className="my-1 border-t border-[var(--line)]" />
+            <button type="button" onClick={() => { onDeleteSession(session.id); closeMenu(); }} className="flex min-h-8 w-full items-center gap-2.5 rounded-md px-2 text-left text-xs text-[var(--danger)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]"><Trash2 size={14} />Delete</button>
+          </div>, document.body)}
+        </div>
+      </div>
+    );
+  };
+
   // Portalled so the fixed overlay is not clipped by the sidebar's layout.
   const sidebar = (
     <aside className={`flex h-full shrink-0 flex-col border-r border-[var(--line)] bg-[var(--rail)] transition-[width] duration-200 ${collapsed ? "w-[68px]" : "w-[260px] max-sm:fixed max-sm:inset-y-0 max-sm:left-0 max-sm:z-50 max-sm:shadow-2xl"}`}>
@@ -322,65 +422,61 @@ export default function Sidebar({
         {/* No "History" heading above the groups. Each group names itself, and a
             heading over a list of headings is a label doing no work. */}
         <div className="min-h-0 flex-1 space-y-0.5 overflow-y-auto pt-1">
-          {sessions.length === 0 && <p className="px-2 py-3 text-xs leading-5 text-[var(--quiet)]">Nothing here yet. Your conversations collect here once you start one.</p>}
-          {sessions.map((session, index) => {
+          {otherSessions.length === 0 && <p className="px-2 py-3 text-xs leading-5 text-[var(--quiet)]">Nothing here yet. Your conversations collect here once you start one.</p>}
+          {otherSessions.map((session, index) => {
             // A heading is emitted whenever the bucket changes, rather than the
             // list being pre-bucketed: the array is already ordered pinned-first
             // then most-recent, so a change of label is exactly where a heading
             // belongs and nothing has to be sorted twice.
             const groupLabel = sessionGroupLabel(session);
-            const showGroup = index === 0 || sessionGroupLabel(sessions[index - 1]) !== groupLabel;
-            const status: SessionRunStatus | undefined = activity[session.id];
-            const isActive = session.id === activeId;
-            const isLive = status === "streaming" || status === "searching";
-            const menuOpen = openMenuId === session.id;
-            const flipsLeft = menuPos !== null && menuPos.left + MENU_WIDTH + DOT_SUBMENU_WIDTH + 12 > window.innerWidth - 8;
-            const defaultDot = session.dotColor || SESSION_DOT_DEFAULT;
-            const dot = isLive ? "var(--accent)" : status === "done" ? SESSION_DOT_DONE : status === "error" ? SESSION_DOT_ERROR : defaultDot;
+            const showGroup = index === 0 || sessionGroupLabel(otherSessions[index - 1]) !== groupLabel;
             return <Fragment key={session.id}>
               {showGroup && <h3 className="px-2 pb-1 pt-3 text-[11px] font-medium text-[var(--quiet)]">{groupLabel}</h3>}
-              <div onContextMenu={(event) => openMenuAtPointer(event, session)} className={`group flex items-center gap-1 rounded-md pr-1 ${isActive ? "bg-[var(--raised)] text-[var(--text)]" : "text-[var(--muted)] hover:bg-[color-mix(in_srgb,var(--raised)_65%,transparent)] hover:text-[var(--text)]"}`}>
-              {renamingId === session.id ? <form onSubmit={(event) => { event.preventDefault(); finishRename(session.id); }} className="flex min-h-9 min-w-0 flex-1 items-center gap-1 px-1">
-                <input autoFocus aria-label="Session name" value={renameValue} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") setRenamingId(null); }} className="min-w-0 flex-1 rounded bg-[var(--page)] px-2 py-1 text-[13px] text-[var(--text)] outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]" />
-                <button type="submit" className="grid size-7 place-items-center rounded hover:bg-[var(--page)]" aria-label="Save session name"><Check size={14} /></button>
-                <button type="button" onClick={() => setRenamingId(null)} className="grid size-7 place-items-center rounded hover:bg-[var(--page)]" aria-label="Cancel rename"><X size={14} /></button>
-              </form> : <button type="button" onClick={() => { onSelectSession(session.id); onViewChange("chat"); }} className="flex min-h-9 min-w-0 flex-1 items-center gap-2.5 px-2.5 text-left text-[13px]" title={session.title}>
-                {session.pinned ? <Pin size={14} className="shrink-0 text-[var(--accent)]" /> : <span aria-hidden="true" title={status === "searching" ? "Searching the web" : isLive ? "Streaming response" : status === "done" ? "Response ready" : status === "error" ? "Response failed" : "Conversation"} className="grid size-4 shrink-0 place-items-center"><span className="inline-flex size-1.5 rounded-full" style={{ backgroundColor: dot }} /></span>}
-                <span className="truncate">{session.title}</span>
-              </button>}
-              <div className="relative shrink-0">
-                {isLive && !menuOpen ? <>
-                  <span role="status" aria-label="AI is writing" title="AI is writing" className="grid size-8 place-items-center text-[var(--muted)] group-hover:hidden group-focus-within:hidden"><LiveSpinner gradientId={`pz-spin-${session.id}`} /></span>
-                  <button ref={(el) => { if (el) anchorButtons.current.set(session.id, el); else anchorButtons.current.delete(session.id); }} type="button" onClick={() => toggleMenu(session.id)} aria-label={`Actions for ${session.title}`} aria-expanded={false} title="Session actions" className="hidden size-8 place-items-center rounded-md text-[var(--quiet)] hover:bg-[var(--page)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-[var(--accent)] group-hover:grid group-focus-within:grid">
-                    <MoreHorizontal size={16} />
-                  </button>
-                </> : <button ref={(el) => { if (el) anchorButtons.current.set(session.id, el); else anchorButtons.current.delete(session.id); }} type="button" onClick={() => toggleMenu(session.id)} aria-label={`Actions for ${session.title}`} aria-expanded={menuOpen} title="Session actions" className={`grid size-8 place-items-center rounded-md text-[var(--quiet)] hover:bg-[var(--page)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-[var(--accent)] ${menuOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"}`}>
-                  <MoreHorizontal size={16} />
-                </button>}
-                {menuOpen && menuPos && createPortal(<div ref={(el) => { menuRef.current = el; dropdownRef.current = el; }} aria-label={`${session.title} actions`} style={{ position: "fixed", top: menuPos.top, left: menuPos.left, width: MENU_WIDTH }} className="z-[100] overflow-visible rounded-lg border border-[var(--line)] bg-[var(--rail)] p-1 shadow-2xl">
-                  <button type="button" onClick={() => { onOpenOverview(session.id); closeMenu(); }} className="flex min-h-8 w-full items-center gap-2.5 rounded-md px-2 text-left text-xs text-[var(--text)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]"><ChartNoAxesColumn size={14} className="text-[var(--muted)]" />Overview</button>
-                  <div className="my-1 border-t border-[var(--line)]" />
-                  <button type="button" onClick={() => { onTogglePinned(session.id); closeMenu(); }} className="flex min-h-8 w-full items-center gap-2.5 rounded-md px-2 text-left text-xs text-[var(--text)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]"><Pin size={14} className="text-[var(--muted)]" />{session.pinned ? "Unpin" : "Pin"}</button>
-                  <button type="button" onClick={() => beginRename(session)} className="flex min-h-8 w-full items-center gap-2.5 rounded-md px-2 text-left text-xs text-[var(--text)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]"><Pencil size={14} className="text-[var(--muted)]" />Rename</button>
-                  <div className="relative" onMouseEnter={openDotSubmenu} onMouseLeave={scheduleDotSubmenuClose}>
-                    <button type="button" aria-haspopup="menu" aria-expanded={dotSubmenuOpen} onClick={() => setDotSubmenuOpen((open) => !open)} onFocus={openDotSubmenu} className="flex min-h-8 w-full items-center gap-2.5 rounded-md px-2 text-left text-xs text-[var(--text)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]"><CircleDot size={14} className="text-[var(--muted)]" />Dot style<ChevronRight size={13} className="ml-auto text-[var(--quiet)]" /></button>
-                    {dotSubmenuOpen && <div role="menu" aria-label="Session dot color" onMouseEnter={openDotSubmenu} onMouseLeave={scheduleDotSubmenuClose} style={{ width: DOT_SUBMENU_WIDTH }} className={`absolute top-0 z-[100] rounded-lg border border-[var(--line)] bg-[var(--rail)] p-2 shadow-2xl ${flipsLeft ? "right-full mr-1" : "left-full ml-1"} ${menuFlipped ? "bottom-0 top-auto" : ""}`}>
-                      <div className="grid grid-cols-4 gap-2">
-                        {SESSION_DOT_COLORS.map((color) => <button key={color} type="button" role="menuitemradio" aria-checked={defaultDot === color} aria-label={`Dot color ${color}`} title={color} onClick={() => { onSetDotColor(session.id, color === SESSION_DOT_DEFAULT ? undefined : color); closeMenu(); }} className={`grid size-7 shrink-0 place-items-center rounded-md hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${defaultDot === color ? "bg-[var(--raised)] ring-1 ring-[var(--accent)]" : ""}`}><span className="size-3.5 shrink-0 rounded-full" style={{ backgroundColor: color }} /></button>)}
-                      </div>
-                    </div>}
-                  </div>
-                  <div className="my-1 border-t border-[var(--line)]" />
-                  <button type="button" onClick={() => { onDeleteSession(session.id); closeMenu(); }} className="flex min-h-8 w-full items-center gap-2.5 rounded-md px-2 text-left text-xs text-[var(--danger)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)]"><Trash2 size={14} />Delete</button>
-                </div>, document.body)}
-              </div>
-              </div>
+              {renderSessionRow(session)}
             </Fragment>;
           })}
         </div>
       </section>}
 
       <div className="mt-auto border-t border-[var(--line)] p-3">
+        {/* The Telegram block is fixed here rather than part of the scrolling
+            history: its heading has to be reachable whatever the list is doing,
+            and collapsing it is the one piece of section state a person sets. */}
+        {collapsed ? (
+          <button
+            type="button"
+            onClick={() => { setCollapsed(false); setTelegramOpen(true); }}
+            aria-label="Open Telegram conversations"
+            title="Telegram conversations"
+            className="mb-0.5 flex min-h-9 w-full items-center justify-center gap-2 rounded-md px-3 text-[13px] text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-[var(--accent)]"
+          >
+            <Send size={16} />
+          </button>
+        ) : (
+          <section aria-label="Telegram conversations" className="mb-1">
+            <button
+              type="button"
+              onClick={toggleTelegram}
+              aria-expanded={telegramOpen}
+              aria-controls="telegram-sessions"
+              className="flex min-h-8 w-full items-center gap-2 rounded-md px-1.5 text-[11px] font-medium text-[var(--quiet)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-[var(--accent)]"
+            >
+              <Send size={13} className="shrink-0" />
+              <span className="flex-1 text-left">Telegram</span>
+              {telegramSessions.length > 0 && (
+                <span className="rounded-full bg-[var(--raised)] px-1.5 py-px text-[10px] tabular-nums text-[var(--muted)]">{telegramSessions.length}</span>
+              )}
+              <ChevronRight size={13} className={`shrink-0 transition-transform ${telegramOpen ? "rotate-90" : ""}`} />
+            </button>
+            {telegramOpen && (
+              <div id="telegram-sessions" className="mt-0.5 max-h-52 space-y-0.5 overflow-y-auto">
+                {telegramSessions.length === 0
+                  ? <p className="px-2 py-2 text-[11px] leading-4 text-[var(--quiet)]">No Telegram conversations yet. Messages sent to the bot appear here.</p>
+                  : telegramSessions.map((session) => <Fragment key={session.id}>{renderSessionRow(session)}</Fragment>)}
+              </div>
+            )}
+          </section>
+        )}
         <button type="button" onClick={onSettings} className={`flex min-h-9 w-full items-center gap-3 rounded-md px-3 text-[13px] text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] ${collapsed ? "justify-center" : ""}`} title={collapsed ? "Settings" : undefined}>
           <Settings2 size={16} />
           {!collapsed && <span>Settings</span>}

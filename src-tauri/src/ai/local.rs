@@ -512,12 +512,10 @@ impl LocalModelManager {
         // llama-server is a console program, and a packaged build has no console
         // of its own to hand it one, so Windows would open a window for it.
         crate::child::hide_console(&mut command);
-        let mut child = command
-            .spawn()
-            .map_err(|error| {
-                process.loading_model_id = None;
-                format!("Could not start llama-server: {error}")
-            })?;
+        let mut child = command.spawn().map_err(|error| {
+            process.loading_model_id = None;
+            format!("Could not start llama-server: {error}")
+        })?;
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let child_id = child.id();

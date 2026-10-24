@@ -24,17 +24,14 @@
 //! and its reason are recorded on the job's `job_runs` row by the caller; this
 //! returns them.
 
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chrono::Utc;
-use serde_json::json;
-use tauri::{AppHandle, Listener};
+use tauri::AppHandle;
 
 use super::schedule;
 use crate::ai::runtime::AiRuntime;
-use crate::ai::subagent::transcript::{steps_from, Stamped};
-use crate::ai::types::{ChatEvent, ChatMessage, ChatRequest, ReasoningEffort};
+use crate::ai::types::ChatMessage;
 use crate::database::jobs::{Job, JobModel};
 
 /// How long to wait for a local engine to come up before giving up.
@@ -140,98 +137,49 @@ async fn execute(
         ),
     };
 
-    let request = ChatRequest {
-        run_id: run_id.to_string(),
-        session_id: Some(session_id.to_string()),
-        session_title: Some(job.name.clone()),
-        messages: vec![ChatMessage {
-            role: "user".to_string(),
-            content: job.prompt.clone(),
-        }],
-        endpoint_id,
-        local_model,
-        model,
-        attachments: Vec::new(),
-        // Web search is on exactly when the job may use it, so a run that cannot
-        // search is not handed a catalogue of searches it will be refused.
-        web_search_enabled: job.access.web,
-        mode: job.mode,
-        permission: job.permission,
-        reasoning: ReasoningEffort::default(),
-        skill_ids: Vec::new(),
-        // The job's own access set, with scheduling taken off it. Enforced here rather
-        // than trusting how the job was created: a job made from the Jobs screen can
-        // have every capability switched on, and it still must not schedule more work.
-        // One generation, whatever the row says.
-        access: Some(crate::ai::tools::AccessSet {
-            jobs: false,
-            ..job.access
-        }),
-    };
-
-    // The run's own event stream, collected here because a scheduled run has no
-    // window watching it: without this the transcript would hold the answer and
-    // nothing about how it was reached. Filtered by run id, so a conversation
-    // running in the app at the same time is not folded into this transcript.
-    let collected = Arc::new(Mutex::new(Vec::<Stamped>::new()));
-    let sink = Arc::clone(&collected);
-    let watched = run_id.to_string();
-    let listener = app.listen("ai-event", move |event| {
-        let Ok(parsed) = serde_json::from_str::<ChatEvent>(event.payload()) else {
-            return;
-        };
-        if parsed.run_id != watched {
-            return;
-        }
-        if let Ok(mut list) = sink.lock() {
-            list.push(Stamped {
-                at: Instant::now(),
-                event: parsed,
-            });
-        }
-    });
-
-    let result = runtime.run_chat(app, request).await;
-    app.unlisten(listener);
-
-    // The same fold the sub-agent panel uses, so a scheduled run's transcript
-    // reads the way an attended one does.
-    let activity = collected
-        .lock()
-        .map(|events| steps_from(&events))
-        .unwrap_or_default();
-
-    // The session is written whether the run succeeded or not: a failed job is
-    // exactly the case someone opens the transcript to understand.
-    let mut assistant = json!({
-        "role": "assistant",
-        "content": result.content,
-        "modelId": provider_label,
-    });
-    if !activity.is_empty() {
-        assistant["activity"] = json!(activity);
-    }
-    if let Some(error) = &result.error {
-        assistant["content"] = json!(format!("Request failed: {error}"));
-    }
-    let session = json!({
-        "id": session_id,
-        "title": job.name,
-        "createdAt": started_at,
-        "updatedAt": crate::database::utc_now(),
-        // `job` rather than `chat`: the sidebar still lists it -- only sub-agents
-        // are hidden -- but the distinction is there for a filter to use later.
-        "kind": "job",
-        "mode": if job.mode == crate::ai::tools::ToolMode::Agent { "agent" } else { "chat" },
-        "modelId": provider_label,
-        "messages": [
-            { "role": "user", "content": job.prompt },
-            assistant,
-        ],
-    });
-    if let Err(error) = runtime.database().save_chat_session(&session) {
-        tracing::warn!(job = %job.id, %error, "a job run could not be saved");
-    }
+    // The request, the event collection and the transcript write live in
+    // `ai::run`, shared with the messaging channels: a scheduled job and a message
+    // from a phone are the same run to the model, and a second copy here is a
+    // second place for the two to drift.
+    let result = crate::ai::run::run_prompt(
+        app,
+        runtime,
+        crate::ai::run::PromptRun {
+            run_id: run_id.to_string(),
+            session_id: session_id.to_string(),
+            title: job.name.clone(),
+            // `job` rather than `chat`: the sidebar still lists it -- only sub-agents
+            // are hidden -- but the distinction is there for a filter to use later.
+            kind: "job".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: job.prompt.clone(),
+            }],
+            // A job starts a conversation rather than continuing one, so there is
+            // no stored record to preserve.
+            stored_messages: Vec::new(),
+            endpoint_id,
+            local_model,
+            model,
+            provider_label,
+            mode: job.mode,
+            permission: job.permission,
+            // The job's own access set, with scheduling taken off it. Enforced here rather
+            // than trusting how the job was created: a job made from the Jobs screen can
+            // have every capability switched on, and it still must not schedule more work.
+            // One generation, whatever the row says.
+            access: crate::ai::tools::AccessSet {
+                jobs: false,
+                ..job.access
+            },
+            // Web search is on exactly when the job may use it, so a run that cannot
+            // search is not handed a catalogue of searches it will be refused.
+            web_search: job.access.web,
+            created_at: started_at.to_string(),
+            on_event: None,
+        },
+    )
+    .await;
 
     let outcome = match result.error {
         Some(reason) => Outcome {

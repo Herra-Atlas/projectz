@@ -131,7 +131,10 @@ fn from_model(model: &Path) -> Result<Voice, String> {
         ));
     }
     if !model.is_file() {
-        return Err(format!("The voice is missing. Expected {}.", model.display()));
+        return Err(format!(
+            "The voice is missing. Expected {}.",
+            model.display()
+        ));
     }
 
     // `with_extension` replaces the last component, so `x.onnx` becomes

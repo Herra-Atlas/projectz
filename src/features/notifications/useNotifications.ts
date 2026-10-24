@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Notification, Notify } from "./types";
+import type { Notification, Notify, NotifyAction } from "./types";
 
 /** How long a success or error row stays before it removes itself. */
 const EXPIRY_MS = 3000;
@@ -30,14 +30,49 @@ export function useNotifications() {
       key,
       tone,
       message,
+      anchor: "corner",
       expiresAt: tone === "loading" ? null : Date.now() + EXPIRY_MS,
     };
     setNotifications((current) => [
       ...current.filter((item) =>
-        key ? item.key !== key : !(item.tone === "loading" && tone === "loading"),
+        key
+          ? item.key !== key
+          // A question in the middle of the screen is not a background report:
+          // an unrelated "loading" must not take it away before it is answered.
+          : !(item.tone === "loading" && tone === "loading" && !item.actions),
       ),
       notification,
     ]);
+  }, []);
+
+  /**
+   * Raises a question, or updates the question already on screen.
+   *
+   * Keyed rows are the whole mechanism behind the model prompt: the same key
+   * goes from asking to loading to a Stop that is available while it starts, and
+   * finally away -- one card the user watches change rather than three stacked.
+   */
+  const notifyAction = useCallback<NotifyAction>((options) => {
+    const tone = options.tone ?? "confirm";
+    const notification: Notification = {
+      id: Date.now() + Math.random(),
+      key: options.key,
+      tone,
+      title: options.title,
+      message: options.message,
+      actions: options.actions,
+      onDismiss: options.onDismiss,
+      anchor: options.anchor ?? "top",
+      // A question has to be answered by a person; a progress row ends when the
+      // work does. Neither may disappear on a timer.
+      expiresAt: null,
+    };
+    setNotifications((current) => {
+      const kept = options.key
+        ? current.filter((item) => item.key !== options.key)
+        : current;
+      return [...kept, notification];
+    });
   }, []);
 
   const dismiss = useCallback((id: number) => {
@@ -68,7 +103,7 @@ export function useNotifications() {
     return () => window.clearInterval(timer);
   }, []);
 
-  return { notifications, notify, dismiss, clearKey, clearWhere };
+  return { notifications, notify, notifyAction, dismiss, clearKey, clearWhere };
 }
 
 export type NotificationStackControls = ReturnType<typeof useNotifications>;

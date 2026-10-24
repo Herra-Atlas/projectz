@@ -13,6 +13,35 @@ use crate::ai::runtime::AiRuntime;
 use crate::ai::types::ChatRequest;
 use crate::database::jobs::{Job, JobRun, NewJob};
 
+/// Adds each reply's record of its tools to its text, before a send.
+///
+/// The chat view used to do this in TypeScript; a job and a message from a phone had
+/// no copy, so they remembered what they said and not what they saw. One
+/// implementation means the bytes are identical whichever door the run came through,
+/// which is exactly what the provider's cached prefix needs.
+#[tauri::command]
+pub fn ai_recap_messages(messages: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    messages
+        .into_iter()
+        .map(|mut message| {
+            let recap = {
+                let content = message
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                match message.get("activity") {
+                    Some(activity) => crate::ai::recap::append(content, activity),
+                    None => content.to_string(),
+                }
+            };
+            if let Some(object) = message.as_object_mut() {
+                object.insert("content".into(), serde_json::Value::String(recap));
+            }
+            message
+        })
+        .collect()
+}
+
 #[tauri::command]
 pub async fn ai_chat(
     app: AppHandle,
@@ -43,49 +72,23 @@ pub async fn ai_compact_session(
     database: State<'_, std::sync::Arc<crate::database::Database>>,
     session_id: String,
 ) -> Result<Vec<crate::ai::types::ChatMessage>, String> {
-    use crate::ai::compact::Compaction;
-
-    // The mode is the stored preference, read here rather than passed in: a command is not
-    // a second place a setting lives, and the user asking to compact means "do what you
-    // would do", not "do something the next reply will not".
-    let stored: Option<serde_json::Value> = database.setting("app.preferences");
-    let mode = Compaction::parse(
-        stored
-            .as_ref()
-            .and_then(|value| value.get("compaction"))
-            .and_then(serde_json::Value::as_str),
-    );
-    if mode == Compaction::Off {
-        return Err("Context compaction is off. Turn it on in Settings → Preferences.".into());
+    // The knobs are the stored preference, read here rather than passed in: a
+    // command is not a second place a setting lives, and the user asking to
+    // compact means "do what you would do", not "do something the next reply
+    // will not".
+    let settings = crate::ai::compact::stored(database.as_ref());
+    match crate::ai::compact::compact_session(database.as_ref(), &session_id, settings)? {
+        // Nothing old enough to elide. The composer says so rather than reporting a
+        // compaction that did not happen.
+        None => Ok(Vec::new()),
+        Some(messages) => {
+            info!(session_id = %session_id, count = messages.len(), "conversation compacted");
+            Ok(messages
+                .into_iter()
+                .filter_map(|value| serde_json::from_value(value).ok())
+                .collect())
+        }
     }
-
-    // Messages are stored as the frontend's own JSON -- the same shape `ChatMessage` is
-    // deserialised from -- so the compactor is handed them directly and they go back
-    // through the one save path rather than a second writer.
-    let mut messages = database
-        .list_session_messages(&session_id)
-        .map_err(|error| error.to_string())?;
-    let outcome = crate::ai::compact::apply_to_history(&mut messages, mode);
-    if outcome.removed == 0 {
-        return Ok(Vec::new());
-    }
-    // The session's own record is written back with the compacted messages, so the header,
-    // the pin, the mode and the rollups stay exactly as the frontend left them.
-    let mut record = database.session_record(&session_id)?;
-    if let Some(object) = record.as_object_mut() {
-        object.insert(
-            "messages".into(),
-            serde_json::Value::Array(messages.clone()),
-        );
-    }
-    database
-        .save_chat_session(&record)
-        .map_err(|error| error.to_string())?;
-    info!(session_id = %session_id, removed = outcome.removed, mode = %outcome.mode, "conversation compacted");
-    Ok(messages
-        .into_iter()
-        .filter_map(|value| serde_json::from_value(value).ok())
-        .collect())
 }
 
 /// Re-points the level a reply in flight decides at.
@@ -214,15 +217,6 @@ pub fn taste_delete_item(
     taste.delete_item(&app, id)
 }
 
-/// Forgets the learned profile and how far each conversation was read.
-#[tauri::command]
-pub fn taste_reset(
-    app: AppHandle,
-    taste: State<'_, crate::taste::Taste>,
-) -> Result<crate::taste::TasteStatus, String> {
-    taste.reset(&app)
-}
-
 /// The Assist record and its derived bounds, without live bridge or model state.
 ///
 /// The settings page's fast path: it can draw every control from this answer
@@ -282,6 +276,68 @@ pub fn assist_set_enabled(
 ) -> Result<crate::assist::AssistStatus, String> {
     assist.set_enabled(&app, enabled)?;
     Ok(assist.status(&runtime))
+}
+
+/// Everything the Communications page draws: the record and each channel's state.
+///
+/// One read rather than one per channel, so a page with two transports cannot show
+/// one of them a second out of date.
+#[tauri::command]
+pub fn messaging_status(
+    messaging: State<'_, std::sync::Arc<crate::messaging::Messaging>>,
+) -> crate::messaging::MessagingStatus {
+    messaging.status()
+}
+
+/// Writes the shared record and answers with what was stored.
+///
+/// The record is clamped by the backend (the allowlist is numeric only, `jobs` is
+/// always off), so the page settles on the stored values rather than on what was
+/// asked for.
+#[tauri::command]
+pub fn messaging_save_settings(
+    app: AppHandle,
+    messaging: State<'_, std::sync::Arc<crate::messaging::Messaging>>,
+    settings: crate::messaging::settings::MessagingSettings,
+) -> Result<crate::messaging::settings::MessagingSettings, String> {
+    let saved = messaging.save(settings)?;
+    let _ = app.emit("messaging-event", serde_json::json!({ "kind": "state" }));
+    Ok(saved)
+}
+
+/// Moves the master switch. Every channel parks or wakes from this one fact.
+#[tauri::command]
+pub fn messaging_set_enabled(
+    app: AppHandle,
+    messaging: State<'_, std::sync::Arc<crate::messaging::Messaging>>,
+    enabled: bool,
+) -> Result<crate::messaging::MessagingStatus, String> {
+    messaging.set_enabled(enabled)?;
+    let _ = app.emit("messaging-event", serde_json::json!({ "kind": "state" }));
+    Ok(messaging.status())
+}
+
+/// Writes one channel's own configuration (Telegram's token, today).
+///
+/// The channel validates it before anything is stored, so a mistyped token is
+/// reported at the field and the previous one keeps working.
+#[tauri::command]
+pub async fn messaging_save_channel(
+    app: AppHandle,
+    messaging: State<'_, std::sync::Arc<crate::messaging::Messaging>>,
+    channel: String,
+    config: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let hub = std::sync::Arc::clone(messaging.inner());
+    let Some(target) = hub.channel(&channel) else {
+        return Err(format!("There is no {channel} channel in this build"));
+    };
+    let view = target.configure(config).await?;
+    // A poller parked because it had no token must not wait out its idle timer
+    // before noticing that it now has one.
+    hub.wake();
+    let _ = app.emit("messaging-event", serde_json::json!({ "kind": "state" }));
+    Ok(view)
 }
 
 #[tauri::command]

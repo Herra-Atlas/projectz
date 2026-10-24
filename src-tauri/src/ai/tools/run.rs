@@ -76,12 +76,24 @@ pub struct RunHandle {
     /// vision model, which is the case that makes reading an image a clean
     /// refusal rather than a silent attempt at a model that cannot see.
     pub vision_model: Option<(Endpoint, String)>,
-    /// How aggressively this run elides old context.
+    /// How aggressively this run compresses old context.
     ///
     /// Carried on the run so a sub-agent compacts the way its parent did: a
     /// delegated conversation can grow just as long, and it should not fall back
     /// to a default that disagrees with the setting the user chose.
-    pub compaction: crate::ai::compact::Compaction,
+    pub compression: crate::ai::compact::Compression,
+    /// The run's ceilings: this loop's rounds, and what a spawned sub-agent gets
+    /// for its own rounds, concurrency and effort.
+    pub limits: crate::ai::types::RunLimits,
+    /// Sub-agents of this run that are working right now, and have not yet
+    /// delivered their report.
+    ///
+    /// The parallel cap is guarded here rather than in a process-global: "at
+    /// once" means "inside one run" -- the run that spawned them holds the
+    /// handle for as long as its agents live (each task owns a clone), and two
+    /// replies should never have counted each other's agents. Released by
+    /// `run_agent` on the way out, whatever the result was.
+    pub subagent_running: std::sync::atomic::AtomicUsize,
     /// The loaded local model's usable context window, when available.
     pub local_context_window: Option<u64>,
     /// How many jobs this run has scheduled.

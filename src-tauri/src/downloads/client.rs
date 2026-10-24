@@ -98,7 +98,11 @@ impl Client {
 /// A repository's file tree, as a free function so a caller can run several at
 /// once with an owned `reqwest::Client` in each future.
 pub async fn tree(http: &reqwest::Client, repo: &str) -> Result<Vec<TreeEntry>, String> {
-    get_json(http, &format!("{API}/api/models/{repo}/tree/main?recursive=true")).await
+    get_json(
+        http,
+        &format!("{API}/api/models/{repo}/tree/main?recursive=true"),
+    )
+    .await
 }
 
 async fn get_json<T: serde::de::DeserializeOwned>(

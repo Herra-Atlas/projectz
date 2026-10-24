@@ -325,6 +325,12 @@ impl Taste {
     }
 
     /// Forgets the profile and how far each conversation was read.
+    ///
+    /// The system page's Forget row is the door; there is no tool and no page
+    /// control for it. It goes through here rather than straight at the tables
+    /// for the same two reasons every other change does: the cached prompt
+    /// block has to lose the profile the same moment the tables do, and an
+    /// open Taste page must see that its facts are gone.
     pub fn reset(&self, app: &AppHandle) -> Result<TasteStatus, String> {
         self.inner.database.reset_taste()?;
         refresh_prompt_cache(&self.inner.database);

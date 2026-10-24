@@ -68,6 +68,24 @@ pub async fn spawn(arguments: Value, context: ToolContext) -> Result<String, Str
             "sub_agent requires an `instructions` field describing the task".to_string()
         })?
         .to_string();
+    // The parallel cap, stated plainly rather than queued behind. Sub-agents
+    // return at once, so "wait for a slot" would be a hedge the model cannot
+    // see through: it would read an acknowledgement for an agent that is never
+    // going to run. A refusal names the head-room as zero and tells the model
+    // to carry on without spawning.
+    let ceiling = run.limits.subagent_parallel;
+    if ceiling > 0 {
+        let running = run
+            .subagent_running
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if running >= ceiling {
+            return Ok(format!(
+                "Application already has {running}/{ceiling} sub agents running, \
+                 unable to spawn more currently. Finish your own task with the \
+                 work you have already read, or ask again after a report arrives."
+            ));
+        }
+    }
     let label = arguments
         .get("label")
         .and_then(Value::as_str)
@@ -122,7 +140,9 @@ pub async fn spawn(arguments: Value, context: ToolContext) -> Result<String, Str
     ));
 
     let task = AgentTask {
-        run,
+        // Cloned rather than moved: the spawn still owns the Arc, and the slot
+        // increment below has to write through it after the task has left.
+        run: run.clone(),
         context,
         endpoint,
         model,
@@ -135,6 +155,11 @@ pub async fn spawn(arguments: Value, context: ToolContext) -> Result<String, Str
         approval,
     };
     tokio::spawn(run_agent(task));
+    // Counted only once the task is launched: a refusal above never consumes a
+    // slot, and an increment on the cancelling path in `run_agent` would race
+    // the refusal that reads it.
+    run.subagent_running
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
     Ok(format!(
         "Agent `{display_label}` is working in the background (id `{agent_id}`). It cannot see this \
@@ -254,7 +279,13 @@ async fn run_agent(task: AgentTask) {
         &model,
         &messages,
         &[],
-        run.reasoning.clone(),
+        // The configured effort wins; the parent's is the fallback. Resolved
+        // here rather than by the runtime because the whole override is one
+        // string the parent already carries.
+        run.limits
+            .subagent_effort
+            .clone()
+            .unwrap_or_else(|| run.reasoning.clone()),
         run.web_search_enabled,
         // Always Agent: a sub-agent exists to do things. The spawn tool itself is
         // withheld (the `false` below), which is what keeps delegation one level
@@ -278,9 +309,18 @@ async fn run_agent(task: AgentTask) {
         // Nor a vision model: a sub-agent has no reason to open an image, and
         // withholding it keeps the preference resolved in one place.
         None,
-        // The parent's compaction setting, so a long delegated run compacts the
-        // same way the conversation that started it does.
-        run.compaction,
+        // The parent's compression knobs, so a long delegated run compresses the
+        // way the conversation that started it does.
+        run.compression,
+        // The sub-agent's own ceiling is the *sub-agent* one, not the parent
+        // reply's; the parallel cap has no meaning inside an agent that cannot
+        // spawn.
+        crate::ai::types::RunLimits {
+            rounds: run.limits.subagent_rounds,
+            subagent_rounds: run.limits.subagent_rounds,
+            subagent_parallel: run.limits.subagent_parallel,
+            subagent_effort: run.limits.subagent_effort.clone(),
+        },
         context_window,
         run.local_context_window,
         None,
@@ -322,6 +362,10 @@ async fn run_agent(task: AgentTask) {
         }
     }
 
+    // Released here rather than in the caller, so the slot is held for as long
+    // as the agent is actually working -- including a run that failed -- and a
+    // cap of one cannot be eaten by a task that is already done.
+    release_slot(&run);
     // Tells the panel there is a new run to read, and clears it from the running
     // registry. Emitted directly rather than through the run's sink: the parent's
     // loop may already be over, and nothing would drain it.
@@ -367,6 +411,16 @@ async fn run_agent(task: AgentTask) {
             "stats": run_stats,
         })),
     });
+}
+
+/// Releases one parallel slot.
+///
+/// The increment and the release are the only writers, and each spawn has
+/// exactly one of each, so the counter cannot drift; there is no saturating
+/// dance to defend against a release nobody earned.
+fn release_slot(run: &RunHandle) {
+    run.subagent_running
+        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// The message a finished sub-agent hands to its parent, and whether it failed.
@@ -425,6 +479,13 @@ mod tests {
     use serde_json::json;
 
     fn run(subagent_default: Option<(Endpoint, String)>) -> Arc<RunHandle> {
+        run_with(subagent_default, 0)
+    }
+
+    /// The same handle, with the parallel sub-agent cap set. `0` -- the other
+    /// fixture's value -- removes the ceiling entirely, which is why the tests
+    /// above it never need to know the cap exists.
+    fn run_with(subagent_default: Option<(Endpoint, String)>, parallel: usize) -> Arc<RunHandle> {
         Arc::new(RunHandle {
             endpoint: Endpoint {
                 id: "parent-provider".into(),
@@ -446,10 +507,36 @@ mod tests {
             emit: Arc::new(|_| {}),
             subagent_default,
             vision_model: None,
-            compaction: crate::ai::compact::Compaction::Normal,
+            compression: crate::ai::compact::Compression::default(),
+            limits: crate::ai::types::RunLimits {
+                subagent_parallel: parallel,
+                ..crate::ai::types::RunLimits::default()
+            },
+            subagent_running: std::sync::atomic::AtomicUsize::new(0),
             local_context_window: None,
             jobs_created: std::sync::atomic::AtomicUsize::new(0),
         })
+    }
+
+    /// The parallel cap is refused by name rather than queued behind: a
+    /// sub-agent returns at once, so an acknowledgement for a slot that will
+    /// never free up is the one lie a tool result must not tell.
+    #[tokio::test]
+    async fn a_spawn_past_the_parallel_cap_is_refused_by_name() {
+        let handle = run_with(None, 2);
+        // Two already in flight, which is the whole ceiling.
+        handle
+            .subagent_running
+            .store(2, std::sync::atomic::Ordering::SeqCst);
+        let context = ToolContext {
+            run: Some(handle),
+            ..ToolContext::default()
+        };
+        let refusal = spawn(json!({ "instructions": "x" }), context)
+            .await
+            .expect("a refusal is a tool result, not an error");
+        assert!(refusal.contains("2/2"), "{refusal}");
+        assert!(refusal.contains("unable to spawn more"), "{refusal}");
     }
 
     /// A failed sub-agent reports to its parent rather than going silent. This is

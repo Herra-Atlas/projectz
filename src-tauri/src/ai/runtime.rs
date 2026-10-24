@@ -22,6 +22,12 @@ const TITLE_MAX_TOKENS: u32 = 24;
 /// a model that is consistently wrong still fails fast.
 const TITLE_ATTEMPTS: u32 = 2;
 
+/// How long to wait before each retry of a failed reply, in seconds.
+///
+/// The ladder is shared with every other request kind -- see
+/// [`crate::ai::RETRY_DELAYS_SECONDS`] for why the numbers are these.
+const RETRY_DELAYS_SECONDS: [u64; 4] = crate::ai::RETRY_DELAYS_SECONDS;
+
 /// One sub-agent at work, as the panel needs to know it.
 ///
 /// The same facts the start event carries, held so the panel can list an agent
@@ -386,19 +392,84 @@ impl AiRuntime {
         self.resolve_selection(selection).ok()
     }
 
-    /// How aggressively to elide old context, from Settings.
+    /// How aggressively to compress old context, from Settings.
     ///
-    /// A plain string preference rather than a resolved model, so it needs none of
-    /// the registry work the two above do. An unset or unknown value parses to
-    /// `Normal`, which is the safe default: compressing old tool output is never
-    /// as bad as a request the provider refuses for being too long.
-    fn compaction(&self) -> crate::ai::compact::Compaction {
-        let preferences: Option<serde_json::Value> = self.database.setting("app.preferences");
-        let stored = preferences
+    /// A plain preference read rather than a resolved model, so it needs none of
+    /// the registry work the two above do. `Compression::parse` carries its own
+    /// defaults, and an unset record parses to them.
+    fn compression(&self) -> crate::ai::compact::Compression {
+        let stored: Option<serde_json::Value> = self.database.setting("app.preferences");
+        stored
             .as_ref()
-            .and_then(|value| value.get("compaction"))
-            .and_then(serde_json::Value::as_str);
-        crate::ai::compact::Compaction::parse(stored)
+            .map_or_else(crate::ai::compact::Compression::default, |value| {
+                crate::ai::compact::Compression::parse(Some(value))
+            })
+    }
+
+    /// The run's ceilings, from the same record.
+    ///
+    /// Kept beside `compression` on the `app.preferences` read because the two
+    /// travel together and a second `database.setting` call would double the
+    /// reads every run pays for the same purpose. The bounds are the ones the
+    /// frontend clamps against; these least-of checks are the backstop for a
+    /// hand-edited record.
+    fn limits(&self) -> crate::ai::types::RunLimits {
+        let stored: Option<serde_json::Value> = self.database.setting("app.preferences");
+        let stored = stored.as_ref();
+        // Unknown or absent Main field values read as the defaults; a value that
+        // is not a positive number does not lower the ceiling.
+        let positive = |key: &str, fallback: usize| -> usize {
+            stored
+                .and_then(|value| value.get(key))
+                .and_then(serde_json::Value::as_f64)
+                .filter(|value| value.is_finite() && *value >= 1.0)
+                .map_or(fallback, |value| value as usize)
+        };
+        // The parallel cap may genuinely be 0 -- that is "no ceiling" -- so a
+        // missing value falls to the default and a stored 0 means uncapped.
+        let non_negative = |fallback: usize| -> usize {
+            stored
+                .and_then(|value| value.get("subagentParallel"))
+                .and_then(serde_json::Value::as_f64)
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .map_or(fallback, |value| value as usize)
+        };
+        let effort_from = |key: &str| -> Option<crate::ai::types::ReasoningEffort> {
+            // "" reads as None, keeping whatever the model decides by default.
+            stored
+                .and_then(|value| value.get(key))
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| crate::ai::types::ReasoningEffort(value.trim().to_string()))
+        };
+        crate::ai::types::RunLimits {
+            rounds: positive("mainSteps", crate::ai::types::RunLimits::default().rounds),
+            subagent_rounds: positive(
+                "subagentSteps",
+                crate::ai::types::RunLimits::default().subagent_rounds,
+            ),
+            subagent_parallel: non_negative(
+                crate::ai::types::RunLimits::default().subagent_parallel,
+            ),
+            subagent_effort: effort_from("subagentReasoning"),
+        }
+    }
+
+    /// The main model's context window override, if one is stored.
+    ///
+    /// `0` -- the default -- leaves every detected window alone: a provider
+    /// figure the model itself reported is better information than a number in
+    /// a setting. An override exists for the cases that number is wrong: a
+    /// model the provider has capped, a GGUF whose header under-reports, a
+    /// natively-run server whose context was sized differently.
+    fn context_override(&self) -> Option<u64> {
+        let stored: Option<serde_json::Value> = self.database.setting("app.preferences");
+        stored
+            .as_ref()
+            .and_then(|value| value.get("mainContextWindow"))
+            .and_then(serde_json::Value::as_f64)
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .map(|value| value as u64)
     }
 
     /// Turn one persisted selection into a requestable endpoint and model.
@@ -658,11 +729,12 @@ impl AiRuntime {
         // Resolved here too, for the same reason: the vision choice becomes a live
         // endpoint before it reaches the tool that reads an image.
         let vision_default = self.vision_default();
-        // A plain string preference, so it is read here rather than resolved into
-        // an endpoint; it rides on the request the way `reasoning` does.
-        let compaction = self.compaction();
+        // The stored knob pack and ceilings, read from the one record the run
+        // amends nothing of.
+        let compression = self.compression();
+        let limits = self.limits();
         let local_context_window = self.local_models.context_window();
-        let context_window = if is_local {
+        let detected_window = if is_local {
             local_context_window
         } else {
             self.database
@@ -670,6 +742,13 @@ impl AiRuntime {
                 .ok()
                 .and_then(|capabilities| capabilities.context_length)
                 .and_then(|context| u64::try_from(context).ok())
+        };
+        // The override wins when it is set: "does not care about the detected
+        // value" is the whole reason the field exists, including the case where
+        // nothing was detected at all.
+        let context_window = match self.context_override() {
+            Some(override_window) => Some(override_window),
+            None => detected_window,
         };
         let previous_prompt_tokens = session_id
             .as_deref()
@@ -685,7 +764,22 @@ impl AiRuntime {
         let app_handle = app.clone();
         let event_run_id = run_id_clone.clone();
         let event_session_id = session_id_clone.clone();
+        // What this attempt produced, so a failed one can be retried only when it
+        // changed nothing. Reset before each attempt.
+        let produced = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let produced_counter = Arc::clone(&produced);
+        let tool_counter = Arc::clone(&tool_calls);
         let on_event: Arc<dyn Fn(ChatEvent) + Send + Sync> = Arc::new(move |ev| {
+            match ev.kind.as_str() {
+                "delta" => {
+                    produced_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                "tool_call" => {
+                    tool_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                _ => {}
+            }
             if is_local && ev.kind == "completion_id" {
                 if let Some(completion_id) = ev.text.clone() {
                     emitter.set_local_completion_id(&event_run_id, completion_id);
@@ -708,32 +802,72 @@ impl AiRuntime {
                 let _ = search_app.emit("ai-event", serde_json::json!({ "run_id": search_run_id, "session_id": search_session_id, "kind": "web_search", "search": search }));
             },
         );
-        let result = stream_chat(
-            &endpoint,
-            &model,
-            &request.messages,
-            &request.attachments,
-            request.reasoning,
-            request.web_search_enabled,
-            request.mode,
-            is_local,
-            &run_id_clone,
-            session_id.as_deref(),
-            Some(&self.database),
-            gate,
-            cancelled,
-            subagent_default,
-            vision_default,
-            compaction,
-            context_window,
-            local_context_window,
-            previous_prompt_tokens,
-            // The top-level run may delegate; a sub-agent's own run passes false.
-            true,
-            on_event,
-            on_search,
-        )
-        .await;
+        // The ladder in `RETRY_DELAYS_SECONDS`, applied here rather than in each
+        // caller: one implementation covers a reply, a job, a message from a phone
+        // and a taste pass, and the same event drives the composer's countdown and
+        // the "Worked for" row everywhere.
+        let mut retries = 0usize;
+        let result = loop {
+            produced.store(0, std::sync::atomic::Ordering::Relaxed);
+            tool_calls.store(0, std::sync::atomic::Ordering::Relaxed);
+            let attempt = stream_chat(
+                &endpoint,
+                &model,
+                &request.messages,
+                &request.attachments,
+                request.reasoning.clone(),
+                request.web_search_enabled,
+                request.mode,
+                is_local,
+                &run_id_clone,
+                session_id.as_deref(),
+                Some(&self.database),
+                gate.clone(),
+                Arc::clone(&cancelled),
+                subagent_default.clone(),
+                vision_default.clone(),
+                compression,
+                limits.clone(),
+                context_window,
+                local_context_window,
+                previous_prompt_tokens,
+                // The top-level run may delegate; a sub-agent's own run passes false.
+                true,
+                Arc::clone(&on_event),
+                Arc::clone(&on_search),
+            )
+            .await;
+            match attempt {
+                Err(reason)
+                    if reason != crate::ai::STOPPED
+                        && retries < RETRY_DELAYS_SECONDS.len()
+                        && produced.load(std::sync::atomic::Ordering::Relaxed) == 0
+                        && tool_calls.load(std::sync::atomic::Ordering::Relaxed) == 0 =>
+                {
+                    let delay = RETRY_DELAYS_SECONDS[retries];
+                    retries += 1;
+                    tracing::info!(run_id = %run_id, attempt = retries, delay, %reason, "retrying a reply that changed nothing");
+                    on_event(ChatEvent {
+                        run_id: run_id_clone.clone(),
+                        session_id: None,
+                        sequence: 0,
+                        kind: "retrying".to_string(),
+                        text: Some(reason.clone()),
+                        error: None,
+                        metrics: Some(serde_json::json!({
+                            "attempt": retries,
+                            "attempts": RETRY_DELAYS_SECONDS.len(),
+                            "delay_seconds": delay,
+                            "error": reason,
+                        })),
+                    });
+                    if wait_before_retry(delay, &cancelled).await {
+                        break Err(crate::ai::STOPPED.to_string());
+                    }
+                }
+                other => break other,
+            }
+        };
         self.active_runs.lock().unwrap().remove(&run_id);
         // Dropped with the run, so a late level change finds nothing to re-point
         // rather than reaching a gate no run is using any more.
@@ -834,6 +968,24 @@ impl AiRuntime {
         for id in ids {
             self.database.record_skill_use(id);
         }
+    }
+}
+
+/// Waits before a retry, waking early if the run was stopped.
+///
+/// Polled in short slices rather than one long sleep, so pressing Stop during a
+/// seven-second wait ends the reply at once instead of parking it first.
+async fn wait_before_retry(seconds: u64, cancelled: &Arc<std::sync::atomic::AtomicBool>) -> bool {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(seconds);
+    loop {
+        if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            return true;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        tokio::time::sleep((deadline - now).min(std::time::Duration::from_millis(200))).await;
     }
 }
 

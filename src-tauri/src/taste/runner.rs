@@ -317,17 +317,24 @@ fn resolve_model(runtime: &AiRuntime, settings: &TasteSettings) -> Result<Resolv
     Err(last)
 }
 
-/// One batch's answer, with one immediate retry.
+/// One batch's answer, with the shared retry ladder.
 ///
-/// The second attempt always suppresses thinking. The first failure is often a
+/// The second and later attempts suppress thinking. The first failure is often a
 /// reply that spent its whole budget thinking and stopped mid-object; asking the
-/// same question the same way would produce the same truncation.
+/// same question the same way would produce the same truncation, and a wait is
+/// added between attempts for the same reason the chat page has one -- a provider
+/// having a bad minute is worth a few seconds of patience.
 async fn ask(
     resolved: &Resolved,
     messages: &[Value],
 ) -> Result<(ops::RawReply, ReportedUsage), String> {
     let mut last = "The model did not answer.".to_string();
-    for attempt in 0..2 {
+    // Zero delay for the first attempt, then the shared ladder.
+    let delays = std::iter::once(0u64).chain(crate::ai::RETRY_DELAYS_SECONDS);
+    for (attempt, delay) in delays.enumerate() {
+        if delay > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+        }
         let thinking = if resolved.local || attempt > 0 {
             Thinking::Suppress
         } else {

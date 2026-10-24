@@ -236,7 +236,9 @@ impl Jobs {
 
     /// Marks a job for pausing. The stream loop notices between chunks.
     pub fn pause(&self, id: &str) -> bool {
-        let Ok(jobs) = self.0.lock() else { return false };
+        let Ok(jobs) = self.0.lock() else {
+            return false;
+        };
         let Some(job) = jobs.iter().find(|job| job.view.id == id) else {
             return false;
         };
@@ -249,7 +251,9 @@ impl Jobs {
 
     /// Marks a job for stopping, which also discards the partial file.
     pub fn stop(&self, id: &str) -> bool {
-        let Ok(jobs) = self.0.lock() else { return false };
+        let Ok(jobs) = self.0.lock() else {
+            return false;
+        };
         let Some(job) = jobs.iter().find(|job| job.view.id == id) else {
             return false;
         };

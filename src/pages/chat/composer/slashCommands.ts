@@ -14,6 +14,8 @@
 export type SlashCommand = {
   /** Typed after the slash, e.g. `/fork`. */
   name: string;
+  /** Other spellings that run the same command. */
+  aliases?: string[];
   /** Menu title. */
   label: string;
   /** One line under the title, shown in the menu. */
@@ -37,6 +39,9 @@ export type SlashCommand = {
 export const SLASH_COMMANDS: SlashCommand[] = [
   {
     name: "compact",
+    // The word people reach for. `compact` is the stored name and the one the
+    // backend command uses, so both are accepted and the menu shows one row.
+    aliases: ["compress"],
     label: "Compact this conversation",
     hint: "Trim old tool output so the next reply fits its window",
   },
@@ -65,7 +70,7 @@ export function slashQuery(draft: string): string | null {
 export function matchCommands(query: string): SlashCommand[] {
   const needle = query.trim().toLowerCase();
   if (needle.length === 0) return SLASH_COMMANDS;
-  return SLASH_COMMANDS.filter((command) => !command.disabled && command.name.startsWith(needle));
+  return SLASH_COMMANDS.filter((command) => !command.disabled && (command.name.startsWith(needle) || (command.aliases ?? []).some((alias) => alias.startsWith(needle))));
 }
 
 /**
@@ -80,5 +85,5 @@ export function exactCommand(draft: string): SlashCommand | null {
   const query = slashQuery(draft.trimEnd());
   if (query === null || query.length === 0) return null;
   const name = query.toLowerCase();
-  return SLASH_COMMANDS.find((command) => !command.disabled && command.name === name) ?? null;
+  return SLASH_COMMANDS.find((command) => !command.disabled && (command.name === name || (command.aliases ?? []).includes(name))) ?? null;
 }

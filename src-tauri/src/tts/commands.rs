@@ -80,10 +80,7 @@ pub fn tts_set_speed(
 
 /// Whether code is left out of what is spoken. Applies to every voice.
 #[tauri::command]
-pub fn tts_set_skip_code(
-    database: State<'_, Arc<Database>>,
-    skip: bool,
-) -> Result<(), String> {
+pub fn tts_set_skip_code(database: State<'_, Arc<Database>>, skip: bool) -> Result<(), String> {
     let mut settings = TtsSettings::load(&database);
     settings.skip_code = skip;
     settings.save(&database)
@@ -95,10 +92,7 @@ pub fn tts_set_skip_code(
 /// the selection clears -- which is the truth: there is nothing installed to read
 /// with until another voice is downloaded.
 #[tauri::command]
-pub fn tts_remove_voice(
-    database: State<'_, Arc<Database>>,
-    voice: String,
-) -> Result<(), String> {
+pub fn tts_remove_voice(database: State<'_, Arc<Database>>, voice: String) -> Result<(), String> {
     let path = std::path::PathBuf::from(&voice);
     let installed_root = crate::app_paths::models_root().join("tts");
     if !path.starts_with(&installed_root) {
@@ -108,14 +102,14 @@ pub fn tts_remove_voice(
         return Err("That voice is already gone.".to_string());
     }
 
-    std::fs::remove_file(&path)
-        .map_err(|error| format!("Could not delete the voice: {error}"))?;
+    std::fs::remove_file(&path).map_err(|error| format!("Could not delete the voice: {error}"))?;
     // The settings file is part of the voice; a copy left behind would be a file
     // nothing can load and nothing lists.
     let config = path.with_extension("onnx.json");
     if config.is_file() {
-        std::fs::remove_file(&config)
-            .map_err(|error| format!("The voice was deleted, but its settings were not: {error}"))?;
+        std::fs::remove_file(&config).map_err(|error| {
+            format!("The voice was deleted, but its settings were not: {error}")
+        })?;
     }
 
     let mut settings = TtsSettings::load(&database);

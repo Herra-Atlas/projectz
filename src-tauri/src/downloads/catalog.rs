@@ -43,12 +43,7 @@ pub fn gguf_files(repo: &str, tree: &[TreeEntry]) -> Vec<DownloadFile> {
     tree.iter()
         .filter(|entry| entry.entry_type == "file")
         .filter(|entry| entry.path.to_ascii_lowercase().ends_with(".gguf"))
-        .filter(|entry| {
-            !entry
-                .path
-                .to_ascii_lowercase()
-                .contains("mmproj")
-        })
+        .filter(|entry| !entry.path.to_ascii_lowercase().contains("mmproj"))
         .map(|entry| DownloadFile {
             repo: repo.to_string(),
             path: entry.path.clone(),
@@ -94,8 +89,14 @@ pub fn piper_voices(index: &serde_json::Value, query: &str) -> Vec<DownloadFile>
             .and_then(|value| value.get("family"))
             .and_then(|value| value.as_str())
             .unwrap_or("");
-        let quality = voice.get("quality").and_then(|value| value.as_str()).unwrap_or("");
-        let name = voice.get("name").and_then(|value| value.as_str()).unwrap_or(key);
+        let quality = voice
+            .get("quality")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let name = voice
+            .get("name")
+            .and_then(|value| value.as_str())
+            .unwrap_or(key);
 
         // The search reads the name a reader knows -- the voice, its language,
         // its quality -- rather than the file path, which nobody types.

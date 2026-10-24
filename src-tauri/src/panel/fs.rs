@@ -112,13 +112,7 @@ pub fn list_in(root: &Path, relative: &str) -> Result<Vec<TreeEntry>, String> {
 /// genuinely has 500 entries.
 #[tauri::command]
 pub fn panel_fs_list(relative: String) -> Result<Vec<TreeEntry>, String> {
-    eprintln!("[panel_fs_list] called with relative='{}'", relative);
-    let result = list(&relative);
-    eprintln!(
-        "[panel_fs_list] returning {} entries",
-        result.as_ref().map_or(0, |v| v.len())
-    );
-    result
+    list(&relative)
 }
 
 /// Reading a file for the panel's preview.
@@ -437,7 +431,12 @@ const SKIPPED: [&str; 7] = [
     ".venv",
 ];
 
-fn should_skip(name: &str) -> bool {
+/// Whether a name of a listing row is one the tree never draws.
+///
+/// `pub(crate)` because the watcher maps event paths the same way the listing
+/// maps entries: a folder the tree refuses to show is also a folder whose churn
+/// is not worth a refresh.
+pub(crate) fn should_skip(name: &str) -> bool {
     SKIPPED
         .iter()
         .any(|skipped| name.eq_ignore_ascii_case(skipped))
