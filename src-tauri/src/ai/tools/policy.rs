@@ -114,16 +114,27 @@ pub fn decide(mode: PermissionMode, tool_name: &str) -> Decision {
     }
 }
 
-/// Decides whether a tool may run, given the level **and** the run's access set.
+/// Decides whether a tool may run, given the level, the run's access set and the
+/// host's own ceiling.
 ///
-/// The access set is checked first and refuses outright: a capability the run does
-/// not hold is not something a prompt can grant, and in an unattended job there is
-/// nobody to prompt anyway. Only when the tool is permitted does the level decide
-/// whether it runs now or waits.
+/// The host is checked first because its refusal is a different fact from a
+/// narrowed run: "this job may not use the terminal" is the job's configuration,
+/// while "the host has disabled the terminal" is an installation-wide decision
+/// the user needs to understand cannot be changed by editing that job.
 ///
-/// This is the function the gate calls; [`decide`] stays the pure level question
-/// and is what the tests exercise.
-pub fn decide_with_access(mode: PermissionMode, tool_name: &str, access: &AccessSet) -> Decision {
+/// This is the function the gate calls; [`decide`] stays the pure level question.
+pub fn decide_with_host_access(
+    mode: PermissionMode,
+    tool_name: &str,
+    access: &AccessSet,
+    host: &AccessSet,
+) -> Decision {
+    if !host.is_allowed(tool_name) {
+        return Decision::Deny(format!(
+            "Host has disabled {} for this account.",
+            AccessSet::label_for(tool_name)
+        ));
+    }
     if !access.is_allowed(tool_name) {
         return Decision::Deny(format!("this run is not allowed to use `{tool_name}`"));
     }
@@ -144,7 +155,12 @@ mod access_tests {
             ..AccessSet::ALL
         };
         assert_eq!(
-            decide_with_access(PermissionMode::Full, "run_terminal", &access),
+            decide_with_host_access(
+                PermissionMode::Full,
+                "run_terminal",
+                &access,
+                &AccessSet::ALL
+            ),
             Decision::Deny("this run is not allowed to use `run_terminal`".to_string())
         );
     }
@@ -152,12 +168,48 @@ mod access_tests {
     #[test]
     fn a_permitted_tool_falls_through_to_the_level() {
         assert_eq!(
-            decide_with_access(PermissionMode::Full, "write_file", &AccessSet::ALL),
+            decide_with_host_access(
+                PermissionMode::Full,
+                "write_file",
+                &AccessSet::ALL,
+                &AccessSet::ALL
+            ),
             Decision::Allow
         );
         assert_eq!(
-            decide_with_access(PermissionMode::Ask, "write_file", &AccessSet::ALL),
+            decide_with_host_access(
+                PermissionMode::Ask,
+                "write_file",
+                &AccessSet::ALL,
+                &AccessSet::ALL
+            ),
             Decision::Ask
+        );
+    }
+
+    /// A host switch is a refusal the model can report as what it is, and the
+    /// wording names the capability rather than an internal tool name.
+    #[test]
+    fn a_host_disabled_capability_is_refused_in_the_users_words() {
+        let host = AccessSet {
+            terminal: false,
+            ..AccessSet::ALL
+        };
+        assert_eq!(
+            decide_with_host_access(PermissionMode::Full, "run_terminal", &AccessSet::ALL, &host),
+            Decision::Deny("Host has disabled terminal for this account.".to_string())
+        );
+        assert_eq!(
+            decide_with_host_access(
+                PermissionMode::Full,
+                "mcp__files__write",
+                &AccessSet::ALL,
+                &AccessSet {
+                    mcp: false,
+                    ..AccessSet::ALL
+                },
+            ),
+            Decision::Deny("Host has disabled MCP tools for this account.".to_string())
         );
     }
 }

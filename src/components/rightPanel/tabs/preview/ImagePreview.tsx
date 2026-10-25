@@ -1,5 +1,5 @@
 import PreviewNote from "./PreviewNote";
-import { useFileBytes } from "./useFileBytes";
+import { useFileBytes, type PreviewProps } from "./useFileBytes";
 
 /**
  * An image, drawn at the size the panel allows.
@@ -13,8 +13,8 @@ import { useFileBytes } from "./useFileBytes";
  * land somewhere sensible, and nothing is cropped. Never upscaled past its own
  * size, because a blown-up screenshot is worse than a small one.
  */
-export default function ImagePreview({ path }: { path: string }) {
-  const { data, error } = useFileBytes(path);
+export default function ImagePreview({ path, skill = null }: PreviewProps) {
+  const { data, error } = useFileBytes(path, skill);
 
   if (error) return <PreviewNote tone="error">{error}</PreviewNote>;
   if (!data) return <PreviewNote>Reading…</PreviewNote>;

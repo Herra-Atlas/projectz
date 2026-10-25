@@ -96,6 +96,11 @@ pub struct ApprovalGate {
     questions: Arc<std::sync::Mutex<std::collections::HashMap<String, oneshot::Sender<String>>>>,
     /// What this run may touch. See [`super::access`].
     access: Arc<AccessSet>,
+    /// The installation-wide ceiling this run was narrowed by.
+    ///
+    /// Kept beside the run's own set so a refusal can say which gate stopped it:
+    /// a host switch is not something the user can fix by editing one job.
+    host_access: Arc<AccessSet>,
 }
 
 impl ApprovalGate {
@@ -105,6 +110,7 @@ impl ApprovalGate {
             pending: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             questions: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             access: Arc::new(AccessSet::ALL),
+            host_access: Arc::new(AccessSet::ALL),
         }
     }
 
@@ -124,6 +130,21 @@ impl ApprovalGate {
             pending: Arc::clone(&self.pending),
             questions: Arc::clone(&self.questions),
             access: Arc::new(access),
+            host_access: Arc::clone(&self.host_access),
+        }
+    }
+
+    /// This gate narrowed by both the run's and the host's capabilities.
+    ///
+    /// The access set is already intersected by the runtime; the host copy is kept
+    /// separately so a denial can name the outer ceiling.
+    pub fn with_host_access(&self, access: AccessSet, host: AccessSet) -> Self {
+        Self {
+            mode: Arc::clone(&self.mode),
+            pending: Arc::clone(&self.pending),
+            questions: Arc::clone(&self.questions),
+            access: Arc::new(access),
+            host_access: Arc::new(host),
         }
     }
 
@@ -153,6 +174,7 @@ impl ApprovalGate {
             pending: Arc::clone(&self.pending),
             questions: Arc::clone(&self.questions),
             access: Arc::clone(&self.access),
+            host_access: Arc::clone(&self.host_access),
         }
     }
 
@@ -218,7 +240,12 @@ impl ApprovalGate {
             run_id: run_id.to_string(),
             ..request
         };
-        match super::policy::decide_with_access(self.mode(), &request.tool_name, &self.access) {
+        match super::policy::decide_with_host_access(
+            self.mode(),
+            &request.tool_name,
+            &self.access,
+            &self.host_access,
+        ) {
             Decision::Allow => Ok(Decision::Allow),
             Decision::Deny(reason) => Ok(Decision::Deny(reason)),
             Decision::Ask => {

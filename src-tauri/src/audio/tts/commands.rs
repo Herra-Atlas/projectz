@@ -124,12 +124,57 @@ pub fn tts_set_auto_speak_only_loaded(
     settings.save(&database)
 }
 
+/// The cleaned text a reply will be spoken from.
+///
+/// Split out of `tts_speak` because streaming needs the whole sentence plan
+/// before it synthesizes the first one: the frontend asks once, splits the
+/// answer into sentences, and then sends each sentence back with
+/// `prepared: true`. Doing the cleaning there instead would run the fence rule
+/// per fragment, where a fence has already been cut in half.
+#[tauri::command]
+pub fn tts_clean(database: State<'_, Arc<Database>>, text: String) -> String {
+    let settings = TtsSettings::load(&database);
+    super::text::for_speech(
+        &text,
+        settings.smart_speak,
+        settings.skip_code,
+        settings.skip_markdown,
+    )
+}
+
+/// Whether the text is tidied before it is spoken.
+#[tauri::command]
+pub fn tts_set_smart_speak(database: State<'_, Arc<Database>>, on: bool) -> Result<(), String> {
+    let mut settings = TtsSettings::load(&database);
+    settings.smart_speak = on;
+    settings.save(&database)
+}
+
+/// Whether synthesis is spoken sentence by sentence as it arrives.
+#[tauri::command]
+pub fn tts_set_stream_speech(database: State<'_, Arc<Database>>, on: bool) -> Result<(), String> {
+    let mut settings = TtsSettings::load(&database);
+    settings.stream_speech = on;
+    settings.save(&database)
+}
+
 /// Whether speaking with the chosen voice would interrupt anyone waiting:
 /// Piper synthesizes in a fresh, cheap process every time, audio.cpp wants
 /// its server and its weights already resident.
+///
+/// `voice` names one explicitly, exactly as it does for `tts_voice`. Without it
+/// the **stored selection** is resolved -- which is the only form the chat's
+/// auto-read uses. Resolving the argument alone returned `false` for every call
+/// the chat made, so "only if the voice is already ready" was on by default and
+/// no finished reply was ever read aloud.
 #[tauri::command]
-pub async fn tts_voice_warm(voice: Option<String>) -> Result<bool, String> {
-    match voices::resolve(voice.as_deref()).await {
+pub async fn tts_voice_warm(
+    database: State<'_, Arc<Database>>,
+    voice: Option<String>,
+) -> Result<bool, String> {
+    let settings = TtsSettings::load(&database);
+    let target = voice.or_else(|| settings.voice.clone());
+    match voices::resolve(target.as_deref()).await {
         Ok(Speaking::Piper(_)) => Ok(true),
         Ok(Speaking::Audiocpp(_)) => Ok(crate::audio::audiocpp::running().await),
         Err(_) => Ok(false),
@@ -208,6 +253,7 @@ pub async fn tts_speak(
     database: State<'_, Arc<Database>>,
     text: String,
     voice: Option<String>,
+    prepared: Option<bool>,
 ) -> Result<Response, String> {
     let text = text.trim().to_string();
     if text.is_empty() {
@@ -220,7 +266,20 @@ pub async fn tts_speak(
     // Code is removed here rather than in the player, so the test buttons and the
     // chat button all speak the same words. Markdown markup leaves the same way,
     // when the switch asks for it: the voice reads what the reader sees.
-    let text = super::text::for_speech(&text, settings.skip_code, settings.skip_markdown);
+    //
+    // `prepared` is the streaming path: the frontend already asked `tts_clean`
+    // for the whole reply, so re-running the fence and markdown rules per
+    // sentence would be both wasted work and wrong at a boundary.
+    let text = if prepared.unwrap_or(false) {
+        text
+    } else {
+        super::text::for_speech(
+            &text,
+            settings.smart_speak,
+            settings.skip_code,
+            settings.skip_markdown,
+        )
+    };
     if text.is_empty() {
         return Err("There is nothing to read under the current skip settings.".to_string());
     }

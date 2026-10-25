@@ -5,7 +5,7 @@
  * name a page -- the search index, its tests -- had to import the whole modal.
  * It is one union and it changes rarely, so it lives on its own and the modal imports it.
  *
- * A drill-down page (`model`, `skill`, `form`) carries the record it is about. Those are
+ * A drill-down page (`model`, `form`) carries the record it is about. Those are
  * reached from their list pages, not from search.
  */
 import type { Endpoint, LocalModel } from "../../features/models/types";
@@ -41,10 +41,12 @@ export type SettingsPage =
   | { view: "subagents" }
   | { view: "auxiliary" }
   | { view: "context" }
-  /* Messaging to the agent from outside the app. One page for every channel:
-     Telegram is the first, and a second transport is another section rather than
-     another sidebar entry. */
-  | { view: "communications" }
+  /* Messaging to the agent from outside the app. A group, like Voice and Model:
+     the connection, how it answers, and the access boundary are three pages
+     rather than one long scroll. */
+  | { view: "communicationsTelegram" }
+  | { view: "communicationsSettings" }
+  | { view: "communicationsSecurity" }
   | { view: "skills" }
   | { view: "mcp" }
   /* A download page is reached from the engine it installs for, so it carries
@@ -58,6 +60,5 @@ export type SettingsPage =
   | { view: "downloads" }
   /* What this installation is, what it uses, and the one destructive action. */
   | { view: "system" }
-  | { view: "skill"; slug: string | null }
   | { view: "model"; model: LocalModel }
   | { view: "form"; endpoint: Endpoint | null };

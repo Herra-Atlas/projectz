@@ -53,7 +53,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::ai::runtime::AiRuntime;
 use crate::database::jobs::Job;
@@ -415,6 +415,23 @@ fn start(app: &AppHandle, runtime: &AiRuntime, state: &Arc<State>, job: Job) {
             );
         }
         emit(&app, &job, outcome.status, outcome.reason.as_deref());
+        // A job asked for from a channel reports back there, on its own task so a
+        // slow Telegram send cannot hold the lane the next job is waiting on.
+        if let Some(messaging) = app
+            .try_state::<std::sync::Arc<crate::messaging::Messaging>>()
+            .map(|state| std::sync::Arc::clone(state.inner()))
+        {
+            let job_id = job.id.clone();
+            let name = job.name.clone();
+            let status = outcome.status;
+            let reason = outcome.reason.clone();
+            let content = outcome.content.clone();
+            tauri::async_runtime::spawn(async move {
+                messaging
+                    .notify_job(&job_id, &name, status, reason.as_deref(), &content)
+                    .await;
+            });
+        }
         // Woken last, after the outcome is on record: a job behind this one checks
         // whether it succeeded, and a look taken before the write would find nothing
         // and cost it another interval.

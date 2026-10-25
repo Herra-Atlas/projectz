@@ -95,6 +95,19 @@ pub fn existing_title(database: &Database, session_id: &str) -> Option<String> {
         .filter(|title| !title.trim().is_empty())
 }
 
+/// The mode a stored conversation was created in.
+///
+/// `/sessions` can switch to a conversation born in Chat or Agent, and the phone
+/// should continue it the way it was left rather than under today's default.
+pub fn mode(database: &Database, session_id: &str) -> Option<crate::ai::tools::ToolMode> {
+    let value = database.session_record(session_id).ok()?;
+    match value.get("mode").and_then(Value::as_str)? {
+        "chat" => Some(crate::ai::tools::ToolMode::Chat),
+        "agent" => Some(crate::ai::tools::ToolMode::Agent),
+        _ => None,
+    }
+}
+
 /// A title from a message, the way a person would write one down.
 pub fn title_from(text: &str) -> String {
     let line = text.lines().next().unwrap_or_default().trim();

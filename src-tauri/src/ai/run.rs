@@ -52,6 +52,14 @@ pub struct PromptRun {
     /// flattened back into text. Empty means "save the messages as given", which is
     /// what a caller with no history does.
     pub stored_messages: Vec<serde_json::Value>,
+    /// Files attached to this turn. Only a channel has them today.
+    pub attachments: Vec<crate::ai::types::ChatAttachment>,
+    /// Extra prompt text this door needs, after the shared instructions.
+    pub additional_instructions: Option<String>,
+    /// Set when the door's own instructions replace the app's general ones.
+    pub suppress_general_instructions: bool,
+    /// Where the run came from, for a job notification that outlives it.
+    pub delivery: Option<crate::ai::types::DeliveryTarget>,
     pub endpoint_id: Option<String>,
     pub local_model: bool,
     pub model: Option<String>,
@@ -95,7 +103,10 @@ pub async fn run_prompt(app: &AppHandle, runtime: &AiRuntime, spec: PromptRun) -
         endpoint_id: spec.endpoint_id.clone(),
         local_model: spec.local_model,
         model: spec.model.clone(),
-        attachments: Vec::new(),
+        attachments: spec.attachments.clone(),
+        additional_instructions: spec.additional_instructions.clone(),
+        suppress_general_instructions: spec.suppress_general_instructions,
+        delivery: spec.delivery.clone(),
         // Web search arrives with the access set: a run that may not search is not
         // handed a catalogue of searches it would be refused.
         web_search_enabled: spec.web_search,
@@ -292,6 +303,10 @@ mod tests {
                 },
             ],
             stored_messages: Vec::new(),
+            attachments: Vec::new(),
+            additional_instructions: None,
+            suppress_general_instructions: false,
+            delivery: None,
             endpoint_id: None,
             local_model: false,
             model: None,

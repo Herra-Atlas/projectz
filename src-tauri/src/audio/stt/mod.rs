@@ -13,10 +13,12 @@
 //! the build, `models` decides which installed model transcribes, `capture` owns
 //! the microphone for exactly as long as one recording, and `whisper.rs` runs
 //! that engine's CLI on the result. The dispatch between the two engines happens
-//! in `commands::stt_recording_stop`, which is the only place that knows both.
+//! in `transcribe`, which is shared by the microphone commands and Telegram
+//! voice messages.
 
 pub mod audiocpp;
 pub mod capture;
 pub mod commands;
 pub mod models;
+pub mod transcribe;
 pub mod whisper;

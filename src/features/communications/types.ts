@@ -8,6 +8,8 @@
  * a bot token is.
  */
 
+import type { AccessSet } from "../chat/access";
+
 export type MessagingMode = "chat" | "agent";
 
 /** The levels a run can decide at. `auto_safe` is reachable through the record but
@@ -15,27 +17,27 @@ export type MessagingMode = "chat" | "agent";
  *  and the two-level choice is the one a person can reason about. */
 export type MessagingPermission = "ask" | "auto_safe" | "auto_writes" | "full";
 
-export type MessagingAccess = {
-  read: boolean;
-  write: boolean;
-  terminal: boolean;
-  web: boolean;
-  subagents: boolean;
-  /** Always false: a message may not schedule work that outlives it. */
-  jobs: boolean;
+/** What one Telegram id may do. */
+export type MessagingUser = {
+  mode: MessagingMode;
+  allowAgent: boolean;
+  permission: MessagingPermission;
+  access: AccessSet;
+  allowLocalStart: boolean;
+  allowSttStart: boolean;
 };
 
 export type MessagingSettings = {
   enabled: boolean;
   /** The Telegram user ids the bot obeys. Empty means nobody. */
   allowedUserIds: string[];
+  /** One record per allowed id. */
+  users: Record<string, MessagingUser>;
   channels: string[];
-  mode: MessagingMode;
-  permission: MessagingPermission;
-  access: MessagingAccess;
-  /** Whether a chat may start a local model that is not loaded. */
-  allowLocalStart: boolean;
-  workspace: string | null;
+  /** Whether files may be received from and sent to the chat. */
+  allowFiles: boolean;
+  /** Extra instructions for every message answered through a channel. */
+  instructions: string;
 };
 
 export type ChannelView = {

@@ -1,4 +1,6 @@
 import type { ChatMode } from "../../features/chat/chatMode";
+import { useWeather } from "../../features/weather/useWeather";
+import type { WeatherCondition } from "../../features/weather/weather";
 
 /**
  * The screen an empty conversation shows.
@@ -12,20 +14,44 @@ import type { ChatMode } from "../../features/chat/chatMode";
  *
  * The greeting is read from the clock on render rather than held in state --
  * an empty conversation left open past midnight should not relabel itself
- * under the reader, and returning to it is a new arrival anyway.
+ * under the reader, and returning to it is a new arrival anyway. A configured
+ * connection's current condition replaces the clock wording once it is known;
+ * the clock form paints immediately and remains the fallback when weather is
+ * unreachable.
  *
  * Who it is addressed to comes from `app.general.userName`, set in Settings →
  * General → Your name. "Sir" is the standing before a name was given -- the
  * greeting is never left speaking to nobody.
  */
-function greetingFor(hour: number, name: string): string {
+function greetingFor(hour: number, name: string, weather: WeatherCondition | null): string {
   // A name typed in a hurry (" john") still reads as itself, capitalised once.
   const whom = name ? name.charAt(0).toUpperCase() + name.slice(1) : "Sir";
-  if (hour < 5) return `Working late, ${whom}.`;
-  if (hour < 12) return `Good morning, ${whom}.`;
-  if (hour < 18) return `Good afternoon, ${whom}.`;
-  if (hour < 22) return `Good evening, ${whom}.`;
-  return `Working late, ${whom}.`;
+  if (weather) return weatherGreeting(weather, whom);
+  if (hour < 5) return `Working late, ${whom}`;
+  if (hour < 12) return `Good morning, ${whom}`;
+  if (hour < 18) return `Good afternoon, ${whom}`;
+  if (hour < 22) return `Good evening, ${whom}`;
+  return `Working late, ${whom}`;
+}
+
+/** The headline for a condition, kept in one place so the wording stays short. */
+function weatherGreeting(weather: WeatherCondition, whom: string): string {
+  switch (weather) {
+    case "storm":
+      return `Stormy out there, ${whom}`;
+    case "rain":
+      return `Rainy day, ${whom}`;
+    case "drizzle":
+      return `A drizzly day, ${whom}`;
+    case "snow":
+      return `Snowy day, ${whom}`;
+    case "fog":
+      return `Foggy out there, ${whom}`;
+    case "cloudy":
+      return `Cloudy day, ${whom}`;
+    case "clear":
+      return `Clear skies, ${whom}`;
+  }
 }
 
 type WelcomeProps = {
@@ -38,7 +64,8 @@ type WelcomeProps = {
 };
 
 export default function Welcome({ hasModel, mode, userName }: WelcomeProps) {
-  const greeting = greetingFor(new Date().getHours(), userName);
+  const weather = useWeather();
+  const greeting = greetingFor(new Date().getHours(), userName, weather);
 
   // One line, and it is the truth about the mode in force. Saying "switch to
   // Agent" to someone already in Agent would be telling them to do what they

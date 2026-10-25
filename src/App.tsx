@@ -40,7 +40,7 @@ function PageFallback() {
   );
 }
 
-type LocalRuntimeStatus = { loaded_model_id: string | null; loading_model_id: string | null; selected_model_id: string | null; base_url: string };
+type LocalRuntimeStatus = { loaded_model_id: string | null; loading_model_id: string | null; selected_model_id: string | null; base_url: string; started_at: number | null };
 type LocalModelEvent = { kind: "loading" | "loaded" | "failed" | "unloaded"; modelId?: string; modelPath?: string; message?: string };
 type StartupProgress = { phase: string; message: string; progress: number };
 
@@ -95,7 +95,18 @@ function AppShell() {
   const [model, setModel] = useState("");
   const [localModelId, setLocalModelId] = useState("");
   const [endpointRefreshKey, setEndpointRefreshKey] = useState(0);
-  const [localRuntime, setLocalRuntime] = useState<LocalRuntimeStatus>({ loaded_model_id: null, loading_model_id: null, selected_model_id: null, base_url: "http://127.0.0.1:43127/v1" });
+  const [localRuntime, setLocalRuntime] = useState<LocalRuntimeStatus>({ loaded_model_id: null, loading_model_id: null, selected_model_id: null, base_url: "http://127.0.0.1:43127/v1", started_at: null });
+  /**
+   * A request to show the model's terminal, raised on every load attempt.
+   *
+   * A request rather than relying on `loading_model_id` alone, because that
+   * value can be back to null before the panel ever renders -- a load that
+   * fails immediately emits `loading` and `failed` in one tick, and React
+   * batches the two state changes. On a retry the panel then never opened,
+   * which looked like the terminal being broken rather than the attempt being
+   * short. The key is what makes a second attempt a new request.
+   */
+  const [terminalRequest, setTerminalRequest] = useState<{ id: string; key: number } | null>(null);
   // The corner stack lives in its own module rather than here, so a view like the
   // settings modal can be handed a `notify` without the stack's shape being a
   // detail of the app shell. `App` renders it once and owns the wiring.
@@ -122,6 +133,15 @@ function AppShell() {
   // other to pass one string.
   const [requestedFile, setRequestedFile] = useState<string | null>(null);
   const [requestedUrl, setRequestedUrl] = useState<{ url: string; key: number } | null>(null);
+  /**
+   * The skill whose folder the Files panel should draw, or null for the workspace.
+   *
+   * Set by the Skills page when a skill is opened for editing. Held here for the
+   * same reason `requestedFile` is: the click happens inside the settings dialog
+   * and the tree lives beside the chat column, so neither can reach the other
+   * without a value in the component that owns both.
+   */
+  const [openSkill, setOpenSkill] = useState<string | null>(null);
   // The folder the agent may read and write. Loaded once the app has started,
   // because the backend reads the stored selection during `setup` and the header
   // must not render a folder the tools are not actually using.
@@ -164,8 +184,19 @@ function AppShell() {
         return next;
       }
       if (status === "done" || status === "error") {
-        if (sessionId === activeIdRef.current) return current;
         if (current[sessionId] === status) return current;
+        // The active conversation draws its own state rather than a dot, so a
+        // terminal status is not stored for it. But a *live* mark must still be
+        // cleared: a run that ended while this view was not listening (a stop
+        // during an unmount, a reply that failed in the background) left
+        // "streaming" behind, and ignoring it here is what kept the sidebar
+        // spinner going after Cancel.
+        if (sessionId === activeIdRef.current) {
+          if (current[sessionId] !== "streaming" && current[sessionId] !== "searching") return current;
+          const next = { ...current };
+          delete next[sessionId];
+          return next;
+        }
         return { ...current, [sessionId]: status };
       }
       if (current[sessionId] === status) return current;
@@ -227,13 +258,19 @@ function AppShell() {
         const payload = event.payload;
         if (payload.kind === "loading") {
           setLocalRuntime((current) => ({ ...current, loading_model_id: payload.modelId ?? null }));
+          // Every attempt asks for the terminal, even one that will fail at
+          // once: the output of a failed start is exactly what the user opens
+          // it to read.
+          if (payload.modelId) setTerminalRequest({ id: payload.modelId, key: Date.now() });
         } else if (payload.kind === "loaded") {
           setLocalRuntime((current) => ({ ...current, loaded_model_id: payload.modelId ?? null, loading_model_id: null }));
           notify("success", "Local model ready");
         } else if (payload.kind === "unloaded") {
-          setLocalRuntime((current) => ({ ...current, loaded_model_id: null, loading_model_id: null }));
+          setLocalRuntime((current) => ({ ...current, loaded_model_id: null, loading_model_id: null, started_at: null }));
+          setResidentServers((current) => ({ ...current, llama: null, llamaStartedAt: null }));
         } else {
-          setLocalRuntime((current) => ({ ...current, loaded_model_id: null, loading_model_id: null }));
+          setLocalRuntime((current) => ({ ...current, loaded_model_id: null, loading_model_id: null, started_at: null }));
+          setResidentServers((current) => ({ ...current, llama: null, llamaStartedAt: null }));
           notify("error", payload.message || "Local model failed to load");
         }
       }).then((unlisten) => {
@@ -383,8 +420,8 @@ function AppShell() {
   const unloadLocalModel = async () => {
     try {
       await invoke("local_model_unload");
-      setLocalRuntime((current) => ({ ...current, loaded_model_id: null, loading_model_id: null }));
-      setResidentServers((current) => ({ llama: null, audio: current.audio, audioStartedAt: current.audioStartedAt }));
+      setLocalRuntime((current) => ({ ...current, loaded_model_id: null, loading_model_id: null, started_at: null }));
+      setResidentServers((current) => ({ ...current, llama: null, llamaStartedAt: null }));
     } catch (reason) {
       notify("error", String(reason));
     }
@@ -398,9 +435,10 @@ function AppShell() {
    */
   const [residentServers, setResidentServers] = useState<{
     llama: string | null;
+    llamaStartedAt: number | null;
     audio: boolean;
     audioStartedAt: number | null;
-  }>({ llama: null, audio: false, audioStartedAt: null });
+  }>({ llama: null, llamaStartedAt: null, audio: false, audioStartedAt: null });
   const [serversMenuOpen, setServersMenuOpen] = useState(false);
   /** Where the portaled menu hangs: measured from the chip on every open, so
       window resizes or a title wrapping to two lines never strand it. */
@@ -413,16 +451,31 @@ function AppShell() {
       // Each side answers independently; a failure on one must not blank the
       // other, so the last known figures stay.
       const [llama, audio] = await Promise.allSettled([
-        invoke<{ loaded_model_id: string | null }>("local_model_status"),
+        invoke<{ loaded_model_id: string | null; loading_model_id: string | null; started_at: number | null }>("local_model_status"),
         invoke<{ running: boolean; startedAt: number | null }>("audio_status"),
       ]);
       if (!live) return;
       const llamaId = llama.status === "fulfilled" ? llama.value.loaded_model_id : null;
+      // Reconcile the run state with the backend, not only the chip. A server
+      // that died after it was reported running would otherwise keep the
+      // terminal pinned forever, because nothing else re-reads this while no
+      // load is in flight.
+      if (llama.status === "fulfilled") {
+        const status = llama.value;
+        setLocalRuntime((current) =>
+          current.loaded_model_id === status.loaded_model_id
+            && current.loading_model_id === status.loading_model_id
+            && current.started_at === status.started_at
+            ? current
+            : { ...current, loaded_model_id: status.loaded_model_id, loading_model_id: status.loading_model_id, started_at: status.started_at },
+        );
+      }
       const llamaName = llamaId ? await invoke<{ id: string; name: string }[]>("local_models_list")
         .then((models) => models.find((model) => model.id === llamaId)?.name ?? null)
         .catch(() => null) : null;
       setResidentServers((current) => ({
         llama: llamaName ?? (llamaId ? current.llama : null),
+        llamaStartedAt: llama.status === "fulfilled" && llamaId ? llama.value.started_at : null,
         audio: audio.status === "fulfilled" ? audio.value.running : current.audio,
         audioStartedAt: audio.status === "fulfilled" ? audio.value.startedAt : current.audioStartedAt,
       }));
@@ -559,7 +612,10 @@ function AppShell() {
                       <div role="menuitem" className="flex min-h-10 items-center gap-3 rounded-md px-2.5 py-1.5">
                         <div className="min-w-0 flex-1">
                           <h4 className="truncate text-xs font-medium text-[var(--text)]">{residentServers.llama}</h4>
-                          <p className="truncate text-[11px] text-[var(--quiet)]">llama-server · loaded</p>
+                          <p className="truncate text-[11px] text-[var(--quiet)]">
+                            llama-server · loaded
+                            {residentServers.llamaStartedAt !== null && <ResidentFor startedAt={residentServers.llamaStartedAt} />}
+                          </p>
                         </div>
                         <button
                           type="button"
@@ -636,9 +692,12 @@ function AppShell() {
         open={rightPanel.open}
         width={rightPanel.width}
         workspace={workspaces.selected}
+        skill={openSkill}
+        onCloseSkill={() => setOpenSkill(null)}
         sessionId={chat.activeId}
         loadedModelId={localRuntime.loaded_model_id}
         loadingModelId={localRuntime.loading_model_id}
+        terminalRequest={terminalRequest}
         requestedPath={requestedFile}
         requestedUrl={requestedUrl}
         onUrlRequestHandled={() => setRequestedUrl(null)}
@@ -652,7 +711,7 @@ function AppShell() {
       />
 
       <NotificationStack notifications={notifications} copiedId={copiedNotificationId} onDismiss={dismissNotification} onCopy={copyNotification} />
-      <SettingsModal open={settingsOpen} onClose={() => { setSettingsOpen(false); setSettingsRefreshKey((key) => key + 1); }} onEndpointsChanged={() => setEndpointRefreshKey((key) => key + 1)} preferences={preferences} onPreferencesChange={savePreferences} appearance={appearance} onAppearanceChange={saveAppearance} notify={notify} />
+      <SettingsModal open={settingsOpen} onClose={() => { setSettingsOpen(false); setSettingsRefreshKey((key) => key + 1); }} onEndpointsChanged={() => setEndpointRefreshKey((key) => key + 1)} preferences={preferences} onPreferencesChange={savePreferences} appearance={appearance} onAppearanceChange={saveAppearance} notify={notify} onOpenSkill={(slug) => { setOpenSkill(slug); setSettingsOpen(false); }} />
     </div>
   );
 }

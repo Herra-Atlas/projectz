@@ -23,13 +23,20 @@
 pub mod adapter;
 pub mod channels;
 pub mod commands;
+pub mod delivery;
+pub mod files;
 pub mod format;
 pub mod local;
+pub mod local_menu;
 pub mod menu;
+pub mod profile_menu;
+pub mod profiles;
+pub mod prompt;
 pub mod relay;
 pub mod run;
 pub mod session;
 pub mod settings;
+pub mod storage;
 pub mod types;
 
 use std::collections::HashMap;
@@ -61,6 +68,12 @@ pub struct ChatState {
     /// The session this chat is currently in. `None` means the next message starts
     /// one, which is what `/new` sets.
     pub session_id: Option<String>,
+    /// The mode chosen for this conversation with `/new`.
+    ///
+    /// `None` means "not chosen here": the stored session's own mode is read next,
+    /// then this sender's per-person default. Kept on the chat rather than only in the session
+    /// row so a mode picked before the first message survives until that row exists.
+    pub mode: Option<crate::ai::tools::ToolMode>,
     /// A model chosen with `/model`, overriding the stored default.
     pub model: Option<Value>,
     /// The run in flight, so `/stop` and the Stop button have something to cancel.
@@ -244,6 +257,55 @@ impl Messaging {
             .iter()
             .find(|channel| channel.id() == id)
             .cloned()
+    }
+
+    /// Sends a finished job's answer back to the sender who scheduled it.
+    ///
+    /// Only a job created from a channel has a target. The allowlist and the
+    /// channel's own switch are checked again here: a target recorded yesterday
+    /// does not outrank an id removed or a channel switched off today.
+    pub async fn notify_job(
+        &self,
+        job_id: &str,
+        name: &str,
+        status: &str,
+        reason: Option<&str>,
+        content: &str,
+    ) {
+        let Some(target) = delivery::target_for(self.database.as_ref(), job_id) else {
+            return;
+        };
+        let settings = self.settings();
+        if !settings.allows(&target.user_id) || !settings.channel_enabled(&target.channel) {
+            return;
+        }
+        let Some(channel) = self.channel(&target.channel) else {
+            return;
+        };
+
+        let text = match status {
+            "completed" => {
+                let answer = content.trim();
+                if answer.is_empty() {
+                    format!("Job finished: {name}\n\nCompleted.")
+                } else {
+                    format!("Job finished: {name}\n\n{answer}")
+                }
+            }
+            "stopped" => format!(
+                "Job stopped: {name}\n\n{}",
+                reason.unwrap_or("It was stopped before finishing.")
+            ),
+            _ => format!(
+                "Job failed: {name}\n\n{}",
+                reason.unwrap_or("The run did not finish.")
+            ),
+        };
+        for part in format::split_message(&text, channel.capabilities().max_chars) {
+            if channel.send(&target.chat_id, &part, &[]).await.is_err() {
+                break;
+            }
+        }
     }
 
     /// This sender's state, copied out.

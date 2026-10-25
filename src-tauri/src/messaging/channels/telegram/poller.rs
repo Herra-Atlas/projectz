@@ -162,9 +162,9 @@ fn dispatch(hub: &Arc<Messaging>, channel: &Arc<Telegram>, parsed: update::Updat
             data: action.data,
         },
         None => {
-            // A photo with no caption, a sticker, a voice note: nothing to answer
-            // and nothing to say about it.
-            if parsed.text.trim().is_empty() {
+            // A sticker, a voice note, a file type with no bytes to read: nothing
+            // to answer. A document or photo is a turn even without a caption.
+            if parsed.text.trim().is_empty() && parsed.files.is_empty() {
                 return;
             }
             InboundKind::Message
@@ -177,6 +177,7 @@ fn dispatch(hub: &Arc<Messaging>, channel: &Arc<Telegram>, parsed: update::Updat
         user_name: parsed.user_name,
         text: parsed.text,
         kind,
+        files: parsed.files,
     };
     let hub = Arc::clone(hub);
     let channel: Arc<dyn crate::messaging::adapter::Channel> = channel.clone();

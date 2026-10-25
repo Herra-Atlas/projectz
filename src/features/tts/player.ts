@@ -16,21 +16,43 @@
  */
 
 let context: AudioContext | null = null;
-let playing: AudioBufferSourceNode | null = null;
+/**
+ * The source on the output device, and the callback its end owes.
+ *
+ * The callback is kept beside the node rather than only on `onended`, because a
+ * stop has to settle the same promise a natural end does -- otherwise the
+ * sentence queue in `useSpeech` would keep an await open forever after Stop.
+ */
+let playing: { node: AudioBufferSourceNode; ended: () => void } | null = null;
 
 function audio(): AudioContext {
   context ??= new AudioContext();
   return context;
 }
 
+/**
+ * Opens the output device during a user gesture.
+ *
+ * A browser will not let an `AudioContext` created outside a gesture make sound;
+ * it stays `suspended`, and a reply that is read automatically arrives with no
+ * gesture anywhere near it. Called once from the chat page on the first press or
+ * key, so by the time a reply finishes there is a running context to play into
+ * rather than a silent one. Safe to call any number of times.
+ */
+export function unlockAudio(): void {
+  const audioContext = audio();
+  if (audioContext.state === "suspended") void audioContext.resume();
+}
+
 /** Stops whatever is playing. Safe to call when nothing is. */
 export function stopPlayback(): void {
-  const node = playing;
-  if (!node) return;
-  // Cleared before `stop()` so the `onended` handler it triggers cannot mistake
-  // itself for a later source and clear the wrong one.
+  const current = playing;
+  if (!current) return;
+  // Cleared before `stop()` so the `onended` handler it triggers cannot settle
+  // the same promise a second time.
   playing = null;
-  node.stop();
+  current.node.stop();
+  current.ended();
 }
 
 /**
@@ -45,10 +67,6 @@ export function playPcm(bytes: ArrayBuffer, sampleRate: number, onEnded: () => v
 
   const mono = new Int16Array(bytes);
   const audioContext = audio();
-  // A context created before any gesture can start suspended; a press is a
-  // gesture, so this is the moment it is allowed to resume.
-  if (audioContext.state === "suspended") void audioContext.resume();
-
   const buffer = audioContext.createBuffer(1, mono.length, sampleRate);
   const channel = buffer.getChannelData(0);
   for (let index = 0; index < mono.length; index += 1) {
@@ -58,13 +76,29 @@ export function playPcm(bytes: ArrayBuffer, sampleRate: number, onEnded: () => v
   const node = audioContext.createBufferSource();
   node.buffer = buffer;
   node.connect(audioContext.destination);
+  // Resolved exactly once, whether the sound finishes or is stopped.
+  let settled = false;
+  const ended = () => {
+    if (settled) return;
+    settled = true;
+    onEnded();
+  };
   node.onended = () => {
     // Only the current source reports back; a superseded one has already had
     // `playing` cleared and must not reset the newest message's state.
-    if (playing !== node) return;
+    if (playing?.node !== node) return;
     playing = null;
-    onEnded();
+    ended();
   };
-  playing = node;
-  node.start();
+  playing = { node, ended };
+  // A context that is still suspended cannot make sound and will never fire
+  // `onended`, which used to leave the Read button spinning on a reply nobody
+  // heard. Waiting for `resume()` before starting is what makes an automatic
+  // read audible when the context was opened before the gesture that allows it.
+  const start = () => node.start();
+  if (audioContext.state === "suspended") {
+    void audioContext.resume().then(start).catch(() => start());
+  } else {
+    start();
+  }
 }

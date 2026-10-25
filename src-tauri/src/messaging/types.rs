@@ -5,6 +5,8 @@
 //! slash commands, the approval relay -- lives above this file, so adding Discord
 //! later means one more adapter and nothing else.
 
+use std::path::PathBuf;
+
 use serde::Serialize;
 
 /// What a channel can draw, so the core never asks for something it cannot do.
@@ -24,6 +26,42 @@ pub struct Capabilities {
     /// The longest text one message may carry. Splitting is the core's job because
     /// it is about the message, not about the transport's spelling of it.
     pub max_chars: usize,
+    /// Whether files can be received and sent.
+    pub files: bool,
+    /// Whether a message the app sent can be removed again. Telegram can delete,
+    /// which is how a finished run's working message stops being furniture.
+    pub delete: bool,
+}
+
+/// A file named by an inbound message, before its bytes are fetched.
+///
+/// The id is the transport's handle (`file_id` on Telegram); the media type and
+/// size are hints for deciding whether to fetch at all, not trusted metadata.
+#[derive(Clone, Debug)]
+pub struct InboundFile {
+    pub id: String,
+    pub name: String,
+    pub mime_type: String,
+    pub size: Option<u64>,
+}
+
+/// The bytes of one inbound file.
+#[derive(Clone, Debug)]
+pub struct DownloadedFile {
+    pub name: String,
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
+}
+
+/// A file the app wants to send back.
+///
+/// The path is already resolved inside the workspace by the core. A transport
+/// reads it rather than being handed a copy, so a large PDF is streamed once
+/// instead of living in memory through the channel trait.
+#[derive(Clone, Debug)]
+pub struct OutboundFile {
+    pub path: PathBuf,
+    pub name: String,
 }
 
 /// One button under a message.
@@ -70,6 +108,8 @@ pub struct Inbound {
     pub user_name: String,
     pub text: String,
     pub kind: InboundKind,
+    /// Files sent with this message. Empty for a plain text turn and for a press.
+    pub files: Vec<InboundFile>,
 }
 
 impl Inbound {

@@ -21,7 +21,7 @@
 //!
 //! A disallowed tool is removed from the registry, so it is never advertised and
 //! the model cannot ask for it. If one is asked for anyway -- a cached call, a
-//! model that invents a name -- [`crate::ai::tools::policy::decide_with_access`]
+//! model that invents a name -- [`crate::ai::tools::policy::decide_with_host_access`]
 //! refuses it and the refusal is reported back as the tool's result, so the model
 //! is told why rather than silently ignored.
 
@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 /// Grouped, not per-tool: the user picks a handful of switches, and a tool added
 /// later falls into a group rather than needing a new switch in the UI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AccessSet {
     /// Filesystem and skill reads.
     pub read: bool,
@@ -50,6 +51,13 @@ pub struct AccessSet {
     /// nobody there. It is also the one a job's own run is never given, which is what
     /// keeps scheduled work one generation deep.
     pub jobs: bool,
+    /// Tools offered by the configured MCP servers.
+    ///
+    /// Its own switch rather than riding on `write`: an MCP tool is classified as a
+    /// write because the protocol does not say what it changes, but a job or a phone
+    /// should still be able to turn that whole surface off without losing ordinary
+    /// file writes.
+    pub mcp: bool,
 }
 
 impl Default for AccessSet {
@@ -70,6 +78,7 @@ impl AccessSet {
         web: true,
         subagents: true,
         jobs: true,
+        mcp: true,
     };
 
     /// Whether a tool name may be used by this run.
@@ -81,6 +90,40 @@ impl AccessSet {
             Capability::Web => self.web,
             Capability::Subagents => self.subagents,
             Capability::Jobs => self.jobs,
+            Capability::Mcp => self.mcp,
+        }
+    }
+
+    /// The capabilities both the host and this run allow.
+    ///
+    /// Narrowing is the only operation here. A per-run set can take away what the
+    /// host grants, never add to it, so a job record or a channel setting cannot
+    /// become a way around the installation-wide switches.
+    pub fn within(self, host: Self) -> Self {
+        Self {
+            read: self.read && host.read,
+            write: self.write && host.write,
+            terminal: self.terminal && host.terminal,
+            web: self.web && host.web,
+            subagents: self.subagents && host.subagents,
+            jobs: self.jobs && host.jobs,
+            mcp: self.mcp && host.mcp,
+        }
+    }
+
+    /// The user-facing name of the group a tool belongs to.
+    ///
+    /// Used in the host-disabled refusal so a model and the person reading it hear
+    /// the capability by the name the Settings page uses, not by a tool name.
+    pub fn label_for(tool_name: &str) -> &'static str {
+        match capability(tool_name) {
+            Capability::Read => "file reading",
+            Capability::Write => "file writing",
+            Capability::Terminal => "terminal",
+            Capability::Web => "web access",
+            Capability::Subagents => "subagents",
+            Capability::Jobs => "jobs",
+            Capability::Mcp => "MCP tools",
         }
     }
 }
@@ -93,6 +136,7 @@ enum Capability {
     Web,
     Subagents,
     Jobs,
+    Mcp,
 }
 
 /// Maps a tool name to its group.
@@ -120,13 +164,11 @@ fn capability(tool_name: &str) -> Capability {
         // Recording the agent's own checklist is likewise not a change to the
         // world; it is a note to itself.
         "todo" => Capability::Read,
-        // A tool from an MCP server is grouped with the writes whatever it says
-        // it does. The protocol does not report whether a tool changes anything,
-        // and the two mistakes are not the same size: calling a read tool a write
-        // costs a run its cache, while calling a write tool a read tells the model
-        // a stale file is current. So a run narrowed to reads cannot reach one at
-        // all, which is the safe direction to be wrong in.
-        name if name.starts_with(crate::mcp::tools::TOOL_PREFIX) => Capability::Write,
+        // A tool from an MCP server has its own switch. It is still treated as a
+        // write by policy -- the protocol does not report whether it changes
+        // anything -- but the whole server surface can be taken away without also
+        // taking away ordinary file writes.
+        name if name.starts_with(crate::mcp::tools::TOOL_PREFIX) => Capability::Mcp,
         _ => Capability::Read,
     }
 }
@@ -145,6 +187,7 @@ mod tests {
             "search_web",
             "sub_agent",
             "schedule_job",
+            "mcp__files__read_file",
         ] {
             assert!(
                 access.is_allowed(tool),
@@ -213,25 +256,43 @@ mod tests {
         assert!(access.is_allowed("sub_agent"));
     }
 
-    /// An MCP tool follows the *write* switch rather than the read one. The
-    /// protocol does not report whether a tool changes anything, so a run allowed
-    /// only to read does not get to find out.
+    /// MCP tools have their own switch, so a job can keep ordinary file writes and
+    /// still turn off every server-provided tool.
     #[test]
-    fn mcp_tools_follow_the_write_switch() {
+    fn mcp_tools_follow_their_own_switch() {
         let access = AccessSet {
-            write: false,
+            mcp: false,
             ..AccessSet::ALL
         };
         assert!(!access.is_allowed("mcp__files__read_file"));
-        assert!(access.is_allowed("read_file"));
-        // And the read switch is not what governs them: a run that may read but
-        // not write still cannot reach one.
-        let reader = AccessSet {
+        assert!(access.is_allowed("write_file"));
+
+        let writes_off = AccessSet {
             write: false,
-            read: true,
             ..AccessSet::ALL
         };
-        assert!(!reader.is_allowed("mcp__files__list_directory"));
+        assert!(writes_off.is_allowed("mcp__files__read_file"));
+        assert!(!writes_off.is_allowed("write_file"));
+    }
+
+    /// The host can narrow a run, and a run can never widen itself back out.
+    #[test]
+    fn host_access_is_an_outer_ceiling() {
+        let host = AccessSet {
+            terminal: false,
+            mcp: false,
+            ..AccessSet::ALL
+        };
+        let narrowed = AccessSet::ALL.within(host);
+        assert!(!narrowed.terminal);
+        assert!(!narrowed.mcp);
+        assert!(narrowed.write);
+
+        let already_off = AccessSet {
+            web: false,
+            ..AccessSet::ALL
+        };
+        assert!(!already_off.within(AccessSet::ALL).web);
     }
 
     /// A name nobody knows is treated as a read, so it is denied by a run that

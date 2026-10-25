@@ -17,7 +17,9 @@ import SkillsPage from "./SkillsPage";
 import McpSettingsPage from "./McpSettingsPage";
 import AssistSettingsPage from "./assist/AssistSettingsPage";
 import TasteSettingsPage from "./taste/TasteSettingsPage";
-import { CommunicationsPage } from "./communications/CommunicationsPage";
+import { CommunicationSecurityPage } from "./communications/CommunicationSecurityPage";
+import { CommunicationSettingsPage } from "./communications/CommunicationSettingsPage";
+import { TelegramSettingsPage } from "./communications/TelegramSettingsPage";
 import SettingsSearch, { pageForEntry } from "./settings/SettingsSearch";
 import { buildSettingsIndex, type SettingsEntry } from "./settings/settingsIndex";
 import { LocalAddMenu } from "./settings/local/LocalAddMenu";
@@ -38,7 +40,6 @@ import type { SettingsPage } from "./settings/settingsPages";
 import { useAssist } from "../features/assist/useAssist";
 import { useTaste } from "../features/taste/useTaste";
 import { useMessaging } from "../features/communications/useMessaging";
-import SkillDetailPage from "./skills/SkillDetailPage";
 import { ANCHOR_ATTRIBUTE, FlashHighlight, SettingsPageTitle, SettingsSearchScope, SettingsSection, SETTINGS_HIGHLIGHT_EVENT } from "./SettingsSection";
 import { SettingRow, Segmented, Toggle } from "./SettingsSection";
 import MainPage from "./settings/model/MainPage";
@@ -69,7 +70,16 @@ function fileLabel(path: string): string {
 }
 
 type EndpointDraft = { id: string; name: string; base_url: string; api_key: string; models: string[]; enabled: boolean };
-type SettingsModalProps = { open: boolean; onClose: () => void; onEndpointsChanged: () => void; preferences: Preferences; onPreferencesChange: (preferences: Preferences) => void; appearance: Appearance; onAppearanceChange: (appearance: Appearance) => void; notify: Notify };
+type SettingsModalProps = { open: boolean; onClose: () => void; onEndpointsChanged: () => void; preferences: Preferences; onPreferencesChange: (preferences: Preferences) => void; appearance: Appearance; onAppearanceChange: (appearance: Appearance) => void; notify: Notify;
+  /**
+   * Opens a skill's folder in the right panel's Files view.
+   *
+   * The dialog closes itself as it calls this: editing a skill is browsing its
+   * folder, and the folder belongs to the app's own tree rather than to a page
+   * inside a modal. The outer `App` owns both, which is why this is a callback
+   * rather than a fetch of its own.
+   */
+  onOpenSkill: (slug: string) => void };
 // The page union lives in `settings/settingsPages.ts` so the search index can name a page
 // without importing this modal. Re-exported here for the components that already imported it.
 export type { SettingsPage } from "./settings/settingsPages";
@@ -114,7 +124,7 @@ const DRAG_THRESHOLD = 4;
  */
 const HIGHLIGHT_MS = 2000;
 
-export default function SettingsModal({ open, onClose, onEndpointsChanged, preferences, onPreferencesChange, appearance, onAppearanceChange, notify }: SettingsModalProps) {
+export default function SettingsModal({ open, onClose, onEndpointsChanged, preferences, onPreferencesChange, appearance, onAppearanceChange, notify, onOpenSkill }: SettingsModalProps) {
   // This dialog is the app's only `showModal()` window, and the browser paints
   // that in the top layer -- above any z-index on the page. Claiming the host
   // while it is open is what puts the notification stack on top of it rather
@@ -207,7 +217,20 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
   const [engineNames, setEngineNames] = useState<Pick<InstalledEngine, "id" | "version" | "source" | "installed">[]>([]);
   const [generalSettings, setGeneralSettings] = useState<GeneralSettings>(DEFAULT_GENERAL);
   const [instructionExampleIndex, setInstructionExampleIndex] = useState(0);
-  const [page, setPage] = useState<SettingsPage>({ view: "providers" });
+  const [page, setPage] = useState<SettingsPage>({ view: "general" });
+  /**
+   * Every visit starts on General.
+   *
+   * Reset on *close*, not on open. The dialog is shown by an effect, and an
+   * effect that changed the page when `open` became true ran after `showModal()`
+   * had already painted -- so reopening flashed whichever page was left behind,
+   * which read as "Providers is the default" even though General won a frame
+   * later. Reset while the dialog is hidden and the first frame it draws is the
+   * right one.
+   */
+  useEffect(() => {
+    if (!open) setPage({ view: "general" });
+  }, [open]);
   /**
    * Assist's record and Taste's record, read by the *modal* rather than by their pages.
    *
@@ -769,11 +792,10 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
   };
 
   // Where each drilled-in page returns to, and what the back control is called.
-  // The provider form and the skill form are the same shape -- a whole page
-  // standing in for a list -- so the header treats them the same way. A download
-  // returns to the page whose engine offered it: llama.cpp's models, or one of
-  // the two voice pages.
-  const isSubPage = page.view === "form" || page.view === "model" || page.view === "skill" || page.view === "download" || page.view === "ttsVoice" || page.view === "sttModel" || page.view === "audioModel";
+  // The provider form is the one page that stands in for a list, so the header
+  // treats it as a sub-page. A download returns to the page whose engine offered
+  // it: llama.cpp's models, or one of the two voice pages.
+  const isSubPage = page.view === "form" || page.view === "model" || page.view === "download" || page.view === "ttsVoice" || page.view === "sttModel" || page.view === "audioModel";
   const backTarget: SettingsPage =
     page.view === "model" ? { view: "local" }
       : page.view === "download"
@@ -782,7 +804,6 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
       : page.view === "sttModel" ? { view: "stt" }
       : page.view === "audioModels" ? { view: "audio" }
       : page.view === "audioModel" ? { view: "audioModels" }
-      : page.view === "skill" ? { view: "skills" }
       : { view: "providers" };
   const backLabel =
     page.view === "model" ? "Back to local models"
@@ -791,11 +812,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
       : page.view === "sttModel" ? "Back to speech to text"
       : page.view === "audioModels" ? "Back to audio engine"
       : page.view === "audioModel" ? "Back to audio models"
-      : page.view === "skill" ? "Back to skills"
       : "Back to providers";
-  // Held outside the JSX so the save callback can compare against it without
-  // relying on narrowing that does not survive into a closure.
-  const editingSkill = page.view === "skill" ? page.slug : null;
 
   // The two collapsible nav groups stay tinted while *any* page they own is the
   // one showing -- including the drill-down pages (a model, a voice, a
@@ -812,6 +829,10 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
   // produced it.
   const modelGroupActive =
     page.view === "mainModel" || page.view === "subagents" || page.view === "auxiliary" || page.view === "context";
+  const communicationsGroupActive =
+    page.view === "communicationsTelegram" ||
+    page.view === "communicationsSettings" ||
+    page.view === "communicationsSecurity";
 
   return (
     <dialog
@@ -826,7 +847,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
       onClick={(event) => { if (event.target === dialog) onClose(); }}
       className="m-0 h-dvh w-dvw max-h-none max-w-none overflow-hidden border-0 bg-transparent p-0 text-[var(--text)] backdrop:bg-black/65"
     >
-      <div className="mx-auto flex h-full w-full max-w-[1000px] flex-col overflow-hidden border-x border-[var(--line)] bg-[var(--page)] shadow-2xl sm:my-[6vh] sm:h-[88vh] sm:rounded-lg sm:border">
+      <div className="mx-auto flex h-full w-full max-w-[clamp(720px,92vw,1360px)] flex-col overflow-hidden border-x border-[var(--line)] bg-[var(--page)] shadow-2xl sm:my-[5vh] sm:h-[90vh] sm:rounded-lg sm:border">
         {/* The header is separated from the page below it by a hairline, the same
             way the sidebar is separated from the content. Without it the search
             field floated over whatever the page drew first; the page's own title
@@ -847,7 +868,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
         <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
           {/* No bottom hairline in the stacked layout either: the title band already draws
               one directly under it, and two rules a few pixels apart is the duplicate. */}
-          <nav aria-label="Settings sections" className="flex shrink-0 gap-1 overflow-x-auto bg-[var(--rail)] px-2.5 py-2 sm:min-h-0 sm:flex-col sm:gap-0.5 sm:overflow-y-auto sm:border-r sm:border-[var(--line)] sm:py-3 sm:w-[clamp(176px,18vw,236px)]">
+          <nav key={open ? "open" : "closed"} aria-label="Settings sections" className="flex shrink-0 gap-1 overflow-x-auto bg-[var(--rail)] px-2.5 py-2 sm:min-h-0 sm:flex-col sm:gap-0.5 sm:overflow-y-auto sm:border-r sm:border-[var(--line)] sm:py-3 sm:w-[clamp(176px,18vw,236px)]">
             <p className="hidden px-2.5 pb-1.5 pt-1 text-[11px] font-medium text-[var(--quiet)] sm:block">Application</p>
             <button type="button" data-settings-nav="general" aria-label="General" onClick={() => setPage({ view: "general" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "general" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><SlidersHorizontal size={16} />General</button>
             <button type="button" data-settings-nav="appearance" aria-label="Appearance" onClick={() => setPage({ view: "appearance" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "appearance" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Palette size={16} />Appearance</button>
@@ -858,12 +879,20 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
             <p className="hidden px-2.5 pb-1.5 pt-5 text-[11px] font-medium text-[var(--quiet)] sm:block">Assistant</p>
             <button type="button" data-settings-nav="assist" aria-label="Assist" onClick={() => setPage({ view: "assist" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "assist" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Lightbulb size={16} />Assist</button>
             <button type="button" data-settings-nav="taste" aria-label="Taste" onClick={() => setPage({ view: "taste" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "taste" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Brain size={16} />Taste</button>
-            <button type="button" data-settings-nav="skills" aria-label="Skills" onClick={() => setPage({ view: "skills" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "skills" || page.view === "skill" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><BookMarked size={16} />Skills</button>
+            <button type="button" data-settings-nav="skills" aria-label="Skills" onClick={() => setPage({ view: "skills" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "skills" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><BookMarked size={16} />Skills</button>
             <button type="button" data-settings-nav="mcp" aria-label="MCP servers" onClick={() => setPage({ view: "mcp" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "mcp" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Plug size={16} />MCP</button>
             {/* Where the agent can be reached from outside the window. A phone is
-                a second door into the same assistant, which is why it sits with
-                the assistant's other surfaces rather than with the models. */}
-            <button type="button" data-settings-nav="communications" aria-label="Communications" onClick={() => setPage({ view: "communications" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "communications" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Smartphone size={16} />Communications</button>
+                a second door into the same assistant, so the group holds the
+                transport, its behaviour and the access boundary separately. */}
+            <SettingsNavGroup
+              label="Communications"
+              icon={<Smartphone size={16} />}
+              anyActive={communicationsGroupActive}
+            >
+              <button type="button" data-settings-nav="communicationsTelegram" aria-label="Telegram" onClick={() => setPage({ view: "communicationsTelegram" })} className={navButtonClass(page.view === "communicationsTelegram", true)}><Smartphone size={14} />Telegram</button>
+              <button type="button" data-settings-nav="communicationsSettings" aria-label="Communications settings" onClick={() => setPage({ view: "communicationsSettings" })} className={navButtonClass(page.view === "communicationsSettings", true)}><SlidersHorizontal size={14} />Settings</button>
+              <button type="button" data-settings-nav="communicationsSecurity" aria-label="Communications security" onClick={() => setPage({ view: "communicationsSecurity" })} className={navButtonClass(page.view === "communicationsSecurity", true)}><Info size={14} />Security</button>
+            </SettingsNavGroup>
             <p className="hidden px-2.5 pb-1.5 pt-5 text-[11px] font-medium text-[var(--quiet)] sm:block">Models</p>
             {/* Two nested groups in the reference design's shape: a parent that is a
                 disclosure rather than a page, with its pages underneath. Providers
@@ -911,11 +940,11 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
           </nav>
 
           <div className="min-w-0 flex-1 overflow-y-auto">
-            <div className="mx-auto max-w-[760px] px-5 py-6 sm:px-9 sm:py-8">
+            <div className="mx-auto max-w-[960px] px-5 py-6 sm:px-9 sm:py-8">
               {/* No `key`: a search result on the page already open must not remount the
                   scope, or the dim it is about to set is thrown away with the old node. */}
               <SettingsSearchScope>
-              {page.view === "assist" ? <AssistSettingsPage notify={notify} store={assistStore} groups={providerModelGroups} localModels={localModels} /> : page.view === "communications" ? <CommunicationsPage notify={notify} store={messagingStore} /> : page.view === "taste" ? <TasteSettingsPage notify={notify} store={tasteStore} groups={providerModelGroups} localModels={localModels} /> : page.view === "providers" ? <>
+              {page.view === "assist" ? <AssistSettingsPage notify={notify} store={assistStore} groups={providerModelGroups} localModels={localModels} /> : page.view === "communicationsTelegram" ? <TelegramSettingsPage notify={notify} store={messagingStore} /> : page.view === "communicationsSettings" ? <CommunicationSettingsPage notify={notify} store={messagingStore} /> : page.view === "communicationsSecurity" ? <CommunicationSecurityPage notify={notify} store={messagingStore} /> : page.view === "taste" ? <TasteSettingsPage notify={notify} store={tasteStore} groups={providerModelGroups} localModels={localModels} /> : page.view === "providers" ? <>
                 <SettingsPageTitle>
                   <h2 className="text-[17px] font-semibold tracking-tight"><FlashHighlight anchor="providers.list" />Providers</h2>
                   <button type="button" {...{ [ANCHOR_ATTRIBUTE]: "providers.add" }} onClick={openAdd} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 text-[13px] font-medium text-[var(--text)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><FlashHighlight anchor="providers.add" /><Plus size={15} />Add provider</button>
@@ -955,7 +984,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
                     </article>;
                   })}
                 </div>}
-              </> : page.view === "engines" ? <EnginesSettingsPage onChanged={() => { onEndpointsChanged(); void refreshEngines(); }} notify={notify} /> : page.view === "local" ? <>
+              </> : page.view === "engines" ? <EnginesSettingsPage onChanged={() => { onEndpointsChanged(); void refreshEngines(); void refreshLocalModels(); }} notify={notify} /> : page.view === "local" ? <>
                 <SettingsPageTitle>
                   <h2 className="text-[17px] font-semibold tracking-tight"><FlashHighlight anchor="local.list" />Local models</h2>
                   <LocalAddMenu anchor="local.add" onDownload={() => setPage({ view: "download", kind: "llama" })} onAdd={() => void addLocalModel()} />
@@ -1198,8 +1227,8 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
                 <SettingsSection title="Instructions">
                   <SettingRow
                     anchor="general.instructions"
-                    label="Instructions for ProjectZ"
-                    description="Kept in mind whenever ProjectZ generates a message."
+                    label="Instructions"
+                    description="Kept in mind in app chats and jobs. Telegram uses these only when Communications → Settings → Communication instructions is empty."
                     stacked
                     control={<textarea id="project-instructions" rows={5} value={generalSettings.instructions} onChange={(event) => updateGeneralSettings({ ...generalSettings, instructions: event.target.value })} placeholder={INSTRUCTION_EXAMPLES[instructionExampleIndex]} className="min-h-32 w-full resize-y rounded-md border border-[var(--line)] bg-[var(--rail)] px-3 py-2.5 text-[13px] leading-6 text-[var(--text)] placeholder:text-[var(--quiet)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" />}
                   />
@@ -1249,7 +1278,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
                 groups={providerModelGroups}
                 localModels={localModels}
               />
-              : page.view === "skills" ? <SkillsPage notify={notify} onOpenForm={(skill) => setPage({ view: "skill", slug: skill?.slug ?? null })} /> : page.view === "mcp" ? <McpSettingsPage notify={notify} /> : page.view === "skill" ? <SkillDetailPage key={editingSkill ?? "new"} slug={editingSkill} onSaved={(slug) => { if (slug !== editingSkill) setPage({ view: "skill", slug }); }} onCancel={() => setPage({ view: "skills" })} onDeleted={() => setPage({ view: "skills" })} notify={notify} /> : <>
+              : page.view === "skills" ? <SkillsPage notify={notify} onOpenSkill={onOpenSkill} /> : page.view === "mcp" ? <McpSettingsPage notify={notify} /> : <>
                 <SettingsPageTitle><h2 className="text-[17px] font-semibold tracking-tight">{page.endpoint ? "Edit provider" : "Add provider"}<FlashHighlight anchor="providers.add" /></h2></SettingsPageTitle>
                 <form onSubmit={(event) => void saveEndpoint(event)} className="max-w-xl space-y-4">
                   <label className="block text-sm text-[var(--muted)]">Provider name<input ref={nameRef} required value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} className="mt-1.5 h-10 w-full rounded-md border border-[var(--line)] bg-[var(--rail)] px-3 text-[13px] text-[var(--text)] outline-none placeholder:text-[var(--quiet)] focus:border-[var(--accent)]" placeholder="e.g. Local Ollama" /></label>

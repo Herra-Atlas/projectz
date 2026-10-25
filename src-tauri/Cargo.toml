@@ -1,6 +1,6 @@
 [package]
 name = "projectz"
-version = "0.5.0"
+version = "0.5.5"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -51,6 +51,10 @@ dirs = "6"
 # a library that also covers the other two platforms, rather than a hand-written
 # capture path per OS.
 cpal = "0.15"
+# Telegram voice messages arrive as Ogg Opus. Decoding in-process keeps voice
+# transcription independent of ffmpeg being installed and avoids shelling out
+# with the bot token's downloaded bytes.
+opus-pure = "0.2.2"
 # The Files panel's watcher. Recursive watching on the workspace root, so a
 # file the user (or whatever else) changes outside the app still shows up in the
 # tree while the panel is open. One small notification library rather than a

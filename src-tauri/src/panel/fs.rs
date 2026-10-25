@@ -26,14 +26,44 @@ pub struct TreeEntry {
 /// Entries returned for one folder, before the cap.
 const MAX_ENTRIES: usize = 500;
 
-/// Listing the workspace root.
+/// The folder a panel command acts inside.
+///
+/// The open workspace, or -- when `skill` is a slug -- the skills root, which is
+/// the folder every skill lives in. Both are folders outside the workspace, and
+/// the Skills page opens this tree on that root so a person edits a skill with
+/// the editor they already know: the root lists every skill, and the skill they
+/// picked is one folder below it, opened rather than isolated.
+///
+/// **The boundary is the parent, never a guessed path.** A slug only selects
+/// *which* of the two roots this tree is pointed at; the path below it still
+/// comes from the frontend and still has to resolve through `resolve_within`,
+/// so naming a slug grants no access to its siblings' contents beyond what any
+/// other row of that listing already has.
+///
+/// **The containment rule is unchanged.** Everything below still resolves
+/// through `resolve_within` against this root, so a skill path escapes no further
+/// than a workspace path does. What changes is only which folder is the boundary,
+/// and it is named per call rather than kept in a process global: the panel draws
+/// one tree, and a global root would be a second answer to which folder is on
+/// screen, free to disagree with the rows already drawn.
+fn root_for(skill: Option<&str>) -> Result<PathBuf, String> {
+    match skill.map(str::trim).filter(|slug| !slug.is_empty()) {
+        // Existence check, not identity: the slug came from a listing of this very
+        // folder a moment ago, and a skills root that does not exist yet (a fresh
+        // install with nothing written) is still a perfectly good place to start.
+        Some(_) => Ok(crate::skills::root()),
+        None => require_workspace(),
+    }
+}
+
+/// Listing the root of the tree.
 ///
 /// An empty relative path is the root itself. Kept as the *empty string* rather
 /// than `"."` because `resolve_within` refuses `..` and absolutes but permits `.`,
 /// and an empty string is what the frontend naturally holds for "the top of the
 /// tree" -- making the caller spell it as `"."` would be a rule with no payoff.
-pub fn list(relative: &str) -> Result<Vec<TreeEntry>, String> {
-    let root = require_workspace()?;
+pub fn list(relative: &str, skill: Option<&str>) -> Result<Vec<TreeEntry>, String> {
+    let root = root_for(skill)?;
     list_in(&root, relative)
 }
 
@@ -111,8 +141,8 @@ pub fn list_in(root: &Path, relative: &str) -> Result<Vec<TreeEntry>, String> {
 /// to guess, and a silently truncated folder looks exactly like a folder that
 /// genuinely has 500 entries.
 #[tauri::command]
-pub fn panel_fs_list(relative: String) -> Result<Vec<TreeEntry>, String> {
-    list(&relative)
+pub fn panel_fs_list(relative: String, skill: Option<String>) -> Result<Vec<TreeEntry>, String> {
+    list(&relative, skill.as_deref())
 }
 
 /// Reading a file for the panel's preview.
@@ -122,9 +152,9 @@ pub fn panel_fs_list(relative: String) -> Result<Vec<TreeEntry>, String> {
 /// about what is sensible to draw, and a 200,000-line minified bundle is not a
 /// file anyone reads in a side panel.
 #[tauri::command]
-pub fn panel_read_preview(relative: String) -> Result<String, String> {
+pub fn panel_read_preview(relative: String, skill: Option<String>) -> Result<String, String> {
     const MAX_PREVIEW_BYTES: u64 = 2 * 1024 * 1024;
-    let resolved = resolve_preview_file(&relative, MAX_PREVIEW_BYTES)?;
+    let resolved = resolve_preview_file(&relative, MAX_PREVIEW_BYTES, skill.as_deref())?;
     std::fs::read_to_string(&resolved)
         .map_err(|error| format!("Could not read {}: {error}", resolved.display()))
 }
@@ -144,9 +174,12 @@ pub fn panel_read_preview(relative: String) -> Result<String, String> {
 /// legitimately megabytes, where a source file that large is not -- and it is
 /// still a *view*: the bytes are handed back to be drawn, not edited.
 #[tauri::command]
-pub fn panel_read_bytes(relative: String) -> Result<tauri::ipc::Response, String> {
+pub fn panel_read_bytes(
+    relative: String,
+    skill: Option<String>,
+) -> Result<tauri::ipc::Response, String> {
     const MAX_PREVIEW_BYTES: u64 = 25 * 1024 * 1024;
-    let resolved = resolve_preview_file(&relative, MAX_PREVIEW_BYTES)?;
+    let resolved = resolve_preview_file(&relative, MAX_PREVIEW_BYTES, skill.as_deref())?;
     let bytes = std::fs::read(&resolved)
         .map_err(|error| format!("Could not read {}: {error}", resolved.display()))?;
     Ok(tauri::ipc::Response::new(bytes))
@@ -158,9 +191,12 @@ pub fn panel_read_bytes(relative: String) -> Result<tauri::ipc::Response, String
 /// this is `documents::spreadsheet`, the same reader `read_file` uses on a sheet,
 /// so a model and the panel cannot disagree about what a `.xlsx` contains.
 #[tauri::command]
-pub fn panel_sheet_grid(relative: String) -> Result<Vec<crate::documents::SheetGrid>, String> {
+pub fn panel_sheet_grid(
+    relative: String,
+    skill: Option<String>,
+) -> Result<Vec<crate::documents::SheetGrid>, String> {
     const MAX_SHEET_BYTES: u64 = 25 * 1024 * 1024;
-    let resolved = resolve_preview_file(&relative, MAX_SHEET_BYTES)?;
+    let resolved = resolve_preview_file(&relative, MAX_SHEET_BYTES, skill.as_deref())?;
     crate::documents::spreadsheet(&resolved)
 }
 
@@ -169,8 +205,12 @@ pub fn panel_sheet_grid(relative: String) -> Result<Vec<crate::documents::SheetG
 /// Shared by all three preview reads so the containment rule, the folder check
 /// and the size message exist once: a command that skipped the check would be a
 /// way to read outside the workspace from the UI.
-fn resolve_preview_file(relative: &str, max_bytes: u64) -> Result<PathBuf, String> {
-    let root = require_workspace()?;
+fn resolve_preview_file(
+    relative: &str,
+    max_bytes: u64,
+    skill: Option<&str>,
+) -> Result<PathBuf, String> {
+    let root = root_for(skill)?;
     let resolved = resolve_within(&root, if relative.is_empty() { "." } else { relative })?;
 
     let metadata = std::fs::metadata(&resolved)
@@ -194,8 +234,12 @@ fn resolve_preview_file(relative: &str, max_bytes: u64) -> Result<PathBuf, Strin
 /// permission gate. It shares the boundary -- `resolve_within` -- and the atomic
 /// temp+rename write, so there is one containment rule and one way a file lands.
 #[tauri::command]
-pub fn panel_write_file(relative: String, content: String) -> Result<(), String> {
-    let root = require_workspace()?;
+pub fn panel_write_file(
+    relative: String,
+    content: String,
+    skill: Option<String>,
+) -> Result<(), String> {
+    let root = root_for(skill.as_deref())?;
     write_in(&root, &relative, &content)
 }
 
@@ -245,15 +289,23 @@ fn write_in(root: &Path, relative: &str, content: &str) -> Result<(), String> {
 /// the permission gate. It shares the boundary -- `resolve_within` -- so there is
 /// one containment rule for everything the panel writes.
 #[tauri::command]
-pub fn panel_create_file(relative: String, name: String) -> Result<(), String> {
-    let root = require_workspace()?;
+pub fn panel_create_file(
+    relative: String,
+    name: String,
+    skill: Option<String>,
+) -> Result<(), String> {
+    let root = root_for(skill.as_deref())?;
     create_in(&root, &relative, &name, false)
 }
 
 /// Creating a folder inside a folder of the panel. See [`panel_create_file`].
 #[tauri::command]
-pub fn panel_create_folder(relative: String, name: String) -> Result<(), String> {
-    let root = require_workspace()?;
+pub fn panel_create_folder(
+    relative: String,
+    name: String,
+    skill: Option<String>,
+) -> Result<(), String> {
+    let root = root_for(skill.as_deref())?;
     create_in(&root, &relative, &name, true)
 }
 
@@ -301,8 +353,12 @@ fn create_in(root: &Path, parent: &str, name: &str, is_dir: bool) -> Result<(), 
 /// permission gate. It shares the boundary -- `resolve_within` -- so a drop can
 /// only ever land inside the workspace.
 #[tauri::command]
-pub fn panel_move_file(relative: String, target: String) -> Result<(), String> {
-    let root = require_workspace()?;
+pub fn panel_move_file(
+    relative: String,
+    target: String,
+    skill: Option<String>,
+) -> Result<(), String> {
+    let root = root_for(skill.as_deref())?;
     move_in(&root, &relative, &target)
 }
 
@@ -351,8 +407,12 @@ fn move_in(root: &Path, source: &str, target: &str) -> Result<(), String> {
 /// permission gate. It shares the boundary -- `resolve_within` -- and the atomic
 /// rename, so there is one containment rule and one way a file lands.
 #[tauri::command]
-pub fn panel_rename_file(relative: String, new_name: String) -> Result<(), String> {
-    let root = require_workspace()?;
+pub fn panel_rename_file(
+    relative: String,
+    new_name: String,
+    skill: Option<String>,
+) -> Result<(), String> {
+    let root = root_for(skill.as_deref())?;
     rename_in(&root, &relative, &new_name)
 }
 
@@ -388,8 +448,8 @@ fn rename_in(root: &Path, relative: &str, new_name: &str) -> Result<(), String> 
 }
 
 #[tauri::command]
-pub fn panel_delete_file(relative: String) -> Result<(), String> {
-    let root = require_workspace()?;
+pub fn panel_delete_file(relative: String, skill: Option<String>) -> Result<(), String> {
+    let root = root_for(skill.as_deref())?;
     delete_in(&root, &relative)
 }
 

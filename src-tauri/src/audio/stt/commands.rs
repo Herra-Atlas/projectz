@@ -15,8 +15,7 @@ use crate::audio::stt::audiocpp;
 use crate::database::Database;
 
 use super::capture::{self, Session, MIN_SAMPLES};
-use super::models::{self, Selected, SttSettings};
-use super::whisper;
+use super::models::{self, SttSettings};
 
 /// What the Local page draws before it offers to install anything.
 #[derive(Serialize)]
@@ -224,27 +223,5 @@ pub async fn stt_recording_stop(
         return Err("Nothing was heard. Hold the microphone a little longer.".to_string());
     }
 
-    let settings = models::settings(&database);
-    let selected = models::resolve(&settings)?;
-    let language = settings.language_for(&selected.path()).map(str::to_string);
-
-    let text = match selected {
-        Selected::WhisperFile(model) => tokio::task::spawn_blocking(move || {
-            whisper::transcribe(&model, &samples, language.as_deref())
-        })
-        .await
-        .map_err(|error| format!("Transcription was interrupted: {error}"))??,
-        Selected::Audiocpp(model) => {
-            let wav = whisper::write_wav(&samples)?;
-            let outcome = audiocpp::transcribe(&model, &wav, &app, &database).await;
-            // Either way the temp file has done its job and must not survive.
-            let _ = std::fs::remove_file(&wav);
-            outcome?
-        }
-    };
-
-    if text.is_empty() {
-        return Err("Nothing was heard.".to_string());
-    }
-    Ok(text)
+    super::transcribe::samples(&app, &database, samples).await
 }

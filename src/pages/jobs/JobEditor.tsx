@@ -1,11 +1,13 @@
 import { useState } from "react";
 import { CircleHelp } from "lucide-react";
+import { AccessSwitches } from "../../components/AccessSwitches";
 import { Toggle } from "../../components/SettingsSection";
 import { useModelRegistry } from "../../features/models/useModelRegistry";
 import { useMachineTotals } from "../../features/jobs/useJobs";
 import { useWorkspaces, workspaceLabel } from "../../features/workspace/useWorkspaces";
 import type { Notify } from "../../features/notifications/types";
-import { ALL_ACCESS, DEFAULT_CONDITIONS, draftJob, toDraft, type Job, type JobSchedule, type NewJob } from "../../features/jobs/types";
+import { ALL_ACCESS } from "../../features/chat/access";
+import { DEFAULT_CONDITIONS, draftJob, toDraft, type Job, type JobSchedule, type NewJob } from "../../features/jobs/types";
 
 /**
  * The job editor.
@@ -251,15 +253,13 @@ export default function JobEditor({
           </select>
         </Field>
 
-        <Field label="Access" hint="What this job's agent may use. A tool that is off is not offered to the model at all.">
-          <div className="flex flex-wrap gap-x-5 gap-y-3 text-[13px]">
-            {(["read", "write", "terminal", "web", "subagents"] as const).map((capability) => (
-              <label key={capability} className="flex items-center gap-2 capitalize text-[var(--text)]">
-                <Toggle checked={draft.access[capability]} onChange={(value) => patch({ access: { ...draft.access, [capability]: value } })} label={capability} />
-                {capability}
-              </label>
-            ))}
-          </div>
+        <Field label="Access" hint="What this job's agent may use. A tool that is off is not offered to the model at all. Jobs is always off for a job's own run, so it cannot schedule more work.">
+          <AccessSwitches
+            access={draft.access}
+            onChange={(access) => patch({ access })}
+            capabilities={["read", "write", "terminal", "web", "subagents", "mcp"]}
+            labelPrefix="Job "
+          />
         </Field>
 
         <Field label="Lane" hint="Jobs in one lane never run at once: a job waits for the earlier one in its lane to finish before it starts. Give two jobs different lanes to let them overlap.">
@@ -291,7 +291,7 @@ export default function JobEditor({
           {[
             // Written as what each preset *changes*, so a capability added later is on
             // in all three unless a preset says otherwise.
-            { label: "Read only", access: { ...ALL_ACCESS, write: false, terminal: false, subagents: false } },
+            { label: "Read only", access: { ...ALL_ACCESS, write: false, terminal: false, subagents: false, mcp: false } },
             { label: "Read + write", access: { ...ALL_ACCESS, terminal: false, subagents: false } },
             { label: "Everything", access: { ...ALL_ACCESS } },
           ].map((preset) => (

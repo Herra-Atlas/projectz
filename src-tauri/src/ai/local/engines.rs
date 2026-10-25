@@ -927,13 +927,30 @@ fn find_server(root: &Path) -> Result<PathBuf, String> {
     Err("Downloaded archive does not contain llama-server".to_string())
 }
 
-pub fn uninstall(app: &AppHandle, id: &str) -> Result<(), String> {
-    if is_referenced(app, id)? {
-        return Err(
-            "This engine is in use. Point the local models using it at another engine first."
-                .to_string(),
-        );
-    }
+/// Removes an engine, moving any model that names it somewhere it can run.
+///
+/// The old behaviour refused while a model still pointed here, which turned one
+/// click into a manual migration through drag targets. The user asked to remove
+/// *this build*, not to keep it because a model happened to name it, so the
+/// choice is made for them:
+///
+/// - A catalog build hands its models to the newest catalog build that is
+///   installed. That is the same "use the latest engine" decision a person would
+///   make, and it is the only destination guaranteed to exist beside the one
+///   being removed in the common case.
+/// - A fork (anything from a pasted link, or a directory whose id is not a
+///   catalog id) hands them to **no engine**. A fork is chosen for behaviour a
+///   catalog build may not have, so silently running its models on upstream
+///   would answer with a backend nobody picked. The models stay in the library,
+///   under "No engine", waiting for a choice.
+///
+/// Returns a sentence for the page when anything moved, so the removal says what
+/// it did to the models rather than only that the engine is gone.
+pub fn uninstall(app: &AppHandle, id: &str) -> Result<Option<String>, String> {
+    // Before the files go: a model left naming this id would fail its next load
+    // with a message about a reinstall rather than about the choice that caused
+    // it, and the target we pick has to be an engine that still exists.
+    let moved = move_models_off(app, id)?;
     let directory = installed_dir(app, id)?;
     if directory.exists() {
         fs::remove_dir_all(directory).map_err(|error| error.to_string())?;
@@ -948,31 +965,122 @@ pub fn uninstall(app: &AppHandle, id: &str) -> Result<(), String> {
     if custom.len() != before {
         save_custom(app, &custom)?;
     }
-    Ok(())
+    Ok(moved)
 }
 
-/// Whether a model still points at this engine.
+/// Re-points every model that names `engine_id`, and unloads any of them that is
+/// running under it.
 ///
-/// Removing one a model names would leave that model's setting pointing at a
-/// directory that is not there, and its next load would fail with a message
-/// about a reinstall rather than about the choice that caused it.
-pub fn is_referenced(app: &AppHandle, id: &str) -> Result<bool, String> {
+/// The runtime is reached through app state rather than a parameter because this
+/// is called from a command that has no runtime argument; the stop is the same
+/// one `local_model_engine_set` performs, for the same reason -- the process was
+/// started by files that are about to be deleted.
+fn move_models_off(app: &AppHandle, engine_id: &str) -> Result<Option<String>, String> {
     let Some(database) = app.try_state::<std::sync::Arc<crate::database::Database>>() else {
-        return Ok(false);
+        return Ok(None);
     };
-    // Read through the public list rather than a SQL scan for the prefix, so a
-    // model that names a missing engine still counts as a reference.
-    Ok(database
+    let affected: Vec<crate::ai::local::LocalModel> = database
         .list_local_models()
         .unwrap_or_default()
-        .iter()
-        .any(|model| {
+        .into_iter()
+        .filter(|model| {
             database
                 .setting::<Option<String>>(&engine_setting_key(&model.id))
                 .flatten()
                 .as_deref()
-                == Some(id)
-        }))
+                == Some(engine_id)
+        })
+        .collect();
+    if affected.is_empty() {
+        return Ok(None);
+    }
+    // A fork's models are unassigned; a catalog build's go to the newest sibling.
+    let target = if is_custom_engine(app, engine_id) {
+        None
+    } else {
+        newest_installed_catalog_engine(app, engine_id)?
+    };
+    for model in &affected {
+        let key = engine_setting_key(&model.id);
+        match target.as_deref() {
+            Some(target) => database.set_setting(&key, &target.to_string())?,
+            // `Some(None)` is what clears the per-model key -- the same shape the
+            // removal of a selected model already writes.
+            None => database.set_setting::<Option<String>>(&key, &None)?,
+        }
+    }
+    if let Some(runtime) = app.try_state::<crate::ai::runtime::AiRuntime>() {
+        for model in &affected {
+            runtime.local_models().unload_if_loaded(&model.id);
+        }
+    }
+    let count = affected.len();
+    let models = if count == 1 {
+        "1 model".to_string()
+    } else {
+        format!("{count} models")
+    };
+    Ok(Some(match target {
+        Some(target) => format!("{models} moved to {}", engine_version_label(&target)),
+        None => format!("{models} moved to No engine"),
+    }))
+}
+
+/// Whether this installed engine came from a pasted link rather than the catalog.
+///
+/// Two tests because the two records can disagree: `custom.json` is the record,
+/// and the id prefix is the only thing left if that file was lost. Either one
+/// saying "custom" is enough -- guessing "catalog" has a consequence (models
+/// silently moved to upstream), while guessing "custom" only asks the user for
+/// a choice.
+fn is_custom_engine(app: &AppHandle, id: &str) -> bool {
+    !id.starts_with(LLAMA_CPP_ID_PREFIX) || load_custom(app).iter().any(|engine| engine.id == id)
+}
+
+/// The build number a catalog engine id names, if it names one.
+fn catalog_build(id: &str) -> Option<u64> {
+    id.strip_prefix(LLAMA_CPP_ID_PREFIX)?
+        .strip_prefix('b')?
+        .parse()
+        .ok()
+}
+
+/// The newest installed catalog build other than `except`.
+///
+/// Read from the directories rather than the catalog: an older build that has
+/// aged out of the release list is still installed and still perfectly capable of
+/// running a model. `None` when this was the only catalog build on disk, which
+/// leaves the models unassigned rather than pointing them at nothing.
+fn newest_installed_catalog_engine(
+    app: &AppHandle,
+    except: &str,
+) -> Result<Option<String>, String> {
+    let custom: Vec<String> = load_custom(app)
+        .into_iter()
+        .map(|engine| engine.id)
+        .collect();
+    let mut newest: Option<(u64, String)> = None;
+    for id in installed_engine_ids(app)? {
+        if id == except || custom.contains(&id) {
+            continue;
+        }
+        let Some(build) = catalog_build(&id) else {
+            continue;
+        };
+        if newest.as_ref().map_or(true, |(best, _)| build > *best) {
+            newest = Some((build, id));
+        }
+    }
+    Ok(newest.map(|(_, id)| id))
+}
+
+/// An engine id as a person reads it in the engine list: `b11371`, not the
+/// directory's whole `llama.cpp-vulkan-b11371`.
+fn engine_version_label(id: &str) -> String {
+    match catalog_build(id) {
+        Some(build) => format!("b{build}"),
+        None => id.to_string(),
+    }
 }
 
 /// Whether an engine's files are on disk and ready to run a model.
@@ -1178,5 +1286,29 @@ mod tests {
         let entry = orphaned_catalog_entry("owner-llama.cpp-prism-b10754");
         assert_eq!(entry.source, CUSTOM_SOURCE);
         assert_eq!(entry.version, "owner-llama.cpp-prism-b10754");
+    }
+
+    /// A catalog build is recognised by its id, and a fork is not.
+    ///
+    /// This one predicate decides whether removing an engine moves its models to
+    /// the newest catalog build or leaves them unassigned. Reading a fork as a
+    /// catalog build would silently run a model on an upstream engine the user
+    /// never chose.
+    #[test]
+    fn only_a_catalog_id_names_a_build_number() {
+        assert_eq!(catalog_build("llama.cpp-vulkan-b11371"), Some(11371));
+        assert_eq!(catalog_build("owner-llama.cpp-prism-b10754"), None);
+        assert_eq!(catalog_build("llama.cpp-vulkan-"), None);
+        assert_eq!(catalog_build("llama.cpp-vulkan-bnotanumber"), None);
+    }
+
+    /// The removal message names the version a person sees in the engine list.
+    #[test]
+    fn an_engine_label_is_its_version() {
+        assert_eq!(engine_version_label("llama.cpp-vulkan-b11371"), "b11371");
+        assert_eq!(
+            engine_version_label("owner-llama.cpp-prism-b10754"),
+            "owner-llama.cpp-prism-b10754"
+        );
     }
 }

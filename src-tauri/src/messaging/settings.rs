@@ -17,12 +17,14 @@
 //! ids configured must not be an open door. The poller refuses an unknown sender
 //! before anything reaches the runtime, and the page says so in as many words.
 //!
-//! # Why scheduling is taken off unconditionally
+//! # Scheduling is a per-person decision
 //!
-//! `access.jobs` is forced off here, on the way in and on the way out, for the same
-//! reason `jobs::runner` does it: a message that can schedule a job can arrange to
-//! do work later, when the user is no longer watching the conversation. One
-//! generation, whatever the record says.
+//! `access.jobs` is a real switch on each id, off by default. A message can only
+//! schedule work when that id has the Jobs capability, and the job it creates is
+//! still one generation deep: scheduling from inside that job is taken away by
+//! `jobs/runner.rs` as it is for every job.
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +40,65 @@ pub const KEY: &str = "app.messaging";
 /// reads. One person, a phone and a tablet is the ordinary case.
 const MAX_ALLOWED_IDS: usize = 20;
 
+/// The most channel instructions kept, in characters.
+///
+/// A bound rather than a judgement: this rides in every request from a phone, so
+/// a pasted essay would cost tokens on every message.
+const MAX_CHANNEL_INSTRUCTIONS: usize = 8_000;
+
+/// What one Telegram id may do.
+///
+/// Kept per person rather than once per channel: an id is the identity the
+/// transport trusts, so it is also the right place to say whether that person
+/// gets tools, which mode a new conversation starts in, and what it may touch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MessagingUser {
+    /// The mode a new conversation uses when `/new` does not choose.
+    pub mode: ToolMode,
+    /// Whether `/new` may offer Agent to this person at all.
+    pub allow_agent: bool,
+    /// The approval level for unattended work.
+    pub permission: PermissionMode,
+    /// The tools this person's conversations may use, before the installation
+    /// ceiling narrows them further.
+    pub access: AccessSet,
+    /// Whether this person may load a local chat model when theirs is not loaded.
+    pub allow_local_start: bool,
+    /// Whether this person may start the speech-to-text engine with a voice message.
+    pub allow_stt_start: bool,
+}
+
+impl Default for MessagingUser {
+    fn default() -> Self {
+        Self {
+            mode: ToolMode::Agent,
+            allow_agent: true,
+            permission: PermissionMode::AutoWrites,
+            // The capability whose effect outlives the run is off by default, as
+            // it is for the channel fallback.
+            access: AccessSet {
+                jobs: false,
+                ..AccessSet::ALL
+            },
+            // Loading a model or an audio engine replaces what the host has
+            // loaded. That is a deliberate grant, not a default.
+            allow_local_start: false,
+            allow_stt_start: false,
+        }
+    }
+}
+
+impl MessagingUser {
+    /// The mode for the next turn, after the per-person Agent ceiling.
+    pub fn mode_for(&self, requested: Option<ToolMode>) -> ToolMode {
+        if !self.allow_agent {
+            return ToolMode::Chat;
+        }
+        requested.unwrap_or(self.mode)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct MessagingSettings {
@@ -46,17 +107,31 @@ pub struct MessagingSettings {
     pub enabled: bool,
     /// The user ids the bot obeys. Empty means nobody.
     pub allowed_user_ids: Vec<String>,
+    /// The per-id policy. Every allowed id has a record after normalisation.
+    pub users: BTreeMap<String, MessagingUser>,
     /// Which channels are switched on. The master switch gates all of them.
     pub channels: Vec<String>,
-    /// Agent by default: a message is a request for work, not for a chat.
+    /// **Legacy channel fallback only.** The page edits each id in `users`; these
+    /// four fields are what a record written before per-user policy existed
+    /// migrates from. New allowlist ids inherit them on normalisation.
     pub mode: ToolMode,
-    /// `auto_writes` by default. A run with nobody at the keyboard cannot use
-    /// `ask` (it would park forever waiting for a prompt nobody sees), so the
-    /// level has to be one that runs unattended -- and `full` is the wrong thing
-    /// to hand a phone by default.
+    /// Legacy fallback for whether `/new` may offer Agent.
+    pub allow_agent: bool,
+    /// Legacy fallback for the unattended approval level.
     pub permission: PermissionMode,
-    /// What the run may touch. `jobs` is always forced off.
+    /// Legacy fallback for a Telegram run's tool set. Jobs is off by default.
     pub access: AccessSet,
+    /// Whether files may be received from and sent to the chat.
+    ///
+    /// On by default because a phone conversation without attachments is a
+    /// conversation that cannot show the thing it is discussing. Off refuses both
+    /// directions, so it is a real privacy switch rather than a receive-only one.
+    pub allow_files: bool,
+    /// Extra instructions for every message answered through a channel.
+    ///
+    /// Appended after the user's general instructions and before the sender's
+    /// profile and the channel's own default note. Empty means only those apply.
+    pub instructions: String,
     /// Whether a chat may start a local model that is not loaded.
     ///
     /// Off by default, and deliberately: the loader keeps one model resident, so
@@ -64,8 +139,6 @@ pub struct MessagingSettings {
     /// person at the machine, not for a message that arrived while they were away --
     /// when it is on, the chat still asks before replacing anything.
     pub allow_local_start: bool,
-    /// The folder the run works in. `None` uses the open workspace.
-    pub workspace: Option<String>,
 }
 
 impl Default for MessagingSettings {
@@ -73,17 +146,20 @@ impl Default for MessagingSettings {
         Self {
             enabled: false,
             allowed_user_ids: Vec::new(),
+            users: BTreeMap::new(),
             channels: vec!["telegram".to_string()],
             mode: ToolMode::Agent,
+            allow_agent: true,
             permission: PermissionMode::AutoWrites,
-            // Everything a normal conversation has, minus the one capability whose
-            // effect outlives the run.
+            // Everything a normal conversation has, minus the capability whose
+            // effect outlives the run. An id can turn it on deliberately.
             access: AccessSet {
                 jobs: false,
                 ..AccessSet::ALL
             },
+            allow_files: true,
+            instructions: String::new(),
             allow_local_start: false,
-            workspace: None,
         }
     }
 }
@@ -102,6 +178,31 @@ impl MessagingSettings {
     /// the poller will use.
     pub fn normalized(mut self) -> Self {
         self.allowed_user_ids = normalize_ids(&self.allowed_user_ids);
+        // Every allowed id gets a record, and records for removed ids disappear.
+        // The old channel-level fields are the fallback for a record written before
+        // per-user policy existed, so an existing installation keeps the access it
+        // had instead of silently gaining or losing tools.
+        let fallback = MessagingUser {
+            mode: self.mode,
+            allow_agent: self.allow_agent,
+            permission: self.permission,
+            access: self.access,
+            allow_local_start: self.allow_local_start,
+            allow_stt_start: false,
+        };
+        let mut users = BTreeMap::new();
+        for id in &self.allowed_user_ids {
+            let mut user = self
+                .users
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| fallback.clone());
+            if !user.allow_agent {
+                user.mode = ToolMode::Chat;
+            }
+            users.insert(id.clone(), user);
+        }
+        self.users = users;
         // Trimmed and deduplicated, keeping the order the user gave.
         let mut channels: Vec<String> = Vec::new();
         for channel in &self.channels {
@@ -111,16 +212,38 @@ impl MessagingSettings {
             }
         }
         self.channels = channels;
-        if let Some(workspace) = self.workspace.as_mut() {
-            *workspace = workspace.trim().to_string();
-            if workspace.is_empty() {
-                self.workspace = None;
-            }
+        self.instructions = self.instructions.trim().to_string();
+        self.instructions = self
+            .instructions
+            .chars()
+            .take(MAX_CHANNEL_INSTRUCTIONS)
+            .collect();
+        // The fallback ceiling is applied where the mode is chosen too, so a stale
+        // Agent conversation cannot outlive it.
+        if !self.allow_agent {
+            self.mode = ToolMode::Chat;
         }
-        // Not a preference. A message that could schedule work could outlive the
-        // conversation that made it, and there is nobody watching.
-        self.access.jobs = false;
         self
+    }
+
+    /// What one sender may do. An unknown id gets the channel fallback, which is
+    /// also what a new allowlist entry receives on the next normalisation.
+    pub fn user(&self, user_id: &str) -> MessagingUser {
+        self.users
+            .get(user_id.trim())
+            .cloned()
+            .unwrap_or_else(|| MessagingUser {
+                mode: if self.allow_agent {
+                    self.mode
+                } else {
+                    ToolMode::Chat
+                },
+                allow_agent: self.allow_agent,
+                permission: self.permission,
+                access: self.access,
+                allow_local_start: self.allow_local_start,
+                allow_stt_start: false,
+            })
     }
 
     /// Whether a sender may be obeyed.
@@ -231,18 +354,92 @@ mod tests {
         assert!(!settings.allows("someone"));
     }
 
-    /// **Scheduling is never available to a message.** A phone is the least
-    /// watched surface there is, and a job would run long after the conversation
-    /// that asked for it.
+    /// Local engine starts are per-person and off by default: both load something
+    /// that can evict the host's current model.
     #[test]
-    fn a_message_can_never_schedule_work() {
-        let wanted = MessagingSettings {
-            access: AccessSet::ALL,
+    fn local_starts_are_per_id_and_off_by_default() {
+        let settings = MessagingSettings {
+            allowed_user_ids: vec!["1".into(), "2".into()],
+            users: BTreeMap::from([(
+                "2".to_string(),
+                MessagingUser {
+                    allow_local_start: true,
+                    allow_stt_start: true,
+                    ..MessagingUser::default()
+                },
+            )]),
             ..MessagingSettings::default()
         }
         .normalized();
-        assert!(!wanted.access.jobs);
-        assert!(wanted.access.read && wanted.access.write && wanted.access.terminal);
+        let first = settings.user("1");
+        let second = settings.user("2");
+        assert!(!first.allow_local_start && !first.allow_stt_start);
+        assert!(second.allow_local_start && second.allow_stt_start);
+    }
+
+    /// **Scheduling is a per-person switch.** Off in the default record, and kept
+    /// when that id is granted it deliberately.
+    #[test]
+    fn scheduling_is_off_by_default_and_can_be_granted() {
+        assert!(!MessagingUser::default().access.jobs);
+        let granted = MessagingUser {
+            access: AccessSet::ALL,
+            ..MessagingUser::default()
+        };
+        assert!(granted.access.jobs);
+    }
+
+    /// An old channel record that had Agent off keeps that ceiling for every
+    /// existing id, and an old Agent session cannot bring tools back.
+    #[test]
+    fn a_legacy_agent_ceiling_reaches_every_allowed_id() {
+        let settings = MessagingSettings {
+            allowed_user_ids: vec!["1".into()],
+            allow_agent: false,
+            mode: ToolMode::Agent,
+            ..MessagingSettings::default()
+        }
+        .normalized();
+        let user = settings.user("1");
+        assert!(!user.allow_agent);
+        assert_eq!(user.mode, ToolMode::Chat);
+        assert_eq!(user.mode_for(Some(ToolMode::Agent)), ToolMode::Chat);
+        assert_eq!(user.mode_for(None), ToolMode::Chat);
+    }
+
+    /// Two ids are two permissions: one may run tools, the other may not.
+    #[test]
+    fn access_is_kept_per_telegram_id() {
+        let restricted = MessagingUser {
+            allow_agent: false,
+            access: AccessSet {
+                terminal: false,
+                mcp: false,
+                ..AccessSet::ALL
+            },
+            ..MessagingUser::default()
+        };
+        let settings = MessagingSettings {
+            allowed_user_ids: vec!["1".into(), "2".into()],
+            users: BTreeMap::from([("2".to_string(), restricted)]),
+            ..MessagingSettings::default()
+        }
+        .normalized();
+
+        let first = settings.user("1");
+        let second = settings.user("2");
+        assert!(first.access.terminal && first.access.mcp);
+        assert!(!second.access.terminal && !second.access.mcp);
+        assert!(!second.allow_agent);
+        assert_eq!(second.mode, ToolMode::Chat);
+        // A removed id loses its policy rather than leaving it available to a
+        // future id that reuses the number.
+        let trimmed = MessagingSettings {
+            allowed_user_ids: vec!["1".into()],
+            ..settings
+        }
+        .normalized();
+        assert!(!trimmed.users.contains_key("2"));
     }
 
     /// The level has to run unattended: `ask` would park forever on the first

@@ -7,6 +7,8 @@
 
 use serde_json::Value;
 
+use crate::messaging::types::InboundFile;
+
 /// A press on one of the buttons the app drew.
 pub struct Action {
     /// The callback id, which has to be acknowledged or the press looks stuck.
@@ -23,6 +25,8 @@ pub struct Update {
     pub chat_id: Option<String>,
     pub text: String,
     pub action: Option<Action>,
+    /// Files sent with a message. A photo or a document, with its caption as text.
+    pub files: Vec<InboundFile>,
     /// Telegram tells us, so a bot-to-bot conversation cannot be started by mistake.
     pub is_bot: bool,
 }
@@ -41,8 +45,8 @@ pub fn parse(value: &Value) -> Option<Update> {
                 .get("chat")
                 .and_then(|chat| chat.get("id"))
                 .and_then(id_string),
-            // A photo with a caption is still a request; a photo on its own has no
-            // text to act on and is left alone rather than answered with an error.
+            // A photo's caption is the request text; a photo without one is still a
+            // turn because its file is handled below.
             text: message
                 .get("text")
                 .or_else(|| message.get("caption"))
@@ -50,6 +54,7 @@ pub fn parse(value: &Value) -> Option<Update> {
                 .unwrap_or_default()
                 .to_string(),
             action: None,
+            files: files_in(message),
             is_bot: from
                 .and_then(|from| from.get("is_bot"))
                 .and_then(Value::as_bool)
@@ -83,6 +88,7 @@ pub fn parse(value: &Value) -> Option<Update> {
                 id: callback_id,
                 data,
             }),
+            files: Vec::new(),
             is_bot: from
                 .and_then(|from| from.get("is_bot"))
                 .and_then(Value::as_bool)
@@ -91,6 +97,100 @@ pub fn parse(value: &Value) -> Option<Update> {
     }
 
     None
+}
+
+/// The files one message carries.
+///
+/// A document keeps its own name and media type. A voice note is Ogg Opus and
+/// gets a stable name from its unique id. An audio attachment keeps the sender's
+/// name when Telegram supplies one. A photo has neither name nor type, so the
+/// largest size is taken -- Telegram sends several resolutions -- and named with
+/// its unique id so two photos in one conversation cannot collide.
+fn files_in(message: &Value) -> Vec<InboundFile> {
+    if let Some(document) = message.get("document") {
+        let Some(id) = document.get("file_id").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        let name = document
+            .get("file_name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("file");
+        return vec![InboundFile {
+            id: id.to_string(),
+            name: name.to_string(),
+            mime_type: document
+                .get("mime_type")
+                .and_then(Value::as_str)
+                .unwrap_or("application/octet-stream")
+                .to_string(),
+            size: document.get("file_size").and_then(Value::as_u64),
+        }];
+    }
+
+    if let Some(voice) = message.get("voice") {
+        let Some(id) = voice.get("file_id").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        let unique = voice
+            .get("file_unique_id")
+            .and_then(Value::as_str)
+            .unwrap_or("voice");
+        return vec![InboundFile {
+            id: id.to_string(),
+            name: format!("{unique}.ogg"),
+            mime_type: "audio/ogg".to_string(),
+            size: voice.get("file_size").and_then(Value::as_u64),
+        }];
+    }
+
+    if let Some(audio) = message.get("audio") {
+        let Some(id) = audio.get("file_id").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        let unique = audio
+            .get("file_unique_id")
+            .and_then(Value::as_str)
+            .unwrap_or("audio");
+        return vec![InboundFile {
+            id: id.to_string(),
+            name: audio
+                .get("file_name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(unique)
+                .to_string(),
+            mime_type: audio
+                .get("mime_type")
+                .and_then(Value::as_str)
+                .unwrap_or("audio/ogg")
+                .to_string(),
+            size: audio.get("file_size").and_then(Value::as_u64),
+        }];
+    }
+
+    if let Some(photos) = message.get("photo").and_then(Value::as_array) {
+        let Some(photo) = photos.last() else {
+            return Vec::new();
+        };
+        let Some(id) = photo.get("file_id").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        let unique = photo
+            .get("file_unique_id")
+            .and_then(Value::as_str)
+            .unwrap_or("photo");
+        return vec![InboundFile {
+            id: id.to_string(),
+            name: format!("{unique}.jpg"),
+            mime_type: "image/jpeg".to_string(),
+            size: photo.get("file_size").and_then(Value::as_u64),
+        }];
+    }
+
+    Vec::new()
 }
 
 /// Ids arrive as numbers, but a hand-built update may carry one as a string.
@@ -166,6 +266,46 @@ mod tests {
         assert_eq!(action.id, "cb-1");
         assert_eq!(action.data, "ap:run-1:y");
         assert_eq!(update.chat_id.as_deref(), Some("7"));
+    }
+
+    /// A document is a turn even with no caption, and it keeps its own name.
+    #[test]
+    fn a_document_and_a_photo_become_files() {
+        let document = parse(&json!({
+            "update_id": 13,
+            "message": {
+                "from": { "id": 7, "first_name": "Bo" },
+                "chat": { "id": 7 },
+                "document": {
+                    "file_id": "doc-1",
+                    "file_name": "report.pdf",
+                    "mime_type": "application/pdf",
+                    "file_size": 2048,
+                },
+            },
+        }))
+        .expect("document");
+        assert!(document.text.is_empty());
+        assert_eq!(document.files.len(), 1);
+        assert_eq!(document.files[0].name, "report.pdf");
+        assert_eq!(document.files[0].size, Some(2048));
+
+        let photo = parse(&json!({
+            "update_id": 14,
+            "message": {
+                "from": { "id": 7, "first_name": "Bo" },
+                "chat": { "id": 7 },
+                "caption": "look",
+                "photo": [
+                    { "file_id": "small", "file_unique_id": "a", "file_size": 10 },
+                    { "file_id": "large", "file_unique_id": "b", "file_size": 90 },
+                ],
+            },
+        }))
+        .expect("photo");
+        assert_eq!(photo.text, "look");
+        assert_eq!(photo.files[0].id, "large");
+        assert_eq!(photo.files[0].name, "b.jpg");
     }
 
     /// A bot cannot talk to the bot, and an update with neither shape is ignored

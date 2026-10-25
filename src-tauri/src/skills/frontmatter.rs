@@ -2,48 +2,39 @@
 //!
 //! # Why not a YAML crate
 //!
-//! The header is a fixed, tiny shape: four top-level strings and one flat
-//! `metadata` map. A full YAML parser would be a new dependency for a format the
-//! app itself writes, and the one field that could contain punctuation -- the
-//! description -- is quoted on the way out and unquoted on the way in. Unknown
-//! keys are ignored rather than rejected, so a skill written for another host
-//! still loads here.
+//! The header is two fields. `name` and `description` are the whole contract
+//! between a skill and the model: the folder supplies `name`, the description is
+//! the trigger, and everything else a skill has to say is the body. A full YAML
+//! parser would be a new dependency for a format the app itself writes, and the
+//! one field that can contain punctuation -- the description -- is quoted on the
+//! way out and unquoted on the way in. Unknown keys, including the `metadata`
+//! block older versions wrote, are ignored rather than rejected, so a skill
+//! written for another host still loads here and a skill written by an older
+//! build of this app keeps working.
 //!
-//! The frontmatter follows the Agent Skills specification: `name` is the slug and
-//! must match the folder, `description` says when to use the skill, and anything
-//! the app adds for itself lives under `metadata`.
+//! # Where a skill's title lives
+//!
+//! The folder name is the title. `code-review/` is drawn as `Code review`, and
+//! the folder is also the skill's address -- so a title that disagreed with it
+//! would be a second, weaker name for the same thing. Removing the `title` and
+//! `type` fields made the folder the single answer to both questions.
 
 use std::path::Path;
-
-use super::SkillOrigin;
 
 /// The fields this app understands.
 #[derive(Clone, Debug, Default)]
 pub struct Frontmatter {
     /// The spec's identifier: lowercase letters, digits and hyphens.
     pub name: String,
-    /// What the card is called. Optional; falls back to a title-cased slug.
-    pub title: Option<String>,
+    /// When to use the skill. The only text the model chooses from.
     pub description: String,
-    pub skill_type: Option<String>,
-    /// Set only for a skill the agent drafted. A bundled skill's origin comes
-    /// from the root it lives in, not from its text.
-    pub origin: Option<SkillOrigin>,
-}
-
-impl Frontmatter {
-    /// The name to draw: the stored title, or the slug made readable.
-    pub fn display_name(&self) -> String {
-        self.title
-            .as_deref()
-            .map(str::trim)
-            .filter(|title| !title.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| humanize(&self.name))
-    }
 }
 
 /// Parses a `SKILL.md`: the header, then the body exactly as written.
+///
+/// The identity comes from the folder, so the parsed `name` is only used by
+/// callers that want what the file *claims*. [`parse`] leaves it empty when the
+/// header omits it, and the folder fills it in.
 ///
 /// A file with no header is accepted as a body-only skill, because a plain
 /// markdown note dropped into the folder is a reasonable thing for a person to
@@ -62,7 +53,6 @@ pub fn parse(text: &str) -> Result<(Frontmatter, String), String> {
 
     let mut header = Frontmatter::default();
     let mut closed = false;
-    let mut metadata_indent: Option<usize> = None;
     let mut body: Vec<&str> = Vec::new();
 
     // Lines are collected rather than sliced by byte offset. A file edited on
@@ -76,7 +66,7 @@ pub fn parse(text: &str) -> Result<(Frontmatter, String), String> {
         if closed {
             body.push(line);
         } else {
-            parse_line(line, &mut header, &mut metadata_indent);
+            parse_line(line, &mut header);
         }
     }
     if !closed {
@@ -88,83 +78,40 @@ pub fn parse(text: &str) -> Result<(Frontmatter, String), String> {
 
 /// Reads one header line into the struct.
 ///
-/// Indentation is what separates a `metadata` entry from a top-level field, so
-/// the parser tracks it rather than assuming a fixed two spaces.
-fn parse_line(line: &str, header: &mut Frontmatter, metadata_indent: &mut Option<usize>) {
+/// Top-level `name` and `description` are read; an indented line belongs to a
+/// nested block (`metadata:`, which is now ignored) and is skipped without
+/// ending the top-level block, so a legacy header still yields its description
+/// even when it sits above the block that is being ignored.
+fn parse_line(line: &str, header: &mut Frontmatter) {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
+        return;
+    }
+    let indent = line.len() - line.trim_start().len();
+    if indent > 0 {
         return;
     }
     let Some((key, value)) = trimmed.split_once(':') else {
         return;
     };
-    let key = key.trim();
     let value = unquote(value.trim());
-    let indent = line.len() - line.trim_start().len();
-
-    if trimmed == "metadata:" {
-        *metadata_indent = Some(indent);
-        return;
-    }
-    // A metadata entry is indented under `metadata:`; anything at the header's
-    // own indentation ends the block.
-    let in_metadata = metadata_indent.is_some_and(|base| indent > base);
-    if in_metadata {
-        match key {
-            "type" => header.skill_type = non_empty(value),
-            "title" => header.title = non_empty(value),
-            "origin" => header.origin = Some(SkillOrigin::from_str(&value)),
-            _ => {}
-        }
-        return;
-    }
-    *metadata_indent = None;
-    match key {
+    match key.trim() {
         "name" => header.name = value,
-        "title" => header.title = non_empty(value),
         "description" => header.description = value,
-        "type" => header.skill_type = non_empty(value),
-        "origin" => header.origin = Some(SkillOrigin::from_str(&value)),
         _ => {}
     }
 }
 
 /// Renders the header and body in the shape [`parse`] reads.
 ///
-/// Quoted values are the only escaping the parser has to understand, and the
-/// description is the one field that routinely contains a colon or a quote.
-pub fn render(header: &Frontmatter, body: &str) -> String {
+/// The name is written because the Agent Skills spec requires it and the install
+/// path validates against it; the description is quoted because it is the one
+/// field that routinely contains a colon or a quote.
+pub fn render(name: &str, description: &str, body: &str) -> String {
     let mut out = String::from("---\n");
-    out.push_str(&format!("name: {}\n", header.name));
-    if !header.description.trim().is_empty() {
-        out.push_str(&format!("description: {}\n", quote(&header.description)));
-    }
-    let has_metadata = header.title.is_some()
-        || header.skill_type.is_some()
-        || header
-            .origin
-            .is_some_and(|origin| origin == SkillOrigin::Generated);
-    if has_metadata {
-        out.push_str("metadata:\n");
-        if let Some(title) = header
-            .title
-            .as_deref()
-            .map(str::trim)
-            .filter(|title| !title.is_empty())
-        {
-            out.push_str(&format!("  title: {}\n", quote(title)));
-        }
-        if let Some(skill_type) = header
-            .skill_type
-            .as_deref()
-            .map(str::trim)
-            .filter(|label| !label.is_empty())
-        {
-            out.push_str(&format!("  type: {}\n", quote(skill_type)));
-        }
-        if header.origin == Some(SkillOrigin::Generated) {
-            out.push_str("  origin: generated\n");
-        }
+    out.push_str(&format!("name: {name}\n"));
+    if !description.trim().is_empty() {
+        out.push_str(&format!("description: {}\n", quote(description)));
     }
     out.push_str("---\n\n");
     out.push_str(body.trim());
@@ -214,11 +161,6 @@ pub fn read(path: &Path) -> Result<(Frontmatter, String), String> {
     parse(&text)
 }
 
-fn non_empty(value: String) -> Option<String> {
-    let value = value.trim().to_string();
-    (!value.is_empty()).then_some(value)
-}
-
 /// Removes one pair of surrounding quotes, if present.
 fn unquote(value: &str) -> String {
     let bytes = value.as_bytes();
@@ -246,9 +188,9 @@ fn quote(value: &str) -> String {
     )
 }
 
-/// `code-review` becomes `Code review`, for a skill that carries no title.
-fn humanize(slug: &str) -> String {
-    let spaced = slug.replace('-', " ");
+/// `code-review` becomes `Code review`.
+pub fn humanize(slug: &str) -> String {
+    let spaced = slug.replace(['-', '_'], " ");
     let mut characters = spaced.chars();
     match characters.next() {
         Some(first) => first.to_uppercase().collect::<String>() + characters.as_str(),
@@ -262,20 +204,15 @@ mod tests {
 
     #[test]
     fn a_header_and_body_round_trip() {
-        let header = Frontmatter {
-            name: "code-review".into(),
-            title: Some("Code review".into()),
-            description: "Use when reviewing a diff".into(),
-            skill_type: Some("code".into()),
-            origin: Some(SkillOrigin::Generated),
-        };
-        let rendered = render(&header, "# Steps\n\nRead the diff.");
+        let rendered = render(
+            "code-review",
+            "Use when reviewing a diff",
+            "# Steps\n\nRead the diff.",
+        );
         let (parsed, body) = parse(&rendered).expect("parse");
         assert_eq!(parsed.name, "code-review");
-        assert_eq!(parsed.display_name(), "Code review");
+        assert_eq!(humanize(&parsed.name), "Code review");
         assert_eq!(parsed.description, "Use when reviewing a diff");
-        assert_eq!(parsed.skill_type.as_deref(), Some("code"));
-        assert_eq!(parsed.origin, Some(SkillOrigin::Generated));
         assert!(body.contains("Read the diff."), "{body}");
     }
 
@@ -283,12 +220,8 @@ mod tests {
     /// the quoting has to survive a colon and a quote.
     #[test]
     fn a_quoted_description_comes_back_whole() {
-        let header = Frontmatter {
-            name: "x".into(),
-            description: "Use when the user says \"ship it\": carefully".into(),
-            ..Frontmatter::default()
-        };
-        let (parsed, _) = parse(&render(&header, "body")).expect("parse");
+        let rendered = render("x", "Use when the user says \"ship it\": carefully", "body");
+        let (parsed, _) = parse(&rendered).expect("parse");
         assert_eq!(
             parsed.description,
             "Use when the user says \"ship it\": carefully"
@@ -335,9 +268,23 @@ mod tests {
         assert_eq!(body, "body");
     }
 
+    /// A skill this app wrote before the fields were removed still loads: its
+    /// `metadata` block is skipped and its description survives.
     #[test]
-    fn an_empty_slug_is_humanized_rather_than_shown_bare() {
+    fn a_legacy_metadata_block_is_skipped() {
+        let (header, body) = parse(
+            "---\nname: x\nmetadata:\n  title: \"X\"\n  type: code\ndescription: d\n---\nbody",
+        )
+        .expect("parse");
+        assert_eq!(header.name, "x");
+        assert_eq!(header.description, "d");
+        assert_eq!(body, "body");
+    }
+
+    #[test]
+    fn a_slug_is_humanized_rather_than_shown_bare() {
         assert_eq!(humanize("code-review"), "Code review");
+        assert_eq!(humanize("code_review"), "Code review");
         assert_eq!(humanize(""), "");
     }
 }

@@ -435,7 +435,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   const [showMetrics, setShowMetrics] = useState(true);
   // Auto-speak is served by the same read-aloud path a press uses; the finished
   // reply hands the event listener a ref because the listener registers once.
-  const autoSpeakReplyRef = useRef<(text: string) => Promise<void> | null>(null);
+  const autoSpeakReplyRef = useRef<(text: string, key: string) => Promise<void> | null>(null);
   const [sendKey, setSendKey] = useState<"Enter" | "Ctrl + Enter">("Enter");
   // The empty screen greets by name when one was given; "" keeps the greeting's own wording.
   const [userName, setUserName] = useState("");
@@ -1262,7 +1262,11 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           // Auto-speak reads only what landed here: a background run's reply
           // belongs to another conversation, and a voice speaking it would be
           // narrating a page the reader is not looking at.
-          void autoSpeakReplyRef.current?.(response)?.catch(() => undefined);
+          //
+          // The real message key, not a private one: the reply's own Read button
+          // has to become Stop while it plays, or an automatic read has no
+          // control that can end it.
+          void autoSpeakReplyRef.current?.(response, `assistant-${next.length - 1}`)?.catch(() => undefined);
         }
         drainQueued(run.sessionId, next);
       } else if (payload.kind === "stopped") {
@@ -1799,7 +1803,12 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     // A step left running would keep counting from a timestamp nothing advances.
     if (run) run.activity = closeOpenSteps(run.activity);
     if (sessionId && sessionRunIdsRef.current.get(sessionId) === runId) sessionRunIdsRef.current.delete(sessionId);
-    if (run && sessionId) onActivityRef.current(sessionId, null);
+    // The run's own conversation, not the one on screen. A reply started in
+    // another conversation keeps running while the user reads this one, and
+    // clearing the current session's mark left that other row spinning in the
+    // sidebar after Cancel.
+    if (run) onActivityRef.current(run.sessionId, null);
+    else if (sessionId) onActivityRef.current(sessionId, null);
     setPendingApprovals([]);
     setPendingQuestions([]);
     if (sessionId === sessionIdRef.current) {
@@ -1900,7 +1909,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
    * whose engine is down waits, rather than spinning weights up in the reader's
    * back -- unless the switch says it may.
    */
-  const autoSpeakReply = async (text: string) => {
+  const autoSpeakReply = async (text: string, key: string) => {
     if (!text.trim()) return;
     const tts = await invoke<TtsSettings>("tts_settings").catch(() => null);
     if (!tts?.autoSpeak) return;
@@ -1908,10 +1917,26 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       const warm = await invoke<boolean>("tts_voice_warm").catch(() => false);
       if (!warm) return;
     }
-    // A key no press can be on, so the read-aloud guard treats it as its own.
-    speech.toggle(`auto-${Date.now()}`, text);
+    speech.toggle(key, text);
   };
   autoSpeakReplyRef.current = autoSpeakReply;
+
+  /**
+   * Esc ends the voice, wherever the reader is.
+   *
+   * A long reply scrolls its own Read/Stop button out of view, and the automatic
+   * read has no button of its own at all -- this is the one way to silence it
+   * from anywhere in the conversation.
+   */
+  const stopSpeech = speech.stop;
+  useEffect(() => {
+    if (!speech.speaking) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") stopSpeech();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [speech.speaking, stopSpeech]);
 
   // Dictation appends rather than replaces: a dictated sentence is usually the
   // start of a message the user was already typing.
@@ -2175,7 +2200,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
                     {/* Metadata and actions stay hidden until the message is hovered. `group-focus-within` keeps
                         them reachable for keyboard users, and the `min-h-8` row reserves the space up front so
                         revealing the bar never reflows the message text. */}
-                    <div className="mt-2 flex min-h-8 flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[var(--quiet)] opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+                    <div className={`mt-2 flex min-h-8 flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[var(--quiet)] transition-opacity ${speech.speaking === `assistant-${index}` ? "opacity-100" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"}`}>
                       {showMetrics && message.metrics && <span title={message.metrics.generation_rate_estimated ? "Generation rate estimated from response length" : "Generation rate reported by the local model server"}>{message.metrics.prompt_tokens != null ? `${message.metrics.prompt_tokens.toLocaleString()} prompt · ` : ""}{message.metrics.completion_tokens != null ? `${message.metrics.completion_tokens.toLocaleString()} completion · ` : ""}Prompt {message.metrics.prompt_seconds.toFixed(1)}s · Generation {message.metrics.generation_seconds.toFixed(1)}s · {message.metrics.generation_rate_estimated ? "~" : ""}{message.metrics.tokens_per_second.toFixed(1)} tok/s{message.metrics.prompt_eval_tokens_per_second != null ? ` · PP ${message.metrics.prompt_eval_tokens_per_second.toFixed(1)} tok/s` : ""}</span>}
                       <div className="flex items-center gap-1">
                         <button type="button" onClick={() => void copyMessage(message.content, index)} className="inline-flex min-h-8 items-center gap-1 rounded px-1.5 hover:bg-[var(--raised)] hover:text-[var(--text)]" aria-label={copiedIndex === index ? "Copied response" : "Copy response"} title={copiedIndex === index ? "Copied" : "Copy response"}>{copiedIndex === index ? <Check size={13} /> : <Clipboard size={13} />}<span>{copiedIndex === index ? "Copied" : "Copy"}</span></button>
@@ -2184,6 +2209,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
                             hidden, so the row does not change width once it is found. */}
                         <SpeechButton
                           active={speech.speaking === `assistant-${index}`}
+                          phase={speech.speaking === `assistant-${index}` ? speech.phase : null}
                           disabled={!speech.voice?.available || !message.content.trim()}
                           onPress={() => speech.toggle(`assistant-${index}`, message.content)}
                         />
@@ -2296,6 +2322,32 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
                   setPendingQuestions((current) => current.filter((entry) => entry.questionId !== questionId));
                 }}
               />
+            </div>
+          )}
+          {/* The voice is not tied to the message it came from: an automatic
+              read starts with no press, and a stopped read must be stoppable
+              without finding the reply it belongs to. This is the one control
+              that is always in reach, and Esc does the same thing. */}
+          {speech.speaking && (
+            <div className="mb-2 flex justify-center">
+              <button
+                type="button"
+                onClick={speech.stop}
+                aria-label="Stop reading aloud"
+                title="Stop reading aloud (Esc)"
+                className="inline-flex min-h-8 items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--panel)] px-3 text-[11px] text-[var(--muted)] transition-colors hover:border-[var(--line-strong)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+              >
+                {speech.phase === "playing" ? (
+                  <span className="pz-eq inline-flex h-3 items-end gap-[2px]" aria-hidden="true">
+                    <span className="h-1.5 w-[2px] rounded-sm bg-current" />
+                    <span className="h-3 w-[2px] rounded-sm bg-current" />
+                    <span className="h-2 w-[2px] rounded-sm bg-current" />
+                  </span>
+                ) : (
+                  <LoaderCircle size={12} className="animate-spin" />
+                )}
+                {speech.phase === "playing" ? "Reading aloud" : "Preparing voice"} · Stop
+              </button>
             </div>
           )}
           {/* The composer is a two-row card: the draft on top, controls on the

@@ -97,7 +97,7 @@ pub async fn spawn(arguments: Value, context: ToolContext) -> Result<String, Str
     // The kind narrows what the agent may do, not only what it is told. A
     // read-only agent is handed a gate whose access set has every writing
     // capability switched off, so even a cached or invented call is refused by
-    // `decide_with_access` -- the prompt and the gate agree, and the gate is the
+    // `decide_with_host_access` -- the prompt and the gate agree, and the gate is the
     // one that cannot be argued with.
     let kind = prompt::Kind::parse(arguments.get("type").and_then(Value::as_str));
     let approval = if kind.may_change() {
@@ -108,6 +108,9 @@ pub async fn spawn(arguments: Value, context: ToolContext) -> Result<String, Str
             terminal: false,
             subagents: false,
             jobs: false,
+            // MCP tools are writes by classification, so a read-only agent cannot
+            // reach them even when the server itself only reads.
+            mcp: false,
             // Reading, including the web, is exactly what an explore or plan agent
             // is for.
             read: true,
@@ -279,6 +282,13 @@ async fn run_agent(task: AgentTask) {
         &model,
         &messages,
         &[],
+        // A delegated run answers its parent, not the channel. Channel wording and
+        // delivery belong to the turn the user is actually reading. The general
+        // instructions, however, follow the same door as the parent: replacing
+        // them for Telegram must not leak them back through a delegated task.
+        None,
+        run.suppress_general_instructions,
+        None,
         // The configured effort wins; the parent's is the fallback. Resolved
         // here rather than by the runtime because the whole override is one
         // string the parent already carries.
@@ -515,6 +525,8 @@ mod tests {
             subagent_running: std::sync::atomic::AtomicUsize::new(0),
             local_context_window: None,
             jobs_created: std::sync::atomic::AtomicUsize::new(0),
+            delivery_target: None,
+            suppress_general_instructions: false,
         })
     }
 

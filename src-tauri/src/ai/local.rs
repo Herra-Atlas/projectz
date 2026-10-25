@@ -6,7 +6,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::Mutex,
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -108,6 +108,14 @@ pub struct LocalRuntimeStatus {
     pub loading_model_id: Option<String>,
     pub selected_model_id: Option<String>,
     pub base_url: String,
+    /// Unix seconds when this app spawned the server, so the header chip can
+    /// say how long it has been resident.
+    ///
+    /// `None` for a server this app did not start. That is not "unknown, guess
+    /// something": the honest answer is that the start time is unrecoverable,
+    /// and a duration invented here would be the only figure on screen that
+    /// nobody measured.
+    pub started_at: Option<i64>,
 }
 
 #[derive(Default)]
@@ -115,6 +123,8 @@ struct ProcessState {
     child: Option<Child>,
     loaded_model_id: Option<String>,
     loading_model_id: Option<String>,
+    /// Unix seconds when `child` was spawned, cleared with the process.
+    started_at: Option<i64>,
     /// Whether a scheduled job, rather than the interface, started this model.
     ///
     /// It decides who may stop it. A model the user asked for is theirs, so a job
@@ -364,12 +374,14 @@ impl LocalModelManager {
             process.child = None;
             process.loaded_model_id = None;
             process.loading_model_id = None;
+            process.started_at = None;
         }
         LocalRuntimeStatus {
             loaded_model_id: process.loaded_model_id.clone(),
             loading_model_id: process.loading_model_id.clone(),
             selected_model_id: self.selected_id(),
             base_url: format!("http://127.0.0.1:{SERVER_PORT}/v1"),
+            started_at: process.started_at,
         }
     }
 
@@ -520,6 +532,7 @@ impl LocalModelManager {
         let stderr = child.stderr.take();
         let child_id = child.id();
         process.child = Some(child);
+        process.started_at = Some(now_unix_seconds());
         drop(process);
         let manager = std::sync::Arc::clone(self);
         if let Some(stdout) = stdout {
@@ -558,9 +571,22 @@ impl LocalModelManager {
                         child_id == child.id() && child.try_wait().ok().flatten().is_none()
                     });
             if !still_running {
-                if manager.status().loading_model_id.is_none()
-                    && manager.status().loaded_model_id.is_none()
-                {
+                // Only the watcher that still owns the process may report on it.
+                // A stop, or a *later* load attempt, replaces the child; the old
+                // watcher then sees a process that is not its own and would
+                // otherwise fail the new attempt -- which is what made the second
+                // click on a model that had just failed kill the retry it started.
+                let owns_process = manager
+                    .process
+                    .lock()
+                    .map(|process| {
+                        process
+                            .child
+                            .as_ref()
+                            .is_some_and(|child| child.id() == child_id)
+                    })
+                    .unwrap_or(false);
+                if !owns_process {
                     return;
                 }
                 manager.confirm_failed(&model_id);
@@ -647,7 +673,17 @@ fn stop_process(process: &mut ProcessState) {
     }
     process.loaded_model_id = None;
     process.loading_model_id = None;
+    process.started_at = None;
     process.loaded_for_job = false;
+}
+
+/// Unix seconds, for the one fact the frontend cannot get anywhere else: when
+/// this app started the server it is showing.
+fn now_unix_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn port_is_available(port: u16) -> bool {

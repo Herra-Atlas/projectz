@@ -184,13 +184,29 @@ async fn create(arguments: Value, context: ToolContext) -> Result<String, String
         )
         .map_err(|error| error.to_string())?;
 
+    // A job asked for from Telegram reports back to that sender, even if this
+    // conversation is closed by the time it runs. A job from the app has no target
+    // and keeps the desktop notification only.
+    //
+    // A target that cannot be stored is a warning rather than a failure: the job
+    // itself is already written, and telling the model the call failed would make
+    // it schedule a duplicate.
+    let mut delivery_warning = String::new();
+    if let Some(target) = run.delivery_target.as_ref() {
+        if let Err(error) = crate::messaging::delivery::remember(&database, &job.id, target) {
+            tracing::warn!(job = %job.id, %error, "a job's channel target could not be stored");
+            delivery_warning =
+                " The job will run, but its channel reply could not be linked to it.".to_string();
+        }
+    }
+
     let when = match next_phrase(&job.next_run_at) {
         Some(at) => format!("first run {at}"),
         None => "no next run".to_string(),
     };
     Ok(format!(
         "Scheduled `{}`: {}. It runs in lane `{LANE}` with the tools this run has, and waits for \
-         the job before it in that lane to finish. {when}.",
+         the job before it in that lane to finish. {when}.{delivery_warning}",
         job.name,
         describe(&schedule),
     ))

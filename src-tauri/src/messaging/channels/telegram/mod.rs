@@ -34,7 +34,9 @@ use serde_json::{json, Value};
 use crate::database::Database;
 use crate::messaging::adapter::{Channel, ChannelFuture};
 use crate::messaging::settings::TelegramSettings;
-use crate::messaging::types::{Button, Capabilities, ChannelStatus, SentMessage};
+use crate::messaging::types::{
+    Button, Capabilities, ChannelStatus, DownloadedFile, InboundFile, OutboundFile, SentMessage,
+};
 use crate::messaging::Messaging;
 use client::TelegramClient;
 
@@ -151,6 +153,8 @@ impl Channel for Telegram {
             edit: true,
             typing: true,
             max_chars: MAX_MESSAGE_CHARS,
+            files: true,
+            delete: true,
         }
     }
 
@@ -176,6 +180,49 @@ impl Channel for Telegram {
                 return Err("The Telegram bot token is not set.".to_string());
             };
             client.send_message(to, text, buttons).await
+        })
+    }
+
+    fn download<'a>(
+        &'a self,
+        file: &'a InboundFile,
+    ) -> ChannelFuture<'a, Result<DownloadedFile, String>> {
+        Box::pin(async move {
+            let Some(client) = self.client() else {
+                return Err("The Telegram bot token is not set.".to_string());
+            };
+            let bytes = client.download_file(&file.id).await?;
+            Ok(DownloadedFile {
+                name: file.name.clone(),
+                mime_type: file.mime_type.clone(),
+                bytes,
+            })
+        })
+    }
+
+    fn send_file<'a>(
+        &'a self,
+        to: &'a str,
+        file: &'a OutboundFile,
+    ) -> ChannelFuture<'a, Result<SentMessage, String>> {
+        Box::pin(async move {
+            let Some(client) = self.client() else {
+                return Err("The Telegram bot token is not set.".to_string());
+            };
+            client.send_document(to, &file.path, &file.name).await
+        })
+    }
+
+    fn delete<'a>(
+        &'a self,
+        to: &'a str,
+        message_id: &'a str,
+    ) -> ChannelFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            let Some(client) = self.client() else {
+                return Err("The Telegram bot token is not set.".to_string());
+            };
+            client.delete_message(to, message_id).await
         })
     }
 
@@ -340,9 +387,10 @@ mod tests {
 
     /// The transport's limits are facts the core reads rather than assumes.
     #[test]
-    fn telegram_can_draw_buttons_and_edit() {
+    fn telegram_can_draw_buttons_edit_and_exchange_files() {
         let capabilities = channel().capabilities();
         assert!(capabilities.buttons && capabilities.edit && capabilities.typing);
+        assert!(capabilities.files && capabilities.delete);
         assert_eq!(capabilities.max_chars, 4_096);
     }
 

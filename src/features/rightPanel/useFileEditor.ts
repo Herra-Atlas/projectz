@@ -17,8 +17,14 @@ export type SaveState = "clean" | "dirty" | "saving" | "error";
  * The hook is still called -- it is a hook, so it cannot be skipped -- but it
  * reads nothing and writes nothing, which is what keeps a `.docx` from failing
  * with a UTF-8 error on its way to being drawn as a document.
+ *
+ * `skill` is the installed skill whose folder `path` is relative to, or `null`
+ * for the workspace. It rides on both the read and the write because a skill's
+ * `SKILL.md` is edited exactly like a project file -- that is the whole point of
+ * opening a skill in this editor -- and the backend resolves it with the same
+ * containment rule either way.
  */
-export function useFileEditor(path: string, enabled = true) {
+export function useFileEditor(path: string, enabled = true, skill: string | null = null) {
   const [text, setText] = useState<string | undefined>(undefined);
   const [savedText, setSavedText] = useState<string | null>(null);
   const [state, setState] = useState<SaveState>("clean");
@@ -44,7 +50,7 @@ export function useFileEditor(path: string, enabled = true) {
     setState("saving");
     setError(null);
     try {
-      await invoke("panel_write_file", { relative: path, content: value });
+      await invoke("panel_write_file", { relative: path, content: value, skill });
       savedRef.current = value;
       setSavedText(value);
       setState("clean");
@@ -52,7 +58,7 @@ export function useFileEditor(path: string, enabled = true) {
       setError(String(reason));
       setState("error");
     }
-  }, [path]);
+  }, [path, skill]);
 
   const flushRef = useRef<() => void>(() => undefined);
   flushRef.current = () => {
@@ -94,7 +100,7 @@ export function useFileEditor(path: string, enabled = true) {
     // Cleared before the early return, so switching from a text file to a
     // picture does not leave the old file's text on screen behind the preview.
     if (!enabled) return;
-    invoke<string>("panel_read_preview", { relative: path })
+    invoke<string>("panel_read_preview", { relative: path, skill })
       .then((value) => {
         if (!active) return;
         savedRef.current = value;
@@ -111,7 +117,7 @@ export function useFileEditor(path: string, enabled = true) {
       flushRef.current();
       clearTimer();
     };
-  }, [path, enabled, clearTimer]);
+  }, [path, enabled, skill, clearTimer]);
 
   return { text, savedText, state, error, set, retry, saveNow: () => flushRef.current() };
 }

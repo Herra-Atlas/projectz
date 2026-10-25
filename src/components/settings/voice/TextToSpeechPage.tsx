@@ -46,15 +46,21 @@ export function TextToSpeechPage({
   /** Painted first, then stored: the switch follows the press, and a failing
       save is reported rather than silently undone. */
   const flip = async (
-    field: "skipCode" | "skipMarkdown" | "autoSpeak" | "autoSpeakOnlyLoaded",
+    field:
+      | "skipCode"
+      | "skipMarkdown"
+      | "autoSpeak"
+      | "autoSpeakOnlyLoaded"
+      | "smartSpeak"
+      | "streamSpeech",
     next: boolean,
     command: string,
   ) => {
     if (settings === null) return;
     const previous = settings;
     setSettings({ ...settings, [field]: next });
-    // The two skip commands name their argument `skip`, the auto-speak ones `on`.
-    const args = field.startsWith("auto") ? { on: next } : { skip: next };
+    // The two skip commands name their argument `skip`, everything else `on`.
+    const args = field === "skipCode" || field === "skipMarkdown" ? { skip: next } : { on: next };
     try {
       await invoke(command, args);
     } catch (reason) {
@@ -73,39 +79,76 @@ export function TextToSpeechPage({
       </SettingsPageTitle>
       <SpeechSynthesisList onDownload={onDownload} onVoiceSettings={onVoiceSettings} notify={notify} />
 
-      <SettingsSection title="Reading replies">
+      <SettingsSection title="Speed">
         <SettingRow
-          anchor="tts.skipCode"
-          label="Skip code blocks"
-          description="Code in a reply is left out of what is spoken. Inline code too."
+          anchor="tts.streamSpeech"
+          label="Speak before the whole reply is ready"
+          description="Synthesizes the answer sentence by sentence and starts at once, staying a few sentences ahead of the voice. Off, the entire reply is made before the first word."
           control={
             settings !== null && (
               <Toggle
-                checked={settings.skipCode}
-                onChange={(next) => void flip("skipCode", next, "tts_set_skip_code")}
-                label="Skip code blocks"
+                checked={settings.streamSpeech}
+                onChange={(next) => void flip("streamSpeech", next, "tts_set_stream_speech")}
+                label="Speak before the whole reply is ready"
               />
             )
           }
         />
+      </SettingsSection>
+
+      <SettingsSection title="Smart speak">
         <SettingRow
-          anchor="tts.skipMarkdown"
-          label="Skip markdown syntax"
-          description="Symbols like **, # and [links] are left out, so the voice reads what you see — not what wrote it."
+          anchor="tts.smartSpeak"
+          label="Smart speak"
+          description="Tidies the text before it is read: code, markup and the separators left where either was removed. Off, the reply is spoken exactly as written."
           control={
             settings !== null && (
               <Toggle
-                checked={settings.skipMarkdown}
-                onChange={(next) => void flip("skipMarkdown", next, "tts_set_skip_markdown")}
-                label="Skip markdown syntax"
+                checked={settings.smartSpeak}
+                onChange={(next) => void flip("smartSpeak", next, "tts_set_smart_speak")}
+                label="Smart speak"
               />
             )
           }
         />
+        {/* Its sub-options. They do nothing while the master switch is off, so
+            showing them there would be two controls claiming an effect neither
+            has. */}
+        {settings?.smartSpeak && (
+          <>
+            <SettingRow
+              anchor="tts.skipCode"
+              label="Skip code blocks"
+              description="Code in a reply is left out of what is spoken. Inline code too."
+              control={
+                <Toggle
+                  checked={settings.skipCode}
+                  onChange={(next) => void flip("skipCode", next, "tts_set_skip_code")}
+                  label="Skip code blocks"
+                />
+              }
+            />
+            <SettingRow
+              anchor="tts.skipMarkdown"
+              label="Skip markdown syntax"
+              description="Symbols like **, # and [links] are left out, so the voice reads what you see — not what wrote it."
+              control={
+                <Toggle
+                  checked={settings.skipMarkdown}
+                  onChange={(next) => void flip("skipMarkdown", next, "tts_set_skip_markdown")}
+                  label="Skip markdown syntax"
+                />
+              }
+            />
+          </>
+        )}
+      </SettingsSection>
+
+      <SettingsSection title="Automatic reading">
         <SettingRow
           anchor="tts.autoSpeak"
           label="Auto speak next messages"
-          description="The chosen voice reads each new reply as it finishes, without being pressed."
+          description="The chosen voice reads each new reply in this conversation as it finishes, without being pressed. Other conversations, jobs and Telegram never speak."
           control={
             settings !== null && (
               <Toggle

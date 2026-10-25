@@ -29,6 +29,15 @@ type FilePreviewProps = {
   entry: TreeEntry;
   /** Absolute workspace path, so an HTML file can be handed to the browser. */
   workspace: string | null;
+  /**
+   * The installed skill whose folder `entry.path` is relative to, or null.
+   *
+   * Set when the Files view is drawing a skill rather than the workspace. It
+   * reaches the editor and every preview so the backend is told which root the
+   * path belongs to -- one argument, threaded once, rather than a second copy of
+   * the panel that only knows how to read skills.
+   */
+  skill?: string | null;
   onBack: () => void;
   /** Asked to show an HTML file in the Browser view rather than inline. */
   onPreviewInBrowser?: (fileUrl: string) => void;
@@ -36,10 +45,10 @@ type FilePreviewProps = {
   onNotify?: (tone: "success" | "error", message: string) => void;
 };
 
-export default function FilePreview({ entry, workspace, onBack, onPreviewInBrowser, onNotify }: FilePreviewProps) {
+export default function FilePreview({ entry, workspace, skill = null, onBack, onPreviewInBrowser, onNotify }: FilePreviewProps) {
   const kind = previewKindFor(entry.path);
   const renderedOnly = kind !== null && isRenderedOnly(kind);
-  const { text, state, error, set, retry, saveNow } = useFileEditor(entry.path, !renderedOnly);
+  const { text, state, error, set, retry, saveNow } = useFileEditor(entry.path, !renderedOnly, skill);
   const notifyRef = useRef(onNotify);
   notifyRef.current = onNotify;
   const lastErrorRef = useRef<string | null>(null);
@@ -90,10 +99,10 @@ export default function FilePreview({ entry, workspace, onBack, onPreviewInBrows
     // Each renderer reads what it needs and reports its own failures, so this is
     // a dispatch rather than a shared load: a document is a document, a picture
     // is a picture, and only the spreadsheet is parsed in Rust.
-    if (kind === "image") return <ImagePreview path={entry.path} />;
-    if (kind === "pdf") return <PdfPreview path={entry.path} />;
-    if (kind === "docx") return <DocxPreview path={entry.path} />;
-    if (kind === "xlsx") return <SheetPreview path={entry.path} />;
+    if (kind === "image") return <ImagePreview path={entry.path} skill={skill} />;
+    if (kind === "pdf") return <PdfPreview path={entry.path} skill={skill} />;
+    if (kind === "docx") return <DocxPreview path={entry.path} skill={skill} />;
+    if (kind === "xlsx") return <SheetPreview path={entry.path} skill={skill} />;
 
     if (text === undefined) {
       if (error) return <p className="px-3 py-2 text-xs text-[var(--danger)]">{error}</p>;

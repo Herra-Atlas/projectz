@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { FileText } from "lucide-react";
 import PreviewNote from "./PreviewNote";
 import { CONTENT_CLASS, CONTENT_STYLES } from "./contentStyles";
-import { useFileBytes } from "./useFileBytes";
+import { useFileBytes, type PreviewProps } from "./useFileBytes";
 
 /**
  * A Word document, rendered as it reads.
@@ -18,8 +18,8 @@ import { useFileBytes } from "./useFileBytes";
  * The library is imported when a Word file is actually opened, so its weight is
  * never paid by someone reading source code.
  */
-export default function DocxPreview({ path }: { path: string }) {
-  const { data, error } = useFileBytes(path);
+export default function DocxPreview({ path, skill = null }: PreviewProps) {
+  const { data, error } = useFileBytes(path, skill);
   const [html, setHtml] = useState<string | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
 

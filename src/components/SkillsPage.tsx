@@ -1,61 +1,80 @@
 import { useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Download, LoaderCircle, Plus, Search, Sparkles, X } from "lucide-react";
+import { Download, LoaderCircle, Plus, Search, X } from "lucide-react";
 import { ANCHOR_ATTRIBUTE, FlashHighlight, MARKABLE_ATTRIBUTE, SettingsPageTitle } from "./SettingsSection";
-import SkillCard from "./skills/SkillCard";
+import SkillRow from "./skills/SkillRow";
 import InstallSkillDialog from "./skills/InstallSkillDialog";
 import SkillsEmptyState from "./skills/SkillsEmptyState";
-import { useSkillList } from "../features/skills/useSkills";
+import { createSkill, useSkillList } from "../features/skills/useSkills";
 import type { Skill } from "../features/skills/types";
 import type { Notify } from "../features/notifications/types";
 
 /**
- * The skills wall: every folder the app knows, grouped by family.
+ * The skills list: one row per folder.
  *
- * **It does not edit.** Writing a skill happens on its own page, so this screen
- * only asks to go there. That keeps the form's draft state out of the list and
- * means the list has one job: let a reader find the skill they mean.
+ * **It does not edit.** A skill is a folder, and the app already has a folder
+ * editor -- the right panel's Files view. Opening a row hands the folder to that
+ * view and closes this window, so a skill is written in the tree the user already
+ * knows, with create, rename, drag and preview working on it, rather than in a
+ * form that could only ever do the one file.
  *
- * **Search above the groups, not a filter bar.** A user with twenty skills is
+ * **Search above the list, not a filter bar.** A user with twenty skills is
  * looking for one by name or by what it is for; a one-line field is the whole
  * affordance. It appears only once the list is long enough that scanning beats
  * typing, so a first-run screen stays quiet.
- *
- * **Disabled skills stay visible**, drawn on the quieter surface. Hiding them
- * would make "where did that skill go" answerable only by turning a filter back
- * on.
  */
 export default function SkillsPage({
   notify,
-  onOpenForm,
+  onOpenSkill,
 }: {
   notify: Notify;
-  /** Opens the create/edit page: the skill to edit, or `null` for a new one. */
-  onOpenForm: (skill: Skill | null) => void;
+  /** Opens a skill's folder in the right panel. */
+  onOpenSkill: (slug: string) => void;
 }) {
   const { skills, loading, failed, reload } = useSkillList();
   const [query, setQuery] = useState("");
   const [installing, setInstalling] = useState(false);
+  const [busy, setBusy] = useState(false);
 
-  const on = skills.filter((skill) => skill.enabled).length;
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) return skills;
     return skills.filter((skill) =>
-      [skill.name, skill.slug, skill.description ?? "", skill.skill_type ?? ""]
-        .join(" ")
-        .toLowerCase()
-        .includes(needle),
+      [skill.name, skill.slug, skill.description ?? ""].join(" ").toLowerCase().includes(needle),
     );
   }, [skills, query]);
-  const grouped = groupByType(filtered);
 
-  const toggle = async (skill: Skill) => {
+  /**
+   * Makes a new skill and opens it.
+   *
+   * The name is asked for with the browser's own prompt rather than a page of the
+   * settings window: a skill's only required field is its name, the folder is
+   * where every other part of it is written, and a whole page to collect one
+   * string would close again a second later.
+   */
+  const create = async () => {
+    const name = window.prompt("Name the skill", "")?.trim();
+    if (!name) return;
+    setBusy(true);
     try {
-      await invoke("skills_set_enabled", { slug: skill.slug, enabled: !skill.enabled });
+      const skill = await createSkill(name);
+      await reload();
+      onOpenSkill(skill.slug);
+    } catch (reason) {
+      notify("error", `Could not create the skill: ${String(reason)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (skill: Skill) => {
+    if (!window.confirm(`Delete the skill "${skill.name}" and everything in its folder?`)) return;
+    try {
+      await invoke("skills_delete", { slug: skill.slug });
+      notify("success", `${skill.name} deleted`);
       await reload();
     } catch (reason) {
-      notify("error", `Could not change this skill: ${String(reason)}`);
+      notify("error", `Could not delete this skill: ${String(reason)}`);
     }
   };
 
@@ -67,7 +86,7 @@ export default function SkillsPage({
           <p className="mt-0.5 text-[11.5px] text-[var(--quiet)]">
             {skills.length === 0
               ? "Reusable methods the agent reads when they apply."
-              : `${skills.length} skill${skills.length === 1 ? "" : "s"} · ${on} offered to the agent`}
+              : `${skills.length} skill${skills.length === 1 ? "" : "s"} · every one offered to the agent`}
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -83,11 +102,12 @@ export default function SkillsPage({
           <button
             type="button"
             {...{ [ANCHOR_ATTRIBUTE]: "skills.list", [MARKABLE_ATTRIBUTE]: "" }}
-            onClick={() => onOpenForm(null)}
-            className="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-[var(--accent)] px-3.5 text-[12.5px] font-semibold text-[var(--accent-ink)] transition-opacity hover:opacity-90 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+            onClick={() => void create()}
+            disabled={busy}
+            className="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-[var(--accent)] px-3.5 text-[12.5px] font-semibold text-[var(--accent-ink)] transition-opacity hover:opacity-90 disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
           >
             <FlashHighlight anchor="skills.list" />
-            <Plus size={14} /> New skill
+            {busy ? <LoaderCircle size={14} className="animate-spin" /> : <Plus size={14} />} New skill
           </button>
         </div>
       </SettingsPageTitle>
@@ -101,11 +121,11 @@ export default function SkillsPage({
           Skills could not be read: {failed}
         </p>
       ) : skills.length === 0 ? (
-        <SkillsEmptyState onCreate={() => onOpenForm(null)} />
+        <SkillsEmptyState onCreate={() => void create()} />
       ) : (
         <>
           {skills.length > 5 && (
-            <div className="mb-5 flex items-center gap-2">
+            <div className="mb-4 flex items-center gap-2">
               <label className="relative block w-full max-w-xs">
                 <Search
                   size={13}
@@ -142,35 +162,18 @@ export default function SkillsPage({
               Nothing matches “{query}”.
             </p>
           ) : (
-            <div className="space-y-7">
-              {grouped.map(([label, group]) => (
-                <section key={label}>
-                  <div className="mb-3 flex items-baseline gap-2">
-                    <h3 className="text-[11px] font-semibold uppercase tracking-wide text-[var(--quiet)]">
-                      {label}
-                    </h3>
-                    <span className="text-[10.5px] text-[var(--quiet)]">{group.length}</span>
-                  </div>
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    {group.map((skill) => (
-                      <SkillCard
-                        key={skill.slug}
-                        skill={skill}
-                        onOpen={onOpenForm}
-                        onToggle={(target) => void toggle(target)}
-                      />
-                    ))}
-                  </div>
-                </section>
+            <div className="overflow-hidden rounded-lg border border-[var(--line)]">
+              {filtered.map((skill, index) => (
+                <SkillRow
+                  key={skill.slug}
+                  skill={skill}
+                  index={index}
+                  onOpen={(target) => onOpenSkill(target.slug)}
+                  onDelete={(target) => void remove(target)}
+                />
               ))}
             </div>
           )}
-
-          <p className="mt-7 flex items-center gap-1.5 text-[10.5px] text-[var(--quiet)]">
-            <Sparkles size={11} aria-hidden />
-            Skills live in <code>skills/</code> beside the app's data. Edit them here or in any
-            text editor.
-          </p>
         </>
       )}
 
@@ -181,31 +184,10 @@ export default function SkillsPage({
             setInstalling(false);
             void reload();
             notify("success", `${skill.name} installed`);
-            onOpenForm(skill);
+            onOpenSkill(skill.slug);
           }}
         />
       )}
     </div>
   );
-}
-
-/**
- * Groups by the free-text label.
- *
- * Unlabelled skills are collected under one heading rather than each floating on
- * its own, because most skills have no label and a section per skill would be a
- * heading per card. Unlabelled sorts last: it is the absence of a choice, not a
- * choice.
- */
-function groupByType(skills: Skill[]): [string, Skill[]][] {
-  const groups = new Map<string, Skill[]>();
-  for (const skill of skills) {
-    const label = skill.skill_type?.trim() || "Unlabelled";
-    groups.set(label, [...(groups.get(label) ?? []), skill]);
-  }
-  return [...groups.entries()].sort(([left], [right]) => {
-    if (left === "Unlabelled") return 1;
-    if (right === "Unlabelled") return -1;
-    return left.localeCompare(right);
-  });
 }

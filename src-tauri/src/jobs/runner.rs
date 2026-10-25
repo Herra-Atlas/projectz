@@ -52,6 +52,9 @@ pub struct Outcome {
     pub reason: Option<String>,
     /// The session the run was saved as.
     pub session_id: String,
+    /// The agent's answer, so a channel that asked for the job can be sent it
+    /// rather than only a status line.
+    pub content: String,
 }
 
 /// Runs one job to completion.
@@ -84,6 +87,7 @@ pub async fn run(app: &AppHandle, runtime: &AiRuntime, job: &Job, run_id: &str) 
                 status: "failed",
                 reason: Some(format!("workspace: {error}")),
                 session_id,
+                content: String::new(),
             };
         }
     }
@@ -116,6 +120,7 @@ async fn execute(
                         status: "failed",
                         reason: Some(reason),
                         session_id: session_id.to_string(),
+                        content: String::new(),
                     };
                 }
             };
@@ -158,6 +163,13 @@ async fn execute(
             // A job starts a conversation rather than continuing one, so there is
             // no stored record to preserve.
             stored_messages: Vec::new(),
+            // A job's own run carries no channel files or prompt overlay. Its
+            // completion is delivered through the target remembered when it was
+            // scheduled, not through this run.
+            attachments: Vec::new(),
+            additional_instructions: None,
+            suppress_general_instructions: false,
+            delivery: None,
             endpoint_id,
             local_model,
             model,
@@ -186,11 +198,13 @@ async fn execute(
             status: "failed",
             reason: Some(reason),
             session_id: session_id.to_string(),
+            content: String::new(),
         },
         None => Outcome {
             status: "completed",
             reason: None,
             session_id: session_id.to_string(),
+            content: result.content,
         },
     };
     // Asked after every run rather than only local ones: a job on a provider model

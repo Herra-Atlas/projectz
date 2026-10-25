@@ -21,6 +21,7 @@ mod fetch;
 mod file;
 mod glob;
 mod grep;
+pub mod host;
 mod output;
 mod paths;
 mod policy;

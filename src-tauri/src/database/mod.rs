@@ -11,9 +11,7 @@ use crate::ai::{
     remote::types::Endpoint,
 };
 
-pub mod bundled_skills;
 pub mod jobs;
-pub mod skills;
 pub mod statistics;
 pub mod taste;
 pub mod transcripts;
@@ -401,10 +399,10 @@ impl Database {
                 [format!("local.runtime.{id}")],
             )
             .map_err(|error| error.to_string())?;
-        // The model's engine goes with it. Left behind it would keep the
-        // engine it names looking referenced -- `engines::is_referenced` counts
-        // a model's engine as a reason not to uninstall -- so an engine
-        // nothing can reach would be permanently unremovable.
+        // The model's engine goes with it. Left behind it would be a setting
+        // naming a model that no longer exists, which is one row of debris per
+        // deleted model and one more thing the engine-removal pass has to read.
+        // An engine is never kept installed by a model that is gone.
         connection
             .execute(
                 "DELETE FROM settings WHERE key=?1",
@@ -1773,37 +1771,28 @@ fn migrate(connection: &mut Connection) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
         tx.commit().map_err(|error| error.to_string())?;
     }
-    // Skill *state*, now that skill *content* lives on disk.
+    // Skill state is gone, and the table with it.
     //
     // A skill is a folder -- `SKILL.md` plus whatever scripts and references it
-    // carries -- because that is the only shape that can hold the files. What is
-    // left for the database is the handful of facts that are the app's rather
-    // than the skill's: whether it is offered, whether its scripts may run, and
-    // how often it has been read. Keyed by the folder's slug, which is also the
-    // spec's `name`, so the two can never disagree about identity.
+    // carries -- and the folder is the whole record: its name is the label, its
+    // description is the trigger, its presence is whether it is offered, and a
+    // script inside it is what `skill_run` may execute. `skill_state` held a
+    // second copy of each of those facts, kept in step by writes that could be
+    // missed (an edit in Explorer, a folder copied in by hand), so it has been
+    // dropped rather than left as a table nothing reads.
     //
-    // `trusted` starts at 0 deliberately. Writing a skill is not permission to
-    // execute one: a script is arbitrary code, and the user has to say so once.
-    //
-    // **Unconditional, unlike the blocks above.** Those compare against a version
-    // read before migration 8, which is the last one to stamp the final version
-    // into the database; a fresh install therefore reports the latest number while
-    // still needing the blocks after it. `IF NOT EXISTS` is the idempotent guard
-    // here, and running it on every launch costs one no-op statement.
+    // **Dropped rather than deleted from a migration bump alone.** An install
+    // that has never had the table is unaffected; one that has gets its rows
+    // discarded on the first launch after this, which is correct because the
+    // folders beside them are already the truth. `DROP TABLE IF EXISTS` is the
+    // idempotent guard, and the unconditional block runs on every launch at the
+    // cost of one no-op statement.
     {
         let tx = connection
             .transaction()
             .map_err(|error| error.to_string())?;
         tx.execute_batch(&format!(
-            "CREATE TABLE IF NOT EXISTS skill_state (
-                 slug TEXT PRIMARY KEY,
-                 enabled INTEGER NOT NULL DEFAULT 1,
-                 trusted INTEGER NOT NULL DEFAULT 0,
-                 use_count INTEGER NOT NULL DEFAULT 0,
-                 created_at TEXT NOT NULL,
-                 updated_at TEXT NOT NULL
-             );
-             CREATE INDEX IF NOT EXISTS idx_skill_state_enabled ON skill_state(enabled);
+            "DROP TABLE IF EXISTS skill_state;
              PRAGMA user_version={LATEST_SCHEMA_VERSION};"
         ))
         .map_err(|error| error.to_string())?;

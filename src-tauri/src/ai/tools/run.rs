@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use crate::ai::remote::types::Endpoint;
-use crate::ai::types::{ChatEvent, ReasoningEffort};
+use crate::ai::types::{ChatEvent, DeliveryTarget, ReasoningEffort};
 
 use super::ApprovalGate;
 
@@ -103,6 +103,17 @@ pub struct RunHandle {
     /// than in the database because it is not a fact worth keeping: a restarted app
     /// has no reply in flight to count for.
     pub jobs_created: std::sync::atomic::AtomicUsize,
+    /// The channel and sender this run answers, when it came from outside.
+    ///
+    /// `schedule_job` copies it onto the job so its later completion can be sent
+    /// back to the person who asked, rather than announced to every allowed id.
+    pub delivery_target: Option<DeliveryTarget>,
+    /// Whether a run started from this one also replaces the app instructions.
+    ///
+    /// A sub-agent follows the same door as its parent: a Telegram conversation
+    /// that uses Communication instructions must not leak the general ones back
+    /// in through a delegated task.
+    pub suppress_general_instructions: bool,
 }
 
 /// One sub-agent reporting that it has finished, so the panel can refresh.

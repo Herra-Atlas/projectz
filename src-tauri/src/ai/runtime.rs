@@ -120,8 +120,11 @@ impl AiRuntime {
         &self,
         mode: crate::ai::tools::PermissionMode,
         access: crate::ai::tools::AccessSet,
+        host_access: crate::ai::tools::AccessSet,
     ) -> crate::ai::tools::ApprovalGate {
-        self.approval.with_mode(mode).with_access(access)
+        self.approval
+            .with_mode(mode)
+            .with_host_access(access, host_access)
     }
 
     /// Re-points the level a reply in flight decides at.
@@ -709,7 +712,15 @@ impl AiRuntime {
         // be held for the run's life: a level chosen in the composer while the reply
         // streams is re-pointed onto this gate (`ai_set_run_permission`), so the
         // level on screen is the level the run is using.
-        let gate = self.approval_gate(request.permission, request.access.unwrap_or_default());
+        // The host's switches are the outer ceiling for every run, whether it came
+        // from the composer, a job or a phone. Intersected here rather than inside
+        // each caller, so a new door cannot forget it.
+        let host_access = crate::ai::tools::host::load(self.database.as_ref());
+        let gate = self.approval_gate(
+            request.permission,
+            request.access.unwrap_or_default().within(host_access),
+            host_access,
+        );
         self.live_gates
             .lock()
             .unwrap()
@@ -721,7 +732,6 @@ impl AiRuntime {
 
         let run_id_clone = run_id.clone();
         let session_id_clone = session_id.clone();
-        self.record_skill_uses(&request.skill_ids);
         // Resolved once here rather than inside a tool, because turning the stored
         // selection into a live endpoint needs the model registry, which the tool
         // does not have.
@@ -815,6 +825,9 @@ impl AiRuntime {
                 &model,
                 &request.messages,
                 &request.attachments,
+                request.additional_instructions.as_deref(),
+                request.suppress_general_instructions,
+                request.delivery.clone(),
                 request.reasoning.clone(),
                 request.web_search_enabled,
                 request.mode,
@@ -951,22 +964,6 @@ impl AiRuntime {
                     error: Some(err),
                 }
             }
-        }
-    }
-
-    /// Counts the skills a run applied.
-    ///
-    /// Ids only, and deliberately not the instructions: the frontend already built
-    /// those into the message list, so resolving them again here would be a second
-    /// implementation of the same fact, free to disagree with the one the model was
-    /// actually sent.
-    ///
-    /// **An id that no longer resolves costs nothing.** A skill can be deleted in
-    /// Settings while a run is in flight, and the counter is the only thing lost --
-    /// the reply keeps the instructions that were already sent.
-    fn record_skill_uses(&self, ids: &[String]) {
-        for id in ids {
-            self.database.record_skill_use(id);
         }
     }
 }

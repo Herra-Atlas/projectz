@@ -212,6 +212,11 @@ pub async fn stream_chat(
     model: &str,
     messages: &[ChatMessage],
     attachments: &[ChatAttachment],
+    additional_instructions: Option<&str>,
+    suppress_general_instructions: bool,
+    // Where this run came from, when a tool it calls -- `schedule_job` -- has to
+    // remember how to reach the person later.
+    delivery: Option<crate::ai::types::DeliveryTarget>,
     reasoning: ReasoningEffort,
     web_search_enabled: bool,
     mode: crate::ai::tools::ToolMode,
@@ -274,7 +279,13 @@ pub async fn stream_chat(
     // edit could be answered from the cache with the pre-edit file.
     // See `ToolCache::next_stamp`.
 
-    let mut conversation = prepend_environment(payload, mode, database);
+    let mut conversation = prepend_environment(
+        payload,
+        mode,
+        database,
+        additional_instructions,
+        suppress_general_instructions,
+    );
     // **Compression is a boundary, never a step.** It is decided once, from the
     // previous reply's measured prompt size, before this run sends anything. The
     // loop below deliberately does not re-check it: a run that crosses the trigger
@@ -370,6 +381,8 @@ pub async fn stream_chat(
         local_context_window,
         // Counted per run, so the ceiling is on what this reply may arrange.
         jobs_created: std::sync::atomic::AtomicUsize::new(0),
+        delivery_target: delivery,
+        suppress_general_instructions,
     });
     for round in 0..limits.rounds {
         if cancelled.load(Ordering::Relaxed) {
@@ -1453,8 +1466,8 @@ async fn stream_completion(
 ///
 /// **The skill catalogue is Agent-only and does not move when a skill is read.**
 /// Reading a skill is a tool call, which grows the conversation rather than this
-/// prefix; only editing or disabling a skill rewrites the catalogue, which is the
-/// honest cost of it being here at all.
+/// prefix; only editing, adding or removing a skill folder rewrites the
+/// catalogue, which is the honest cost of it being here at all.
 ///
 /// **The root in the note is a deliberate exception to cache stability.** Naming
 /// the folder means the prefix changes when the user switches workspace, so the
@@ -1467,6 +1480,8 @@ fn prepend_environment(
     mut messages: Vec<Value>,
     mode: crate::ai::tools::ToolMode,
     database: Option<&Arc<crate::database::Database>>,
+    additional_instructions: Option<&str>,
+    suppress_general_instructions: bool,
 ) -> Vec<Value> {
     // Only an Agent run touches the machine: its filesystem and terminal tools are
     // the ones that need to be told the shell and the workspace root. A Chat run
@@ -1478,19 +1493,31 @@ fn prepend_environment(
     // prepended by the chat view, which meant a run started anywhere else -- a job, a
     // message from a phone -- silently dropped them. The prompt is the app's, so it is
     // assembled here where every caller gets it.
-    if let Some(instructions) = database.and_then(|database| {
-        database
-            .setting::<serde_json::Value>("app.general")
-            .and_then(|general| {
-                general
-                    .get("instructions")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::trim)
-                    .filter(|text| !text.is_empty())
-                    .map(str::to_string)
-            })
-    }) {
-        sections.push(instructions);
+    if !suppress_general_instructions {
+        if let Some(instructions) = database.and_then(|database| {
+            database
+                .setting::<serde_json::Value>("app.general")
+                .and_then(|general| {
+                    general
+                        .get("instructions")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty())
+                        .map(str::to_string)
+                })
+        }) {
+            sections.push(instructions);
+        }
+    }
+    // The door's own rules -- a channel's plain-text note, its shared
+    // instructions and the sender's profile. More specific than the general
+    // instructions, and before the environment so a messaging run still knows
+    // which machine and folder it is on.
+    if let Some(additional) = additional_instructions
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        sections.push(additional.to_string());
     }
     if let Some(note) = crate::ai::prompts::chat::environment_note(
         machine_tools,
@@ -1503,9 +1530,7 @@ fn prepend_environment(
     // rather than a message of its own, because llama.cpp rejects a `system` turn
     // that is not first.
     if machine_tools {
-        if let Some(catalogue) =
-            crate::ai::tools::skills::index(database.map(|database| database.as_ref()))
-        {
+        if let Some(catalogue) = crate::ai::tools::skills::index() {
             sections.push(catalogue);
         }
     }

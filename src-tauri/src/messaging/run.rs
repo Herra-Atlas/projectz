@@ -15,18 +15,19 @@
 //! are the ones every other run has, and the conversation opens in the chat view
 //! like any other.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::Value;
 
 use crate::ai::run::{run_prompt, PromptRun};
-use crate::ai::types::{ChatEvent, ChatMessage};
+use crate::ai::tools::ToolMode;
+use crate::ai::types::{ChatAttachment, ChatEvent, ChatMessage, DeliveryTarget};
 use crate::messaging::adapter::Channel;
 use crate::messaging::commands::{self, selection_label};
 use crate::messaging::session;
+use crate::messaging::settings::MessagingSettings;
 use crate::messaging::types::{Button, Inbound};
-use crate::messaging::{format, local, relay, ChatState, Messaging};
+use crate::messaging::{files, format, local, profiles, prompt, relay, ChatState, Messaging};
 
 pub async fn handle(
     hub: Arc<Messaging>,
@@ -44,7 +45,7 @@ pub async fn handle(
     }
 
     let text = inbound.text.trim().to_string();
-    if text.is_empty() {
+    if text.is_empty() && inbound.files.is_empty() {
         return Ok(());
     }
 
@@ -53,10 +54,13 @@ pub async fn handle(
     }
 
     // A typed answer to an `ask_user` belongs to the parked run, not to a new one.
-    if let Some(question_id) = hub.state(&key).question.clone() {
-        hub.update_state(&key, |state| state.question = None);
-        if hub.runtime().answer_question(&question_id, text.clone()) {
-            return say(channel.as_ref(), &inbound.chat_id, "Answered.").await;
+    // A message that also carries a file is a new turn, not an answer.
+    if inbound.files.is_empty() {
+        if let Some(question_id) = hub.state(&key).question.clone() {
+            hub.update_state(&key, |state| state.question = None);
+            if hub.runtime().answer_question(&question_id, text.clone()) {
+                return say(channel.as_ref(), &inbound.chat_id, "Answered.").await;
+            }
         }
     }
 
@@ -114,7 +118,24 @@ async fn converse(
     text: String,
 ) -> Result<(), String> {
     let settings = hub.settings();
+    let user = settings.user(&inbound.user_id);
     let state = hub.state(&key);
+    // A mode picked with `/new` belongs to the conversation; a stored session's
+    // own record is the fallback after a restart; this sender's default is last.
+    // `mode_for` also applies their own "Agent off" ceiling.
+    let session_mode = state
+        .session_id
+        .as_deref()
+        .and_then(|id| session::mode(hub.database().as_ref(), id));
+    let mode = user.mode_for(state.mode.or(session_mode));
+    if !inbound.files.is_empty() && !settings.allow_files {
+        return say(
+            channel.as_ref(),
+            &inbound.chat_id,
+            "File exchange is turned off in Settings → Communications.",
+        )
+        .await;
+    }
     let selections = candidates(&hub, &state);
     let Some(first) = selections.first() else {
         return say(
@@ -129,13 +150,13 @@ async fn converse(
     // A local model has to be running before it can answer, and loading one stops
     // whatever the window is using. Ask, rather than replacing it silently.
     if let Some((_, name)) = unloaded_local(&hub, first) {
-        if !settings.allow_local_start {
+        if !user.allow_local_start {
             return say(
                 channel.as_ref(),
                 &inbound.chat_id,
                 &format!(
-                    "{name} is not loaded. Load it in ProjectZ, or turn on \
-                     \"Let Telegram start a local model\" in Settings → Communications."
+                    "{name} is not loaded. Load it in ProjectZ, or ask the host to allow \
+                     starting a local model for your Telegram id."
                 ),
             )
             .await;
@@ -168,8 +189,47 @@ async fn converse(
     if state.session_id.as_deref() != Some(session_id.as_str()) {
         hub.bind_session(&key, Some(session_id.clone()));
     }
+    if inbound.files.iter().any(files::is_audio) && !user.allow_stt_start {
+        return say(
+            channel.as_ref(),
+            &inbound.chat_id,
+            "You don't have access to start the speech-to-text engine.",
+        )
+        .await;
+    }
+    // Files are fetched once, before any model is tried, so a fallback does not
+    // download the same bytes again or leave a second workspace copy.
+    let prepared = match files::prepare_inbound(
+        hub.as_ref(),
+        channel.as_ref(),
+        &inbound,
+        mode == ToolMode::Agent,
+        &inbound.user_id,
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(reason) => {
+            return say(
+                channel.as_ref(),
+                &inbound.chat_id,
+                &format!("Could not read the attachment: {reason}"),
+            )
+            .await;
+        }
+    };
+
+    let title_source = if text.trim().is_empty() {
+        inbound
+            .files
+            .first()
+            .map(|file| file.name.clone())
+            .unwrap_or_else(|| "Message".to_string())
+    } else {
+        text.clone()
+    };
     let title = session::existing_title(database, &session_id)
-        .unwrap_or_else(|| session::title_from(&text));
+        .unwrap_or_else(|| session::title_from(&title_source));
     let created_at = session::created_at(database, &session_id);
     // Two lists: what the model is sent, and what the store gets back. The second is
     // the record as it was plus this turn, because flattening it would delete fields
@@ -178,9 +238,36 @@ async fn converse(
     let mut messages = session::to_messages(&stored);
     messages.push(ChatMessage {
         role: "user".to_string(),
-        content: text.clone(),
+        content: prepared.prompt,
     });
-    stored.push(serde_json::json!({ "role": "user", "content": text }));
+    stored.push(serde_json::json!({ "role": "user", "content": prepared.stored }));
+
+    let turn = Turn {
+        session_id,
+        title,
+        created_at,
+        messages,
+        stored,
+        attachments: prepared.attachments,
+        workspace: prepared.workspace,
+        instructions: prompt::instructions(
+            &settings,
+            profiles::get(
+                &crate::messaging::storage::base(hub.as_ref())?,
+                &inbound.user_id,
+            )
+            .await
+            .as_deref(),
+        ),
+        suppress_general_instructions: !settings.instructions.trim().is_empty(),
+        permission: user.permission,
+        access: user.access,
+        delivery: DeliveryTarget {
+            channel: channel.id().to_string(),
+            user_id: inbound.user_id.clone(),
+            chat_id: inbound.chat_id.clone(),
+        },
+    };
 
     let total = selections.len();
     let mut last_error: Option<String> = None;
@@ -191,13 +278,10 @@ async fn converse(
             &channel,
             &key,
             &inbound.chat_id,
-            &session_id,
-            &title,
-            &created_at,
-            &messages,
-            &stored,
+            &turn,
             selection,
             &settings,
+            mode,
         )
         .await
         {
@@ -229,23 +313,36 @@ async fn converse(
     .await
 }
 
+/// Everything one turn needs, prepared once so every model fallback starts from
+/// the same history and the same files.
+struct Turn {
+    session_id: String,
+    title: String,
+    created_at: String,
+    messages: Vec<ChatMessage>,
+    stored: Vec<Value>,
+    attachments: Vec<ChatAttachment>,
+    workspace: std::path::PathBuf,
+    instructions: String,
+    suppress_general_instructions: bool,
+    permission: crate::ai::tools::PermissionMode,
+    access: crate::ai::tools::AccessSet,
+    delivery: DeliveryTarget,
+}
+
 /// One model's turn: the request, the run, and the state it leaves behind.
 ///
 /// The conversation is passed in rather than loaded here, so every fallback attempt
 /// starts from the same history -- see the note where it is built.
-#[allow(clippy::too_many_arguments)]
 async fn attempt(
     hub: &Arc<Messaging>,
     channel: &Arc<dyn Channel>,
     key: &str,
     chat: &str,
-    session_id: &str,
-    title: &str,
-    created_at: &str,
-    messages: &[ChatMessage],
-    stored: &[Value],
+    turn: &Turn,
     selection: &Value,
-    settings: &crate::messaging::settings::MessagingSettings,
+    settings: &MessagingSettings,
+    mode: ToolMode,
 ) -> Result<crate::ai::run::PromptOutcome, String> {
     let is_local = selection
         .get("localModelId")
@@ -269,15 +366,13 @@ async fn attempt(
     let run_id = uuid::Uuid::new_v4().to_string();
     hub.update_state(key, |state| state.last_run = Some(run_id.clone()));
 
-    // A message may name the folder it works in; `None` leaves the user's open
-    // workspace alone. The tools resolve against a process-global root, so it is
-    // put in place for the run and restored afterwards -- on every path.
+    // Every Telegram turn runs in that sender's fixed app-data workspace. The
+    // tools resolve against a process-global root, so it is put in place for the
+    // run and restored afterwards -- on every path.
     let previous_root = crate::ai::tools::workspace::root();
-    if let Some(path) = settings.workspace.as_deref() {
-        if let Err(error) = crate::ai::tools::workspace::set_root(Path::new(path)) {
-            hub.update_state(key, |state| state.last_run = None);
-            return Err(format!("That workspace cannot be used: {error}"));
-        }
+    if let Err(error) = crate::ai::tools::workspace::set_root(&turn.workspace) {
+        hub.update_state(key, |state| state.last_run = None);
+        return Err(format!("That Telegram workspace cannot be used: {error}"));
     }
 
     let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<ChatEvent>();
@@ -287,6 +382,8 @@ async fn attempt(
         key.to_string(),
         chat.to_string(),
         receiver,
+        mode == ToolMode::Agent,
+        settings.allow_files,
     ));
     let relay_sender = sender.clone();
     let on_event: Arc<dyn Fn(&ChatEvent) + Send + Sync> = Arc::new(move |event| {
@@ -303,22 +400,24 @@ async fn attempt(
         hub.runtime(),
         PromptRun {
             run_id,
-            session_id: session_id.to_string(),
-            title: title.to_string(),
+            session_id: turn.session_id.clone(),
+            title: turn.title.clone(),
             kind: "telegram".to_string(),
-            messages: messages.to_vec(),
-            stored_messages: stored.to_vec(),
+            messages: turn.messages.clone(),
+            stored_messages: turn.stored.clone(),
+            attachments: turn.attachments.clone(),
+            additional_instructions: Some(turn.instructions.clone()),
+            suppress_general_instructions: turn.suppress_general_instructions,
+            delivery: Some(turn.delivery.clone()),
             endpoint_id,
             local_model,
             model: model_name,
             provider_label,
-            mode: settings.mode,
-            permission: settings.permission,
-            // `jobs` is already off in the stored record; the runtime enforces it
-            // again in `ai::run`, so a hand-edited record cannot schedule work.
-            access: settings.access,
-            web_search: settings.access.web,
-            created_at: created_at.to_string(),
+            mode,
+            permission: turn.permission,
+            access: turn.access,
+            web_search: turn.access.web,
+            created_at: turn.created_at.clone(),
             on_event: Some(on_event),
         },
     )
@@ -484,6 +583,24 @@ async fn action(
             });
             return Ok(());
         }
+    } else if data.starts_with("ul:") {
+        acknowledgement = crate::messaging::local_menu::handle(
+            &hub,
+            channel.as_ref(),
+            &inbound.chat_id,
+            &inbound.user_id,
+            &data,
+        )
+        .await?;
+    } else if data.starts_with("u:") {
+        acknowledgement = crate::messaging::profile_menu::handle(
+            &hub,
+            channel.as_ref(),
+            &inbound.chat_id,
+            &inbound.user_id,
+            &data,
+        )
+        .await?;
     } else if let Some(index) = data.strip_prefix("m:") {
         let choices = hub.state(&key).choices;
         if let Some(choice) = index
@@ -500,22 +617,53 @@ async fn action(
         hub.update_state(&key, |state| {
             state.question = None;
             state.choices.clear();
+            // The chosen conversation's own stored mode is what applies now.
+            state.mode = None;
         });
         acknowledgement = "Switched conversation. Send a message to continue it.".to_string();
-    } else if data == "n:1" {
-        hub.bind_session(&key, None);
-        hub.update_state(&key, |state| {
-            state.question = None;
-            state.choices.clear();
-        });
-        acknowledgement = "New conversation.".to_string();
+    } else if data == "n:new" || data == "n:1" {
+        // The older `n:1` from a button sent before this feature existed still
+        // means the same thing as `/new`; it is a press on a message, not a record.
+        commands::new_conversation(
+            &hub,
+            channel.as_ref(),
+            &key,
+            &inbound.chat_id,
+            &inbound.user_id,
+        )
+        .await?;
+        acknowledgement = "Choose Chat or Agent above.".to_string();
+    } else if data == "n:chat" || data == "n:agent" {
+        let wanted = if data == "n:agent" {
+            ToolMode::Agent
+        } else {
+            ToolMode::Chat
+        };
+        if wanted == ToolMode::Agent && !hub.settings().user(&inbound.user_id).allow_agent {
+            acknowledgement =
+                "Agent is turned off for your Telegram id in Communications → Security. The conversation is Chat."
+                    .to_string();
+            hub.update_state(&key, |state| state.mode = Some(ToolMode::Chat));
+        } else {
+            hub.bind_session(&key, None);
+            hub.update_state(&key, |state| {
+                state.question = None;
+                state.choices.clear();
+                state.mode = Some(wanted);
+            });
+            acknowledgement = match wanted {
+                ToolMode::Agent => "New Agent conversation. Send a message to begin.".to_string(),
+                ToolMode::Chat => "New Chat conversation. Send a message to begin.".to_string(),
+            };
+        }
     }
 
     // Always acknowledged, whatever happened: an unacknowledged press spins.
     channel.answer(&action_id, Some(&acknowledgement)).await?;
     // The model and conversation changes are worth a line in the chat itself; the
-    // toast that answers the press disappears in a second.
-    if data.starts_with("m:") || data.starts_with("s:") || data == "n:1" {
+    // toast that answers the press disappears in a second. A new-conversation
+    // press that drew its own picker has already said everything.
+    if data.starts_with("m:") || data.starts_with("s:") || data == "n:chat" || data == "n:agent" {
         let _ = channel.send(&inbound.chat_id, &acknowledgement, &[]).await;
     }
     Ok(())

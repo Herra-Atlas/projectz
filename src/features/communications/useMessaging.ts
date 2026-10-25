@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { AccessSet } from "../chat/access";
 import type { MessagingSettings, MessagingStatus } from "./types";
 
 /**
@@ -23,15 +24,23 @@ export type MessagingStore = ReturnType<typeof useMessaging>;
 
 export function useMessaging(enabled: boolean) {
   const [status, setStatus] = useState<MessagingStatus | null>(null);
+  const [hostAccess, setHostAccess] = useState<AccessSet | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const mounted = useRef(true);
 
   const refresh = useCallback(async () => {
     try {
-      const next = await invoke<MessagingStatus>("messaging_status");
+      // One read for the communications record and one for the installation-wide
+      // switches. They are independent records but one page reads both, and two
+      // separate loading states would make Security flash.
+      const [next, host] = await Promise.all([
+        invoke<MessagingStatus>("messaging_status"),
+        invoke<AccessSet>("host_access_get"),
+      ]);
       if (mounted.current) {
         setStatus(next);
+        setHostAccess(host);
         setError("");
       }
       return next;
@@ -58,9 +67,9 @@ export function useMessaging(enabled: boolean) {
   /**
    * Writes the record, then settles on what the backend stored.
    *
-   * The write is the truth: the allowlist is filtered to numeric ids and `jobs` is
-   * forced off, so a control that shows what was asked for would eventually show
-   * something that is not stored.
+   * The write is the truth: the allowlist is filtered to numeric ids and a
+   * person with Agent off has their default mode forced to Chat, so a control
+   * that shows what was asked for would eventually show something not stored.
    */
   const save = useCallback(async (next: MessagingSettings) => {
     setStatus((current) => (current ? { ...current, settings: next } : current));
@@ -110,5 +119,40 @@ export function useMessaging(enabled: boolean) {
     }
   }, [refresh]);
 
-  return { status, error, busy, refresh, save, setEnabled, saveChannel };
+  /**
+   * Writes the installation-wide switches.
+   *
+   * Saved on each toggle: unlike a text field there is no half-finished value,
+   * and the next run reads this record when its gate is built.
+   */
+  const saveHostAccess = useCallback(async (access: AccessSet) => {
+    const previous = hostAccess;
+    setHostAccess(access);
+    setBusy(true);
+    try {
+      const stored = await invoke<AccessSet>("host_access_save", { access });
+      if (mounted.current) setHostAccess(stored);
+      return stored;
+    } catch (reason) {
+      if (mounted.current) {
+        setHostAccess(previous);
+        setError(String(reason));
+      }
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  }, [hostAccess]);
+
+  return {
+    status,
+    hostAccess,
+    error,
+    busy,
+    refresh,
+    save,
+    setEnabled,
+    saveChannel,
+    saveHostAccess,
+  };
 }

@@ -357,12 +357,6 @@ pub async fn database_initialize(
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("projectz");
     runtime.database().import_legacy(&legacy_data_dir)?;
-    // The skills the app ships, written once (the seed is idempotent and is
-    // short-circuited by a setting). A failure is logged rather than fatal: a
-    // database that cannot take these rows is not a reason to refuse to start.
-    if let Err(error) = runtime.database().seed_bundled_skills() {
-        tracing::warn!(%error, "bundled skills could not be seeded");
-    }
     let _ = app.emit(
         "startup-progress",
         serde_json::json!({"phase":"migrations","message":"Database ready","progress":38}),
@@ -525,6 +519,25 @@ pub fn database_clear_sessions(runtime: State<'_, AiRuntime>) -> Result<usize, S
     runtime.database().clear_chat_sessions()
 }
 
+/// The installation-wide tool switches.
+#[tauri::command]
+pub fn host_access_get(runtime: State<'_, AiRuntime>) -> crate::ai::tools::AccessSet {
+    crate::ai::tools::host::load(runtime.database().as_ref())
+}
+
+/// Replaces the installation-wide tool switches.
+///
+/// Takes effect on the next gate a run is built with. A run already in flight
+/// keeps the access it started under, which is the same rule its permission level
+/// follows.
+#[tauri::command]
+pub fn host_access_save(
+    runtime: State<'_, AiRuntime>,
+    access: crate::ai::tools::AccessSet,
+) -> Result<crate::ai::tools::AccessSet, String> {
+    crate::ai::tools::host::save(runtime.database().as_ref(), access)
+}
+
 #[tauri::command]
 pub fn database_get_setting(
     runtime: State<'_, AiRuntime>,
@@ -655,114 +668,72 @@ pub async fn mcp_delete(
     Ok(crate::mcp::manager::refresh(&database).await)
 }
 
-/// Every skill folder, enabled or not. For the management screen.
+/// Every skill folder. For the management screen.
+///
+/// No database and no filter: a skill is its folder, so there is no "disabled"
+/// set to exclude and nothing the page has not already seen on disk.
 #[tauri::command]
-pub fn skills_list(runtime: State<'_, AiRuntime>) -> Result<Vec<crate::skills::Skill>, String> {
-    crate::skills::list(&runtime.database())
+pub fn skills_list() -> Result<Vec<crate::skills::Skill>, String> {
+    crate::skills::list()
 }
 
-/// Only the enabled skills, which is what a reply may use.
-#[tauri::command]
-pub fn skills_enabled(runtime: State<'_, AiRuntime>) -> Result<Vec<crate::skills::Skill>, String> {
-    crate::skills::enabled(&runtime.database())
-}
-
-/// One skill with its instructions and the files beside it.
+/// One skill's body and the files beside it.
 #[tauri::command]
 pub fn skills_get(
-    runtime: State<'_, AiRuntime>,
     slug: String,
-) -> Result<crate::skills::SkillDetail, String> {
-    crate::skills::get(&runtime.database(), &slug)
+) -> Result<(crate::skills::Skill, String, Vec<crate::skills::SkillFile>), String> {
+    crate::skills::get(&slug)
 }
 
 /// Creates a skill folder. The slug and the header are written here rather than
 /// accepted from the frontend, so the folder and the `name` in it cannot disagree.
 #[tauri::command]
-pub fn skills_create(
-    runtime: State<'_, AiRuntime>,
-    skill: crate::skills::SkillDraft,
-) -> Result<crate::skills::Skill, String> {
-    crate::skills::create(
-        &runtime.database(),
-        &skill,
-        crate::skills::SkillOrigin::User,
-    )
+pub fn skills_create(skill: crate::skills::SkillDraft) -> Result<crate::skills::Skill, String> {
+    crate::skills::create(&skill)
 }
 
-/// Replaces a skill's text, keeping its slug and history.
+/// Replaces a skill's text, keeping its slug and files.
 #[tauri::command]
 pub fn skills_update(
-    runtime: State<'_, AiRuntime>,
     slug: String,
     skill: crate::skills::SkillDraft,
 ) -> Result<crate::skills::Skill, String> {
-    crate::skills::update(&runtime.database(), &slug, &skill)
-}
-
-/// Turns a skill on or off. Disabling is preferred to deleting: the work of
-/// writing a skill is not undone by a switch.
-#[tauri::command]
-pub fn skills_set_enabled(
-    runtime: State<'_, AiRuntime>,
-    slug: String,
-    enabled: bool,
-) -> Result<(), String> {
-    runtime.database().set_skill_enabled(&slug, enabled)
-}
-
-/// Allows or refuses a skill's `scripts/`.
-///
-/// The one switch that deliberately is not defaulted on: writing a skill is not
-/// permission to execute one, and a model-drafted or downloaded script has to be
-/// seen by a person first.
-#[tauri::command]
-pub fn skills_set_trusted(
-    runtime: State<'_, AiRuntime>,
-    slug: String,
-    trusted: bool,
-) -> Result<(), String> {
-    runtime.database().set_skill_trusted(&slug, trusted)
+    crate::skills::update(&slug, &skill)
 }
 
 #[tauri::command]
-pub fn skills_delete(runtime: State<'_, AiRuntime>, slug: String) -> Result<(), String> {
-    crate::skills::delete(&runtime.database(), &slug)
+pub fn skills_delete(slug: String) -> Result<(), String> {
+    crate::skills::delete(&slug)
 }
 
 /// Writes a text file into a skill folder.
+///
+/// Kept for the agent's own door and for anything scripting the app; the Skills
+/// page itself edits a folder through the Files panel, which has its own commands
+/// and lands in the same place.
 #[tauri::command]
 pub fn skills_write_file(
-    runtime: State<'_, AiRuntime>,
     slug: String,
     path: String,
     content: String,
 ) -> Result<crate::skills::SkillFile, String> {
-    crate::skills::write_file(&runtime.database(), &slug, &path, &content)
+    crate::skills::write_file(&slug, &path, &content)
 }
 
 #[tauri::command]
-pub fn skills_read_file(
-    runtime: State<'_, AiRuntime>,
-    slug: String,
-    path: String,
-) -> Result<String, String> {
-    crate::skills::read_file(&runtime.database(), &slug, &path)
+pub fn skills_read_file(slug: String, path: String) -> Result<String, String> {
+    crate::skills::read_file(&slug, &path)
 }
 
 #[tauri::command]
-pub fn skills_delete_file(
-    runtime: State<'_, AiRuntime>,
-    slug: String,
-    path: String,
-) -> Result<(), String> {
-    crate::skills::delete_file(&runtime.database(), &slug, &path)
+pub fn skills_delete_file(slug: String, path: String) -> Result<(), String> {
+    crate::skills::delete_file(&slug, &path)
 }
 
-/// The folder behind a skill, for "Show in Explorer".
+/// The folder behind a skill, so the page can browse it in the Files panel.
 #[tauri::command]
-pub fn skills_folder(runtime: State<'_, AiRuntime>, slug: String) -> Result<String, String> {
-    let skill = crate::skills::resolve(&runtime.database(), &slug)?;
+pub fn skills_folder(slug: String) -> Result<String, String> {
+    let skill = crate::skills::resolve(&slug)?;
     Ok(crate::skills::directory_of(&skill)?.display().to_string())
 }
 
@@ -771,14 +742,8 @@ pub fn skills_folder(runtime: State<'_, AiRuntime>, slug: String) -> Result<Stri
 /// User-initiated by construction: this is a command the Settings button calls,
 /// never a tool the model can reach. See `skills::install` for why.
 #[tauri::command]
-pub async fn skills_install(
-    runtime: State<'_, AiRuntime>,
-    url: String,
-) -> Result<crate::skills::Skill, String> {
-    // Cloned before the await: the database is an `Arc`, and holding the `State`
-    // borrow across a network round trip is neither needed nor permitted.
-    let database = runtime.database();
-    crate::skills::install::install_from_url(&database, &url).await
+pub async fn skills_install(url: String) -> Result<crate::skills::Skill, String> {
+    crate::skills::install::install_from_url(&url).await
 }
 
 /// Every saved job, for the editor's list.
@@ -1615,7 +1580,7 @@ pub async fn local_engines_install(app: AppHandle, id: String) -> Result<(), Str
 }
 
 #[tauri::command]
-pub fn local_engines_uninstall(app: AppHandle, id: String) -> Result<(), String> {
+pub fn local_engines_uninstall(app: AppHandle, id: String) -> Result<Option<String>, String> {
     crate::ai::local::engines::uninstall(&app, &id)
 }
 

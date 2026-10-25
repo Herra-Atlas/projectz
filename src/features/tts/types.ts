@@ -40,6 +40,11 @@ export type TtsSettings = {
   autoSpeak: boolean;
   /** Whether the auto read holds off on a voice that would need a cold start. */
   autoSpeakOnlyLoaded: boolean;
+  /** Whether the text is tidied before it is spoken. `skipCode`/`skipMarkdown`
+      are its sub-options and do nothing while it is off. */
+  smartSpeak: boolean;
+  /** Whether synthesis is spoken sentence by sentence as it arrives. */
+  streamSpeech: boolean;
 };
 
 /** One voice's pace, with the bounds its own page draws against. */

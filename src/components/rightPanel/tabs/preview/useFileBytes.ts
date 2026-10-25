@@ -15,6 +15,13 @@ export type FileBytes = {
   url: string;
 };
 
+/** What every binary preview is given: the path, and which root it is under. */
+export type PreviewProps = {
+  path: string;
+  /** The installed skill whose folder `path` is relative to, or null. */
+  skill?: string | null;
+};
+
 /**
  * Reads a file's bytes for the previews that cannot be text.
  *
@@ -25,7 +32,7 @@ export type FileBytes = {
  * session, which for a scanned PDF is exactly the kind of thing that makes an app
  * feel heavy.
  */
-export function useFileBytes(path: string) {
+export function useFileBytes(path: string, skill: string | null = null) {
   const [data, setData] = useState<FileBytes | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
 
@@ -35,7 +42,7 @@ export function useFileBytes(path: string) {
     setData(undefined);
     setError(null);
 
-    invoke<ArrayBuffer>("panel_read_bytes", { relative: path })
+    invoke<ArrayBuffer>("panel_read_bytes", { relative: path, skill })
       .then((bytes) => {
         if (!active) return;
         created = URL.createObjectURL(new Blob([bytes]));
@@ -51,7 +58,7 @@ export function useFileBytes(path: string) {
       // re-runs on a path change and the old file is no longer on screen.
       if (created) URL.revokeObjectURL(created);
     };
-  }, [path]);
+  }, [path, skill]);
 
   return { data, error };
 }

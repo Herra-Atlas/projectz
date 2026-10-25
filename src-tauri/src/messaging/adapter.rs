@@ -17,7 +17,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::messaging::types::{Button, Capabilities, ChannelStatus, SentMessage};
+use crate::messaging::types::{
+    Button, Capabilities, ChannelStatus, DownloadedFile, InboundFile, OutboundFile, SentMessage,
+};
 use crate::messaging::Messaging;
 
 /// A future a trait object can return.
@@ -51,6 +53,29 @@ pub trait Channel: Send + Sync {
         text: &'a str,
         buttons: &'a [Button],
     ) -> ChannelFuture<'a, Result<SentMessage, String>>;
+
+    /// Fetches the bytes of a file named by an inbound message.
+    fn download<'a>(
+        &'a self,
+        file: &'a InboundFile,
+    ) -> ChannelFuture<'a, Result<DownloadedFile, String>>;
+
+    /// Sends one workspace file back to the chat.
+    fn send_file<'a>(
+        &'a self,
+        to: &'a str,
+        file: &'a OutboundFile,
+    ) -> ChannelFuture<'a, Result<SentMessage, String>>;
+
+    /// Removes one message the app sent, where the transport supports it.
+    ///
+    /// Used for the transient working message once an answer has landed. A channel
+    /// that cannot delete may return `Ok(())`; the core has already sent the answer.
+    fn delete<'a>(
+        &'a self,
+        to: &'a str,
+        message_id: &'a str,
+    ) -> ChannelFuture<'a, Result<(), String>>;
 
     /// Rewrites a message already sent. A channel without the capability may
     /// return `Ok(())` and do nothing -- the core treats editing as an
@@ -109,6 +134,8 @@ mod tests {
             edit: false,
             typing: false,
             max_chars: 2_000,
+            files: false,
+            delete: false,
         };
         assert_eq!(capabilities.max_chars, 2_000);
         assert!(!capabilities.buttons);

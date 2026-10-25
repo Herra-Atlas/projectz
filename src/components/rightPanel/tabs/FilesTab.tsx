@@ -27,6 +27,20 @@ type FilesTabProps = {
   /** The open workspace path, or null when none is chosen. */
   workspace: string | null;
   /**
+   * An installed skill whose folder this tree draws instead of the workspace.
+   *
+   * The Skills page sets this to open a skill for editing: a skill is a folder,
+   * and the editor the app already has for folders is this tree. When it is set
+   * the header names the skill rather than the workspace, and every file command
+   * (list, create, rename, move, delete, preview, edit) is scoped to that folder
+   * by the backend -- `root_for` in `panel/fs.rs` is the one place that decides.
+   *
+   * `undefined`/`null` is the workspace. A non-empty string is a skill slug.
+   */
+  skill?: string | null;
+  /** Called by the header's × so the panel can go back to the workspace. */
+  onCloseSkill?: () => void;
+  /**
    * A file to show, set from outside -- currently only by clicking a changed file
    * in a reply.
    *
@@ -53,10 +67,10 @@ type FilesTabProps = {
   onNotify?: (tone: "success" | "error", message: string) => void;
 };
 
-export default function FilesTab({ workspace, requestedPath, onRequestHandled, onPreviewInBrowser, onNotify }: FilesTabProps) {
+export default function FilesTab({ workspace, skill = null, onCloseSkill, requestedPath, onRequestHandled, onPreviewInBrowser, onNotify }: FilesTabProps) {
   const [preview, setPreview] = useState<TreeEntry | null>(null);
   const [query, setQuery] = useState("");
-  const { root, error, loadingPath, isExpanded, childrenOf, toggle, refresh, expand, create, move, rename, delete: deleteFile } = useFileTree();
+  const { root, error, loadingPath, isExpanded, childrenOf, toggle, expand, openAt, create, move, rename, delete: deleteFile } = useFileTree(skill);
 
   /** The right-click being answered, or null. `target: null` is the blank space. */
   const [menu, setMenu] = useState<{ point: { x: number; y: number }; target: TreeEntry | null } | null>(null);
@@ -94,17 +108,28 @@ export default function FilesTab({ workspace, requestedPath, onRequestHandled, o
   // normal path for clicking a changed file. Running the reset unconditionally
   // set the preview and cleared it in the same commit, so the first click appeared
   // to do nothing and only the second worked. The sentinel is what tells the two
-  // apart: it starts as a value `workspace` can never be, so the first render
-  // always counts as "just mounted" rather than as "the folder is still null".
-  const loadedWorkspaceRef = useRef<string | null | undefined>(undefined);
+  // apart: it starts as a value the root can never be, so the first render always
+  // counts as "just mounted" rather than as "the folder is still null".
+  //
+  // **The root is the workspace *or* the skills root.** Opening a skill is a
+  // switch to a different tree, so it takes the same path as changing folder:
+  // everything open against the old one goes. The key is the pair, because the
+  // skills root is drawn regardless of which workspace happens to be open.
+  //
+  // **A skill opens its folder, not the tree around it.** When `skill` names one,
+  // its row is expanded on entry so the files are the first thing on screen --
+  // while its siblings stay listed, because the skills root is a folder like any
+  // other and a person may well want the neighbouring one.
+  const loadedRootRef = useRef<string | null | undefined>(undefined);
+  const rootKey = `${skill ?? ""}\u0000${workspace ?? ""}`;
 
   useEffect(() => {
-    const previous = loadedWorkspaceRef.current;
-    loadedWorkspaceRef.current = workspace;
+    const previous = loadedRootRef.current;
+    loadedRootRef.current = rootKey;
     if (previous !== undefined) {
       // A genuine switch: anything open against the old folder is stale, so the
       // preview and the filter go and the tree is read again for the new one.
-      if (previous === workspace) return;
+      if (previous === rootKey) return;
       setPreview(null);
       setQuery("");
       setEdit(null);
@@ -113,8 +138,8 @@ export default function FilesTab({ workspace, requestedPath, onRequestHandled, o
     // First run: read the tree, but leave a requested file alone. It is on its way
     // in from the click that opened this panel, and clearing it here is what made
     // the first click on a changed file look lost.
-    void refresh();
-  }, [workspace, refresh]);
+    void openAt(skill ?? null);
+  }, [rootKey, skill, openAt]);
 
   const closeMenu = useCallback(() => setMenu(null), []);
 
@@ -233,11 +258,15 @@ export default function FilesTab({ workspace, requestedPath, onRequestHandled, o
 
   // A file opened under a folder that has since changed may no longer exist, so
   // returning to the tree is the only way to see what is there now.
+  //
+  // The preview is handed the skill as well as the workspace: a `.png` in a
+  // skill's `assets/` is read through the same bytes command, and that command
+  // needs to know which root the path is relative to.
   if (preview) {
-    return <FilePreview entry={preview} workspace={workspace} onBack={() => setPreview(null)} onPreviewInBrowser={onPreviewInBrowser} onNotify={onNotify} />;
+    return <FilePreview entry={preview} workspace={workspace} skill={skill} onBack={() => setPreview(null)} onPreviewInBrowser={onPreviewInBrowser} onNotify={onNotify} />;
   }
 
-  if (!workspace) {
+  if (!workspace && !skill) {
     return (
       <div className="flex h-full flex-col items-center justify-center px-5 text-center">
         <p className="text-sm text-[var(--text)]">No folder open</p>
@@ -252,11 +281,27 @@ export default function FilesTab({ workspace, requestedPath, onRequestHandled, o
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* Folder name and search, matching the screenshots: the name in accent so
-          it reads as *which* folder, and the search on the same row because it
-          filters the same list. */}
+      {/* Which folder is being shown, then search. The skills root says so and
+          offers the way back to the workspace, because it replaced that tree
+          rather than opening beneath it -- and without a door back, the panel
+          would look like it had lost the project. */}
       <div className="flex min-h-10 shrink-0 items-center gap-2 border-b border-[var(--line)] px-3">
-        <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--accent)]" title={workspace}>{workspaceLabel(workspace)}</span>
+        {skill ? (
+          <>
+            <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--accent)]" title="skills">
+              skills
+            </span>
+            <button
+              type="button"
+              onClick={onCloseSkill}
+              className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-[var(--muted)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-[var(--accent)]"
+            >
+              Close
+            </button>
+          </>
+        ) : (
+          <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--accent)]" title={workspace ?? undefined}>{workspace ? workspaceLabel(workspace) : ""}</span>
+        )}
         <Search size={13} className="shrink-0 text-[var(--quiet)]" />
         <input
           value={query}

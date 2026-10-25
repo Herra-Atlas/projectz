@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import PreviewNote from "./PreviewNote";
-import { useFileBytes } from "./useFileBytes";
+import { useFileBytes, type PreviewProps } from "./useFileBytes";
 
 /**
  * The part of a PDF.js document this view uses.
@@ -68,8 +68,8 @@ function loadPdfjs() {
  * resized, so the text is never a fixed size that is too small to read or too
  * large to fit.
  */
-export default function PdfPreview({ path }: { path: string }) {
-  const { data, error } = useFileBytes(path);
+export default function PdfPreview({ path, skill = null }: PreviewProps) {
+  const { data, error } = useFileBytes(path, skill);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const documentRef = useRef<PdfDocument | null>(null);
   const taskRef = useRef<PdfLoadingTask | null>(null);

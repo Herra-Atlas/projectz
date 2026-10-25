@@ -233,9 +233,13 @@ export default function EnginesSettingsPage({ onChanged, notify }: EnginesSettin
   const uninstallEngine = async (engine: Engine) => {
     setWorkingId(engine.id);
     try {
-      await invoke("local_engines_uninstall", { id: engine.id });
-      notify("success", `${engine.version} removed`, `engine:${engine.id}`);
+      // The backend moves any model that named this engine before deleting it,
+      // and answers with what it did to them. Saying only "removed" would hide
+      // the change to the Local models page that this click just made.
+      const moved = await invoke<string | null>("local_engines_uninstall", { id: engine.id });
+      notify("success", moved ? `${engine.version} removed · ${moved}` : `${engine.version} removed`, `engine:${engine.id}`);
       await loadEngines(false);
+      onChanged();
     } catch (reason) {
       notify("error", `Engine could not be removed: ${String(reason)}`, `engine:${engine.id}`);
     } finally {

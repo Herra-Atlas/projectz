@@ -51,9 +51,21 @@ export function absolutePath(root: string, relative: string): string {
   return `${base}${separator}${relative.split("/").join(separator)}`;
 }
 
-/** Listing one folder. `path` is `""` for the workspace root. */
-export async function listFolder(relative: string): Promise<TreeEntry[]> {
-  return invoke<TreeEntry[]>("panel_fs_list", { relative });
+/**
+ * Listing one folder. `path` is `""` for the root of the open tree.
+ *
+ * `skill` says which *root* the tree is showing, not which folder within it: any
+ * slug selects the skills root (the folder every skill lives in), and `""` for
+ * this argument selects the workspace. The path arguments are unchanged, so the
+ * tree browses the skills root exactly as it browses a project -- which is the
+ * point, since a skill is a folder and its neighbours are too.
+ *
+ * It stays on the same calls as the panel's other file operations
+ * (`panel_create_folder`, `panel_rename_file`, and so on) because a folder the
+ * user can see in the tree is a folder they can act on.
+ */
+export async function listFolder(relative: string, skill?: string | null): Promise<TreeEntry[]> {
+  return invoke<TreeEntry[]>("panel_fs_list", { relative, skill: skill ?? null });
 }
 
 /**
@@ -69,8 +81,16 @@ export async function listFolder(relative: string): Promise<TreeEntry[]> {
  * tree has already drawn is re-fetched by name (see the `panel_fs_changed`
  * effect below). A folder it has never expanded costs nothing to leave cached,
  * because expanding it always fetches.
+ *
+ * **A skill root re-reads itself.** The workspace watcher is pointed at the open
+ * workspace, so it says nothing about the skills root. An agent's `skill_write`
+ * or a file saved by another program therefore has to be seen by this tree asking
+ * again, which it does on the same event by re-reading what it has already drawn:
+ * one call per open folder, only while such a root is showing, and none at all
+ * otherwise. Folders that are closed are re-read on expand anyway, so they cost
+ * nothing here.
  */
-export function useFileTree() {
+export function useFileTree(skill?: string | null) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [childrenByPath, setChildrenByPath] = useState<Record<string, TreeEntry[]>>({});
   const [root, setRoot] = useState<TreeEntry[] | null>(null);
@@ -85,12 +105,15 @@ export function useFileTree() {
    * listener; re-rendering on it would be work nothing depends on.
    */
   const loadedRef = useRef<Set<string>>(new Set());
+  /** The root in force, readable from the event handler for the same reason. */
+  const skillRef = useRef<string | null | undefined>(skill);
+  skillRef.current = skill;
 
   const load = useCallback(async (relative: string) => {
     setLoadingPath(relative);
     setError(null);
     try {
-      const entries = await listFolder(relative);
+      const entries = await listFolder(relative, skillRef.current);
       loadedRef.current.add(relative);
       setChildrenByPath((current) => ({ ...current, [relative]: entries }));
       if (relative === "") {
@@ -163,7 +186,29 @@ export function useFileTree() {
     loadedRef.current = new Set();
     setChildrenByPath({});
     setRoot(null);
+    setExpanded(new Set());
     await load("");
+  }, [load]);
+
+  /**
+   * Reads the root, and opens one folder inside it.
+   *
+   * Two calls rather than a cascade: the listing says whether the folder is there
+   * at all, and its own children are what gets drawn once the row is open. When
+   * there is nothing to open this is the plain root read and costs nothing extra.
+   *
+   * Public because the caller owns *when*: the tree is remounted on a root switch,
+   * and the folder to open comes from the click that caused it.
+   */
+  const openAt = useCallback(async (folder: string | null) => {
+    loadedRef.current = new Set();
+    setChildrenByPath({});
+    setRoot(null);
+    setExpanded(new Set());
+    const entries = await load("");
+    if (!folder || !entries?.some((entry) => entry.isDir && entry.path === folder)) return;
+    setExpanded(new Set([folder]));
+    await load(folder);
   }, [load]);
 
   /**
@@ -189,6 +234,13 @@ export function useFileTree() {
         // in the cache is drawn wherever it stands in the tree.
         if (folder === "" || loadedRef.current.has(folder)) void load(folder);
       }
+      // The skills root is outside the watched workspace, so the event says
+      // nothing about it. Re-read every folder this tree has drawn -- the cached
+      // names are exactly those, so a closed folder costs no call -- and only
+      // while such a root is showing.
+      if (skillRef.current) {
+        for (const folder of loadedRef.current) void load(folder);
+      }
     }).then((off) => {
       if (disposed) off();
     });
@@ -210,7 +262,7 @@ export function useFileTree() {
   const rename = useCallback(async (sourcePath: string, newName: string) => {
     const normalizedPath = normalizePath(sourcePath);
     try {
-      await invoke("panel_rename_file", { relative: normalizedPath, newName });
+      await invoke("panel_rename_file", { relative: normalizedPath, newName, skill: skillRef.current ?? null });
       await load(parentOf(normalizedPath));
     } catch (reason) {
       throw new Error(String(reason));
@@ -226,7 +278,7 @@ export function useFileTree() {
   const del = useCallback(async (path: string) => {
     const normalizedPath = normalizePath(path);
     try {
-      await invoke("panel_delete_file", { relative: normalizedPath });
+      await invoke("panel_delete_file", { relative: normalizedPath, skill: skillRef.current ?? null });
       await load(parentOf(normalizedPath));
     } catch (reason) {
       throw new Error(String(reason));
@@ -247,7 +299,7 @@ export function useFileTree() {
   const create = useCallback(async (parent: string, name: string, isDir: boolean) => {
     const target = normalizePath(parent);
     try {
-      await invoke(isDir ? "panel_create_folder" : "panel_create_file", { relative: target, name });
+      await invoke(isDir ? "panel_create_folder" : "panel_create_file", { relative: target, name, skill: skillRef.current ?? null });
       await load(target);
     } catch (reason) {
       throw new Error(String(reason));
@@ -269,7 +321,7 @@ export function useFileTree() {
     const source = normalizePath(path);
     const target = normalizePath(targetDir);
     try {
-      await invoke("panel_move_file", { relative: source, target });
+      await invoke("panel_move_file", { relative: source, target, skill: skillRef.current ?? null });
       const from = parentOf(source);
       if (from === target) { await load(target); return; }
       await load(from);
@@ -289,6 +341,7 @@ export function useFileTree() {
     expand,
     collapseAll, 
     refresh,
+    openAt,
     create,
     move,
     rename,

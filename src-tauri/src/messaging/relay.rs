@@ -15,6 +15,7 @@
 //! Telegram allows about one edit a second per chat, and a burst of quick tools would
 //! spend the allowance on updates nobody can read anyway.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -23,6 +24,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::ai::types::ChatEvent;
 use crate::messaging::adapter::Channel;
+use crate::messaging::files;
 use crate::messaging::format;
 use crate::messaging::types::Button;
 use crate::messaging::Messaging;
@@ -37,9 +39,12 @@ pub async fn watch(
     key: String,
     chat: String,
     mut events: UnboundedReceiver<ChatEvent>,
+    agent: bool,
+    send_files: bool,
 ) {
     let capabilities = channel.capabilities();
     let mut lines: Vec<String> = Vec::new();
+    let mut changed: BTreeSet<String> = BTreeSet::new();
     let mut working: Option<String> = None;
     let mut last_edit = Instant::now() - EDIT_INTERVAL;
 
@@ -68,6 +73,9 @@ pub async fn watch(
             "tool_result" => {
                 if let Some(line) = format::tool_line(&event) {
                     lines.push(line);
+                }
+                if let Some(path) = files::changed_file(&event) {
+                    changed.insert(path);
                 }
             }
             "tool_approval" => {
@@ -118,12 +126,26 @@ pub async fn watch(
         last_edit = Instant::now();
     }
 
-    // The answer is sent by the caller; this leaves behind what produced it, so the
-    // answer is not floating under a message that still says "Working…".
+    // The answer is sent by the caller. An agent that actually did steps leaves
+    // the one-line record of them; a single-message Chat reply (or an Agent reply
+    // that used no tools) has no work worth keeping, so its working message is
+    // removed rather than left saying "Worked for 0s".
     if let Some(id) = working {
-        let _ = channel
-            .edit(&chat, &id, &format::worked_summary(&lines), &[])
-            .await;
+        if agent && !lines.is_empty() {
+            let _ = channel
+                .edit(&chat, &id, &format::worked_summary(&lines), &[])
+                .await;
+        } else if capabilities.delete {
+            let _ = channel.delete(&chat, &id).await;
+        } else if capabilities.edit {
+            let _ = channel.edit(&chat, &id, "", &[]).await;
+        }
+    }
+
+    // Sent after the working message is settled and before the answer, so files
+    // appear above the text that talks about them.
+    if send_files {
+        files::send_changed(channel.as_ref(), &chat, changed).await;
     }
 }
 

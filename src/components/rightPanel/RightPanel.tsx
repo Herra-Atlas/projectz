@@ -131,6 +131,17 @@ type RightPanelProps = {
   /** The open workspace path, handed to the views that need it. */
   workspace: string | null;
   /**
+   * An installed skill the Files view should draw instead of the workspace.
+   *
+   * Set by the Skills page when a skill is double-clicked. It is a *request* in
+   * the same sense as `requestedPath`: setting it opens the panel and brings
+   * Files forward, and the × in that view's header calls `onCloseSkill` to give
+   * the workspace tree back.
+   */
+  skill?: string | null;
+  /** Clears `skill`, returning the Files view to the workspace. */
+  onCloseSkill?: () => void;
+  /**
    * The conversation on screen, so the Sub agents view can follow it.
    *
    * `null` for a new, unsaved chat: the view then lists every run rather than
@@ -140,6 +151,14 @@ type RightPanelProps = {
   sessionId?: string | null;
   loadedModelId?: string | null;
   loadingModelId?: string | null;
+  /**
+   * A request to show the model terminal, raised on every load attempt.
+   *
+   * Separate from `loadingModelId` because a failed start can clear that value
+   * before this panel renders -- the two events are emitted in one tick -- and
+   * the terminal is exactly what a user wants to read after a failure.
+   */
+  terminalRequest?: { id: string; key: number } | null;
   /**
    * A file to show in the Files view, from outside the panel.
    *
@@ -184,7 +203,7 @@ type RightPanelProps = {
  * to bring it back. The body is hidden from the tree as well as from layout, so
  * a tab the panel remembers is not silently live behind a closed panel.
  */
-export default function RightPanel({ open, width, workspace, sessionId = null, loadedModelId = null, loadingModelId = null, requestedPath, requestedUrl, onUrlRequestHandled, onRequestHandled, overviewRequest = null, loadSession, onClose, onOpen, onResize, onNotify }: RightPanelProps) {
+export default function RightPanel({ open, width, workspace, skill = null, onCloseSkill, sessionId = null, loadedModelId = null, loadingModelId = null, terminalRequest = null, requestedPath, requestedUrl, onUrlRequestHandled, onRequestHandled, overviewRequest = null, loadSession, onClose, onOpen, onResize, onNotify }: RightPanelProps) {
   const panelRef = useRef<HTMLElement>(null);
   const {
     openViews, activeView, open: openView, close: closeView, setActiveView,
@@ -218,11 +237,23 @@ export default function RightPanel({ open, width, workspace, sessionId = null, l
     onOpen();
   }, [serverModelId, ensureServerSession, openView, onOpen]);
 
+  // Every attempt, including one whose start is refused at once. The request
+  // carries its own key so two attempts at the same model both act, and a
+  // re-render is not mistaken for a new attempt.
+  const handledTerminalKeyRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!terminalRequest) return;
+    if (handledTerminalKeyRef.current === terminalRequest.key) return;
+    handledTerminalKeyRef.current = terminalRequest.key;
+    ensureServerSession(terminalRequest.id, `llama-server · ${terminalRequest.id.slice(0, 8)}`);
+    openView("terminal");
+    onOpen();
+  }, [terminalRequest, ensureServerSession, openView, onOpen]);
+
   // The audio.cpp server, learned the same way the llama server is -- from a
-  // prop-like source that answers on mount. It is in-module state rather than an
-  // `App` prop because the audio server starts itself wherever a voice runs, and
-  // threading one more piece through `App` buys nothing the event cannot carry.
-  const [audioRunning, setAudioRunning] = useState(false);
+  // prop-like source that answers on mount. Only a ref is kept: what the panel
+  // needs is "did it change since the last event" so the terminal is not
+  // reopened on every heartbeat, not a value anything draws.
   const audioRunningRef = useRef(false);
 
   // The mount probe is what makes a session survive a closed panel: the start
@@ -234,7 +265,6 @@ export default function RightPanel({ open, width, workspace, sessionId = null, l
     void invoke<{ running: boolean }>("audio_status")
       .then((status) => {
         if (!live) return;
-        setAudioRunning(status.running);
         if (status.running) {
           audioRunningRef.current = true;
           ensureServerSession("audiocpp", "audiocpp_server · audio.cpp");
@@ -251,7 +281,6 @@ export default function RightPanel({ open, width, workspace, sessionId = null, l
     const unlisten = listen<{ running: boolean }>("audio-server-state", ({ payload }) => {
       if (!live || payload.running === audioRunningRef.current) return;
       audioRunningRef.current = payload.running;
-      setAudioRunning(payload.running);
       if (payload.running) {
         ensureServerSession("audiocpp", "audiocpp_server · audio.cpp");
         openView("terminal");
@@ -264,11 +293,11 @@ export default function RightPanel({ open, width, workspace, sessionId = null, l
     };
   }, [ensureServerSession, openView, onOpen]);
 
-  // A server terminal is pinned for as long as *any* server process answers:
-  // the llama one is a prop the app already tracks, the audio one is the state
-  // this module keeps. When both are down every session is closable, and the
-  // last one to close unpins the Terminal view with it.
-  const serverProcessesRunning = Boolean(serverModelId) || audioRunning;
+  // A server terminal stays open for as long as its process answers so its
+  // output is not lost behind a closed tab -- but closing the Terminal view is a
+  // deliberate "I am done with this", so it stops what the view was showing
+  // rather than refusing. A failed engine that never produced a healthy process
+  // used to leave the tab impossible to close, which is the state this fixes.
 
   /**
    * Closing a server's terminal row stops the process it was showing.
@@ -306,10 +335,39 @@ export default function RightPanel({ open, width, workspace, sessionId = null, l
     void invoke("panel_browser_close").catch(() => undefined);
   }, [closeAllViews, onClose, onRequestHandled, onUrlRequestHandled]);
 
+  /**
+   * Closing the Terminal view closes its server rows too.
+   *
+   * The tab used to be pinned and unclosable while a process was up, which made
+   * a llama-server that started but could not answer -- still a live process --
+   * into a terminal the user could never dismiss. Closing the page is the one
+   * gesture that says "I am finished with this", so it stops the processes first
+   * and closes the view only once they have stopped. A failed stop keeps the
+   * view and says why, because a row that vanished while its process survived
+   * would hide the thing that is still running.
+   */
   const handleCloseView = useCallback((view: PanelViewId) => {
-    if (view === "terminal" && serverProcessesRunning) return;
-    closeView(view);
-  }, [closeView, serverProcessesRunning]);
+    if (view !== "terminal") {
+      closeView(view);
+      return;
+    }
+    const servers = terminalSessions.filter((session) => session.kind === "server");
+    if (servers.length === 0) {
+      closeView(view);
+      return;
+    }
+    void Promise.allSettled(servers.map((session) =>
+      session.id === "audiocpp" ? invoke("audio_stop") : invoke("local_model_unload"),
+    )).then((results) => {
+      const failed = results.find((result) => result.status === "rejected");
+      if (failed && failed.status === "rejected") {
+        onNotify?.("error", `The server could not be stopped: ${String(failed.reason)}`);
+        return;
+      }
+      for (const session of servers) closeTerminalSession(session.id);
+      closeView(view);
+    });
+  }, [terminalSessions, closeTerminalSession, closeView, onNotify]);
 
   const handleNewTerminal = useCallback(() => {
     const id = crypto.randomUUID();
@@ -381,6 +439,27 @@ export default function RightPanel({ open, width, workspace, sessionId = null, l
   }, [requestedPath, openView, onOpen]);
 
   /**
+   * Opens the panel and brings Files forward when a skill is asked for.
+   *
+   * The same shape as `requestedPath` and for the same reason: setting the value
+   * is a request to *see* a folder, and a caller that set it and left the panel
+   * closed would look like nothing happened. The last skill acted on is kept in a
+   * ref so re-rendering -- `onOpen` is an inline arrow from `App` and gets a new
+   * identity every render -- does not keep re-opening the view.
+   */
+  const handledSkillRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!skill) {
+      handledSkillRef.current = null;
+      return;
+    }
+    if (handledSkillRef.current === skill) return;
+    handledSkillRef.current = skill;
+    openView("files");
+    onOpen();
+  }, [skill, openView, onOpen]);
+
+  /**
    * Moves the panel without re-rendering anything.
    *
    * The width is committed to React state only on release; during the drag this
@@ -444,7 +523,6 @@ export default function RightPanel({ open, width, workspace, sessionId = null, l
               onSelect={(view) => { setActiveView(view); setActiveTerminalId(null); }}
               onClose={handleCloseView}
               onNew={() => setActiveView(null)}
-              pinnedViews={serverProcessesRunning ? ["terminal"] : []}
             />
             <button
               type="button"
@@ -458,7 +536,7 @@ export default function RightPanel({ open, width, workspace, sessionId = null, l
           </header>
           <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
             {activeView === "files" ? (
-              <FilesTab workspace={workspace} requestedPath={requestedPath} onRequestHandled={onRequestHandled ?? (() => undefined)} onPreviewInBrowser={handlePreviewInBrowser} onNotify={onNotify} />
+              <FilesTab workspace={workspace} skill={skill} onCloseSkill={onCloseSkill} requestedPath={requestedPath} onRequestHandled={onRequestHandled ?? (() => undefined)} onPreviewInBrowser={handlePreviewInBrowser} onNotify={onNotify} />
             ) : activeView === "terminal" ? (
               <TerminalTab
                 sessions={terminalSessions}

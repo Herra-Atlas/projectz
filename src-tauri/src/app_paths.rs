@@ -39,15 +39,6 @@ pub fn skills_root() -> PathBuf {
     data_root().join("skills")
 }
 
-/// The set the app ships: `<root>/bundled-skills/<slug>/SKILL.md`.
-///
-/// A second root rather than a flag on a row, because a version bump replaces
-/// this whole tree and must never be able to overwrite something the user wrote.
-/// The index reads both roots; a user skill of the same slug wins.
-pub fn bundled_skills_root() -> PathBuf {
-    data_root().join("bundled-skills")
-}
-
 /// Scratch space for programs this app starts: `<root>/tmp/`.
 ///
 /// A child process inherits its parent's working directory, and a dev build of a

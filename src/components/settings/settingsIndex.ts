@@ -12,13 +12,13 @@ import type { SettingsPage } from "./settingsPages";
 /**
  * The views that are complete as `{ view }`.
  *
- * `model`, `skill`, `download` and `ttsVoice` need the record they are about, so
- * none can be named by a search result and none is a page the index lists. `form`
- * stays: opening it blank is exactly what "Add provider" means.
+ * `model`, `download`, `ttsVoice`, `sttModel` and `audioModel` need the record
+ * they are about, so none can be named by a search result and none is a page the
+ * index lists. `form` stays: opening it blank is exactly what "Add provider" means.
  */
 export type SettingsView = Exclude<
   SettingsPage["view"],
-  "model" | "skill" | "download" | "ttsVoice" | "sttModel" | "audioModel"
+  "model" | "download" | "ttsVoice" | "sttModel" | "audioModel"
 >;
 
 /**
@@ -77,7 +77,7 @@ const PAGES: IndexPage[] = [
       },
       {
         anchor: "general.instructions",
-        label: "Instructions for ProjectZ",
+        label: "Instructions",
         keywords: ["system prompt", "custom instructions", "rules", "personality", "context"],
       },
       {
@@ -259,17 +259,22 @@ const PAGES: IndexPage[] = [
     ],
   },
   {
-    view: "communications",
-    name: "Communications",
+    view: "communicationsTelegram",
+    name: "Communications · Telegram",
     entries: [
       {
         anchor: "communications.enabled",
         label: "Messaging",
-        keywords: ["telegram", "bot", "phone", "remote", "on", "off"],
+        keywords: ["telegram", "bot", "phone", "remote", "on", "off", "master"],
+      },
+      {
+        anchor: "communications.telegram.enabled",
+        label: "Telegram transport",
+        keywords: ["telegram", "channel", "connect", "polling", "on", "off"],
       },
       {
         anchor: "communications.telegram.status",
-        label: "Telegram",
+        label: "Bot status",
         keywords: ["connected", "bot", "status", "@projectz_bot"],
       },
       {
@@ -277,25 +282,60 @@ const PAGES: IndexPage[] = [
         label: "Bot token",
         keywords: ["botfather", "token", "secret", "telegram", "connect"],
       },
+    ],
+  },
+  {
+    view: "communicationsSettings",
+    name: "Communications · Settings",
+    entries: [
+      {
+        anchor: "communications.files",
+        label: "File exchange",
+        keywords: ["attachments", "files", "images", "documents", "upload", "download"],
+      },
+      {
+        anchor: "communications.instructions",
+        label: "Communication instructions",
+        keywords: ["prompt", "plain text", "markdown", "tone", "style", "personality"],
+      },
+    ],
+  },
+  {
+    view: "communicationsSecurity",
+    name: "Communications · Security",
+    entries: [
       {
         anchor: "communications.telegram.allowed",
-        label: "Who may message",
-        keywords: ["allowlist", "user id", "permissions", "strangers", "security"],
+        label: "Allowed Telegram user ids",
+        keywords: ["allowlist", "user id", "permissions", "strangers", "security", "access"],
       },
       {
-        anchor: "communications.mode",
-        label: "Agent or chat",
-        keywords: ["tools", "mode", "telegram", "chat"],
+        anchor: "communications.userAccess",
+        label: "Per-person access",
+        keywords: [
+          "user access",
+          "telegram id",
+          "agent",
+          "chat",
+          "terminal",
+          "tools",
+          "mcp",
+          "permission",
+          "auto accept",
+          "local model",
+          "speech to text",
+          "voice",
+        ],
       },
       {
-        anchor: "communications.permission",
-        label: "What it may do unattended",
-        keywords: ["permission", "approval", "auto writes", "full", "allow", "deny"],
+        anchor: "communications.profiles",
+        label: "Per-person profiles",
+        keywords: ["profile", "telegram", "style", "per user", "answer"],
       },
       {
-        anchor: "communications.localStart",
-        label: "Let Telegram start a local model",
-        keywords: ["local model", "load", "start", "gguf", "telegram"],
+        anchor: "communications.hostAccess",
+        label: "Host tool access",
+        keywords: ["host", "terminal", "disabled", "capabilities", "mcp", "read", "write"],
       },
     ],
   },
@@ -371,6 +411,16 @@ const PAGES: IndexPage[] = [
         anchor: "tts.voices",
         label: "Voices",
         keywords: ["piper", "voice", "speech synthesis", "read aloud", "tts"],
+      },
+      {
+        anchor: "tts.streamSpeech",
+        label: "Speak before the whole reply is ready",
+        keywords: ["stream", "sentence", "faster", "latency", "read aloud", "text to speech", "buffering"],
+      },
+      {
+        anchor: "tts.smartSpeak",
+        label: "Smart speak",
+        keywords: ["smart", "cleanup", "tidy", "code", "markdown", "separator", "read aloud", "text to speech"],
       },
       {
         anchor: "tts.skipCode",

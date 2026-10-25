@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import PreviewNote from "./PreviewNote";
+import type { PreviewProps } from "./useFileBytes";
 
 /** One sheet as the backend reads it. */
 type SheetGrid = {
@@ -36,7 +37,7 @@ function columnLetters(index: number): string {
  * as a header would be the panel guessing. The letters are also what a reader uses
  * to find a cell in Excel, so they are the useful thing to freeze.
  */
-export default function SheetPreview({ path }: { path: string }) {
+export default function SheetPreview({ path, skill = null }: PreviewProps) {
   const [sheets, setSheets] = useState<SheetGrid[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [active, setActive] = useState(0);
@@ -46,7 +47,7 @@ export default function SheetPreview({ path }: { path: string }) {
     setSheets(null);
     setError(null);
     setActive(0);
-    invoke<SheetGrid[]>("panel_sheet_grid", { relative: path })
+    invoke<SheetGrid[]>("panel_sheet_grid", { relative: path, skill })
       .then((loaded) => {
         if (alive) setSheets(loaded);
       })
@@ -56,7 +57,7 @@ export default function SheetPreview({ path }: { path: string }) {
     return () => {
       alive = false;
     };
-  }, [path]);
+  }, [path, skill]);
 
   if (error) return <PreviewNote tone="error">{error}</PreviewNote>;
   if (!sheets) return <PreviewNote>Reading…</PreviewNote>;

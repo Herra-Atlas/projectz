@@ -34,6 +34,19 @@ impl ReasoningEffort {
     }
 }
 
+/// Where a run came from, when it can be reached again from outside the app.
+///
+/// A Telegram message is addressed by the channel id, the sender's stable user id
+/// and the chat id the transport actually sends to. A job remembers this so its
+/// completion reaches the person who asked for it, even after the conversation
+/// that created it is closed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryTarget {
+    pub channel: String,
+    pub user_id: String,
+    pub chat_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatRequest {
     pub run_id: String,
@@ -48,6 +61,22 @@ pub struct ChatRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub attachments: Vec<ChatAttachment>,
+    /// Extra prompt text for this door, after the user's general instructions.
+    ///
+    /// Used by messaging for its plain-text rules, channel instructions and the
+    /// sender's profile. Absent for an app conversation and for a job.
+    #[serde(default)]
+    pub additional_instructions: Option<String>,
+    /// Whether the app's general Instructions should be left out of this run.
+    ///
+    /// A channel with its own Communication instructions replaces them rather
+    /// than stacking two sometimes-contradictory sets. Absent is `false`, so the
+    /// composer and jobs keep the shared instructions.
+    #[serde(default)]
+    pub suppress_general_instructions: bool,
+    /// The channel and sender this run belongs to, when it came from outside.
+    #[serde(default)]
+    pub delivery: Option<DeliveryTarget>,
     #[serde(default)]
     pub web_search_enabled: bool,
     /// Whether this run may call tools. `Chat` sends no `tools` array at all.
@@ -73,19 +102,17 @@ pub struct ChatRequest {
     /// frontend that has not been rebuilt still runs.
     #[serde(default, deserialize_with = "deserialize_reasoning_effort")]
     pub reasoning: ReasoningEffort,
-    /// Which skills to apply to this reply, as ids from the `skills` table.
+    /// Which skills to apply to this reply, as slugs.
     ///
     /// The instructions themselves travel in the message list, built by the
-    /// frontend from the same `skills_enabled` list it offered them from and stored
-    /// in the transcript like any other message -- which is what keeps them applying
-    /// to every later turn, and keeps them inside the cached prefix rather than
-    /// re-sent after it. Rust reads these only to count the use.
+    /// frontend and stored in the transcript like any other message -- which is
+    /// what keeps them applying to every later turn, and keeps them inside the
+    /// cached prefix rather than re-sent after it. Rust keeps the field only so a
+    /// frontend that still sends it is not failed on an unknown key; nothing
+    /// counts a use any more, because a folder is the whole record of a skill.
     ///
-    /// Ids rather than names, so a rename between the picker and the send cannot
-    /// silently apply a different skill.
-    ///
-    /// Defaults to empty so a frontend that has not been rebuilt sends no skills
-    /// rather than failing the whole request on an unknown field.
+    /// Defaults to empty so an older frontend sends no skills rather than
+    /// failing the whole request.
     #[serde(default)]
     pub skill_ids: Vec<String>,
     /// Which capabilities this run may use.
@@ -235,12 +262,12 @@ mod tests {
         assert_eq!(request.reasoning.0, "medium");
     }
 
-    /// Skills arrive as ids the runtime resolves against the table. An older
-    /// frontend sends no field at all, which has to mean "no skills" rather than
-    /// failing the request on an unknown key -- the same reasoning as the level
-    /// above, applied to the one field that arrived after it.
+    /// Skills arrive as slugs. An older frontend sends no field at all, which has
+    /// to mean "no skills" rather than failing the request on an unknown key --
+    /// the same reasoning as the level above, applied to the one field that
+    /// arrived after it.
     #[test]
-    fn skills_default_to_empty_and_round_trip_ids() {
+    fn skills_default_to_empty_and_round_trip_slugs() {
         let bare: ChatRequest = serde_json::from_value(serde_json::json!({
             "run_id": "r", "messages": [], "endpoint_id": null, "model": null,
         }))

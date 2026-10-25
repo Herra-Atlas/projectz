@@ -9,8 +9,8 @@ import type { Skill } from "../../features/skills/types";
  * **A dialog, because it is one decision.** Pasting a link and pressing Install
  * is the whole interaction; a whole settings page would give that decision more
  * room than it has content. The dialog states the one thing the user needs to
- * know before installing: the skill's body is usable at once, its scripts are
- * not -- so a link cannot be a way to run code without a second look.
+ * know before installing: what arrives is a folder they can read and edit, with
+ * whatever scripts it carries visible in the same tree.
  *
  * **The app fetches, not the agent.** This calls a Tauri command from a button.
  * Nothing the model can reach downloads and unpacks executable material; the
@@ -101,8 +101,8 @@ export default function InstallSkillDialog({
 
         <p className="mt-3 flex items-start gap-2 rounded-lg bg-[var(--rail)] px-3 py-2 text-[11px] leading-4 text-[var(--quiet)]">
           <ShieldCheck size={13} className="mt-0.5 shrink-0 text-[var(--muted)]" aria-hidden />
-          The instructions work immediately. Any scripts it carries stay blocked until you allow
-          them on the skill's page.
+          Nothing runs on its own. It installs as a folder you can read, and any scripts it carries
+          are only run when you open them.
         </p>
 
         {error && (

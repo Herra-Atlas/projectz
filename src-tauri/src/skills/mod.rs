@@ -10,17 +10,20 @@
 //!     assets/           # optional: templates, images, data
 //! ```
 //!
-//! The same slug directory may also exist under `<data>/bundled-skills/`, the
-//! set the app ships. The user root wins when both exist, which is what lets an
-//! edit to a bundled skill be a local override rather than a fork the user has
-//! to manage: [`editable_dir`] copies the shipped folder across on first write.
+//! # One store, and it is the disk
 //!
-//! # One content store, one state store
+//! There is no table. A skill is its folder, and every fact about it is read from
+//! that folder: the title is the folder name, the trigger is the description in
+//! `SKILL.md`, and whether it is offered is whether its folder is there. That is
+//! what lets the Skills page hand the folder to the Files panel and get out of
+//! the way -- an edit made in any editor is an edit, with no row to keep in step
+//! and no save to press.
 //!
-//! Everything the skill *is* lives in the folder. What the app knows *about* it
-//! -- enabled, scripts trusted, how often read -- lives in `skill_state`, keyed
-//! by the same slug. Content copied in by hand therefore works with no row: it
-//! reads as enabled and untrusted, which are the safe defaults.
+//! The app used to keep `skill_state` (enabled, trusted, use count) beside the
+//! folder, and a second `bundled-skills/` root it seeded itself. Both are gone.
+//! Every state field was a second answer to a question the folder already
+//! answered, and each had a way to go stale; the shipped set now lives in the
+//! repository -- `bundled-skills/` beside the README -- for a person to copy in.
 //!
 //! # Where the agent can reach
 //!
@@ -30,17 +33,12 @@
 //! inside one skill folder using the same containment check the file tools use
 //! ([`crate::ai::tools::resolve_within`]). `read_file` is not widened.
 
-pub mod bundled;
 pub mod frontmatter;
 pub mod install;
 
-use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-
-use crate::database::skills::SkillState;
-use crate::database::Database;
 
 /// The file every skill directory must contain.
 pub const SKILL_FILE: &str = "SKILL.md";
@@ -72,49 +70,22 @@ const SCRIPT_EXTENSIONS: &[&str] = &[
     "ps1", "py", "js", "mjs", "cjs", "sh", "bash", "cmd", "bat", "exe", "rb", "pl", "ts",
 ];
 
-/// Who wrote a skill.
-///
-/// The distinction is unchanged from the row-backed version: a shipped or
-/// user-written skill was deliberate, an agent-drafted one was inferred and may
-/// encode an assumption nobody checked. Storage moved; the meaning did not.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SkillOrigin {
-    #[default]
-    User,
-    Generated,
-    Bundled,
-}
-
-impl SkillOrigin {
-    pub fn from_str(value: &str) -> Self {
-        match value {
-            "generated" => Self::Generated,
-            "bundled" => Self::Bundled,
-            _ => Self::User,
-        }
-    }
-}
-
 /// One skill as the UI and the model see it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Skill {
-    /// The folder name and the spec's `name`.
+    /// The folder name and the spec's `name`. The skill's only identity.
     pub slug: String,
-    /// The human label, from `metadata.title` or the slug.
+    /// The label to draw, made from the folder name.
     pub name: String,
     pub description: Option<String>,
-    pub skill_type: Option<String>,
-    pub origin: SkillOrigin,
-    pub enabled: bool,
-    pub trusted: bool,
-    pub use_count: i64,
     /// Supporting files, excluding `SKILL.md`.
     pub file_count: usize,
     /// Whether any of them is executable material.
     pub has_scripts: bool,
-    pub created_at: String,
-    pub updated_at: String,
+    /// Whether the skill carries a `references/` folder.
+    pub has_references: bool,
+    /// Whether the skill carries an `assets/` (or `templates/`) folder.
+    pub has_assets: bool,
 }
 
 /// One supporting file in a skill.
@@ -126,15 +97,10 @@ pub struct SkillFile {
     pub is_script: bool,
 }
 
-/// A skill plus the parts a listing does not need.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SkillDetail {
-    pub skill: Skill,
-    pub instructions: String,
-    pub files: Vec<SkillFile>,
-}
-
-/// What the create/edit form sends.
+/// What a create/update writes.
+///
+/// The description is the only header field left to edit, because the name is
+/// the folder and the body is the rest of the file.
 #[derive(Clone, Debug, Deserialize)]
 pub struct SkillDraft {
     /// The display name. The slug is derived from it on create and kept after.
@@ -142,53 +108,47 @@ pub struct SkillDraft {
     pub description: Option<String>,
     /// The markdown body.
     pub instructions: String,
-    pub skill_type: Option<String>,
 }
 
-/// The two roots a scan reads.
-#[derive(Clone, Debug)]
-pub struct Roots {
-    pub user: PathBuf,
-    pub bundled: PathBuf,
+/// The folder every skill lives in.
+pub fn root() -> PathBuf {
+    crate::app_paths::skills_root()
 }
 
-/// Where skills live for this installation.
-pub fn roots() -> Roots {
-    Roots {
-        user: crate::app_paths::skills_root(),
-        bundled: crate::app_paths::bundled_skills_root(),
-    }
+/// Every skill folder, by label.
+pub fn list() -> Result<Vec<Skill>, String> {
+    let mut skills = scan(&root());
+    // By label, then slug. The final tie-break matters: two folders can carry
+    // the same label (`a-b` and `a_b` both humanize to `A b`), and the model's
+    // index is a cached prefix that must be byte-identical between requests.
+    skills.sort_by(|left, right| {
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then_with(|| left.slug.cmp(&right.slug))
+    });
+    Ok(skills)
 }
 
-/// Every skill, enabled or not, user root first.
-pub fn list(database: &Database) -> Result<Vec<Skill>, String> {
-    list_with(database, &roots())
+/// One skill by slug, or by the label it prints.
+///
+/// A trailing `[type]` is tolerated because that is how an older index labelled a
+/// skill, and a transcript from before the field was removed still names one.
+pub fn resolve(requested: &str) -> Result<Skill, String> {
+    resolve_at(&root(), requested)
 }
 
-/// Only the skills a run may be offered.
-pub fn enabled(database: &Database) -> Result<Vec<Skill>, String> {
-    Ok(list(database)?
-        .into_iter()
-        .filter(|skill| skill.enabled)
-        .collect())
-}
-
-/// One skill by slug, or by the label the index printed.
-pub fn resolve(database: &Database, requested: &str) -> Result<Skill, String> {
-    resolve_with(database, requested, &roots())
-}
-
-fn resolve_with(database: &Database, requested: &str, roots: &Roots) -> Result<Skill, String> {
-    let skills = list_with(database, roots)?;
-    let wanted = requested.trim();
-    let bare = strip_type_suffix(wanted);
+/// The same resolution against a named root, for the installer and the tests.
+pub fn resolve_at(root: &Path, requested: &str) -> Result<Skill, String> {
+    let skills = scan(root);
+    let wanted = strip_type_suffix(requested.trim());
     skills
         .iter()
-        .find(|skill| skill.slug.eq_ignore_ascii_case(bare))
+        .find(|skill| skill.slug.eq_ignore_ascii_case(wanted))
         .or_else(|| {
             skills
                 .iter()
-                .find(|skill| skill.name.eq_ignore_ascii_case(bare))
+                .find(|skill| skill.name.eq_ignore_ascii_case(wanted))
         })
         .cloned()
         .ok_or_else(|| {
@@ -201,111 +161,65 @@ fn resolve_with(database: &Database, requested: &str, roots: &Roots) -> Result<S
         })
 }
 
-/// One skill with its instructions and files.
-pub fn get(database: &Database, slug: &str) -> Result<SkillDetail, String> {
-    get_with(database, slug, &roots())
-}
-
-pub(crate) fn get_with(
-    database: &Database,
-    slug: &str,
-    roots: &Roots,
-) -> Result<SkillDetail, String> {
-    let skill = resolve_with(database, slug, roots)?;
-    let dir = directory_of_in(&skill, roots)?;
+/// One skill's body and files.
+pub fn get(slug: &str) -> Result<(Skill, String, Vec<SkillFile>), String> {
+    let skill = resolve(slug)?;
+    let dir = directory_of(&skill)?;
     let (_, instructions) = frontmatter::read(&dir.join(SKILL_FILE))?;
-    let files = manifest(&dir);
-    Ok(SkillDetail {
-        skill,
-        instructions,
-        files,
-    })
+    Ok((skill, instructions, manifest(&dir)))
 }
 
 /// Creates a folder for a new skill.
 ///
 /// The slug is derived once and then kept: a rename changes the label, not the
-/// address, so a link, a state row and a running conversation all keep pointing
-/// at the same skill.
-pub fn create(
-    database: &Database,
-    draft: &SkillDraft,
-    origin: SkillOrigin,
-) -> Result<Skill, String> {
-    let roots = roots();
+/// address, so a link and a running conversation both keep pointing at the same
+/// skill.
+pub fn create(draft: &SkillDraft) -> Result<Skill, String> {
+    let root = root();
     let name = required(&draft.name, "name")?;
     let body = required(&draft.instructions, "instructions")?;
-    let slug = unique_slug(&roots.user, &slugify(&name));
-    let header = frontmatter::Frontmatter {
-        name: slug.clone(),
-        title: Some(name.clone()),
-        description: clean(&draft.description).unwrap_or_default(),
-        skill_type: clean(&draft.skill_type),
-        origin: (origin == SkillOrigin::Generated).then_some(SkillOrigin::Generated),
-    };
-    let dir = roots.user.join(&slug);
+    let slug = unique_slug(&root, &slugify(&name));
+    let dir = root.join(&slug);
     std::fs::create_dir_all(&dir)
         .map_err(|error| format!("Could not create {}: {error}", dir.display()))?;
-    write_markdown(&dir, &frontmatter::render(&header, &body))?;
-    database.ensure_skill_state(&slug)?;
-    get(database, &slug).map(|detail| detail.skill)
+    write_markdown(
+        &dir,
+        &frontmatter::render(
+            &slug,
+            clean(&draft.description).as_deref().unwrap_or(""),
+            &body,
+        ),
+    )?;
+    resolve(&slug)
 }
 
-/// Replaces a skill's editable text, keeping its slug and history.
-pub fn update(database: &Database, slug: &str, draft: &SkillDraft) -> Result<Skill, String> {
-    let skill = resolve(database, slug)?;
-    let name = required(&draft.name, "name")?;
+/// Replaces a skill's text, keeping its slug and files.
+pub fn update(slug: &str, draft: &SkillDraft) -> Result<Skill, String> {
+    let skill = resolve(slug)?;
     let body = required(&draft.instructions, "instructions")?;
-    let dir = editable_dir(&skill)?;
-    let (existing, _) = frontmatter::read(&dir.join(SKILL_FILE))?;
-    // An agent-drafted skill stays marked as such until it is re-created from
-    // scratch; the label describes where the text came from, not who last typed.
-    let origin = existing
-        .origin
-        .filter(|origin| *origin == SkillOrigin::Generated);
-    let header = frontmatter::Frontmatter {
-        name: skill.slug.clone(),
-        title: Some(name),
-        description: clean(&draft.description).unwrap_or_default(),
-        skill_type: clean(&draft.skill_type),
-        origin,
-    };
-    write_markdown(&dir, &frontmatter::render(&header, &body))?;
-    database.ensure_skill_state(&skill.slug)?;
-    get(database, &skill.slug).map(|detail| detail.skill)
+    let dir = directory_of(&skill)?;
+    write_markdown(
+        &dir,
+        &frontmatter::render(
+            &skill.slug,
+            clean(&draft.description).as_deref().unwrap_or(""),
+            &body,
+        ),
+    )?;
+    resolve(&skill.slug)
 }
 
 /// Removes a skill's folder.
-///
-/// A user copy goes first, and only it: if the skill was a fork of a shipped
-/// one, deleting the edit reveals the original rather than destroying both. A
-/// bundled skill with no user copy is removed from the shipped root too; the
-/// next catalogue version restores it, which is the same contract the row-backed
-/// set had. The state row goes with whichever folder was removed.
-pub fn delete(database: &Database, slug: &str) -> Result<(), String> {
-    let skill = resolve(database, slug)?;
-    let roots = roots();
-    let user = roots.user.join(&skill.slug);
-    let target = if user.is_dir() {
-        user
-    } else {
-        roots.bundled.join(&skill.slug)
-    };
-    if target.is_dir() {
-        std::fs::remove_dir_all(&target)
-            .map_err(|error| format!("Could not remove {}: {error}", target.display()))?;
-    }
-    database.delete_skill_state(&skill.slug)
+pub fn delete(slug: &str) -> Result<(), String> {
+    let skill = resolve(slug)?;
+    let dir = directory_of(&skill)?;
+    std::fs::remove_dir_all(&dir)
+        .map_err(|error| format!("Could not remove {}: {error}", dir.display()))
 }
 
 /// Writes a text file beside `SKILL.md`.
-pub fn write_file(
-    database: &Database,
-    slug: &str,
-    path: &str,
-    content: &str,
-) -> Result<SkillFile, String> {
-    let skill = resolve(database, slug)?;
+pub fn write_file(slug: &str, path: &str, content: &str) -> Result<SkillFile, String> {
+    let skill = resolve(slug)?;
     if content.len() as u64 > MAX_SUPPORTING_BYTES {
         return Err(format!(
             "That file is {} bytes; a single supporting file is limited to {}.",
@@ -313,7 +227,7 @@ pub fn write_file(
             MAX_SUPPORTING_BYTES
         ));
     }
-    let dir = editable_dir(&skill)?;
+    let dir = directory_of(&skill)?;
     let relative = relative_path(path)?;
     let target = resolve_inside(&dir, &relative)?;
     if let Some(parent) = target.parent() {
@@ -329,13 +243,8 @@ pub fn write_file(
 /// The way binary material arrives: an image, a template, a PDF. `content`
 /// cannot carry bytes honestly, and base64 would inflate every asset by a third
 /// only to decode it again.
-pub fn copy_file(
-    database: &Database,
-    slug: &str,
-    path: &str,
-    from_workspace: &str,
-) -> Result<SkillFile, String> {
-    let skill = resolve(database, slug)?;
+pub fn copy_file(slug: &str, path: &str, from_workspace: &str) -> Result<SkillFile, String> {
+    let skill = resolve(slug)?;
     let workspace = crate::ai::tools::require_workspace()?;
     let source = crate::ai::tools::resolve_within(&workspace, from_workspace)?;
     let size = std::fs::metadata(&source)
@@ -349,7 +258,7 @@ pub fn copy_file(
     }
     let bytes = std::fs::read(&source)
         .map_err(|error| format!("Could not read {}: {error}", source.display()))?;
-    let dir = editable_dir(&skill)?;
+    let dir = directory_of(&skill)?;
     let relative = relative_path(path)?;
     let target = resolve_inside(&dir, &relative)?;
     if let Some(parent) = target.parent() {
@@ -361,8 +270,8 @@ pub fn copy_file(
 }
 
 /// Reads one supporting file back as text.
-pub fn read_file(database: &Database, slug: &str, path: &str) -> Result<String, String> {
-    let skill = resolve(database, slug)?;
+pub fn read_file(slug: &str, path: &str) -> Result<String, String> {
+    let skill = resolve(slug)?;
     let dir = directory_of(&skill)?;
     let relative = relative_path(path)?;
     let target = resolve_inside(&dir, &relative)?;
@@ -386,9 +295,9 @@ pub fn read_file(database: &Database, slug: &str, path: &str) -> Result<String, 
 }
 
 /// Removes one supporting file.
-pub fn delete_file(database: &Database, slug: &str, path: &str) -> Result<(), String> {
-    let skill = resolve(database, slug)?;
-    let dir = editable_dir(&skill)?;
+pub fn delete_file(slug: &str, path: &str) -> Result<(), String> {
+    let skill = resolve(slug)?;
+    let dir = directory_of(&skill)?;
     let relative = relative_path(path)?;
     let target = resolve_inside(&dir, &relative)?;
     if target.is_dir() {
@@ -397,25 +306,13 @@ pub fn delete_file(database: &Database, slug: &str, path: &str) -> Result<(), St
     std::fs::remove_file(&target).map_err(|error| format!("Could not remove {relative}: {error}"))
 }
 
-/// Whether a skill's scripts may run.
-pub fn trusted(database: &Database, slug: &str) -> Result<bool, String> {
-    Ok(database
-        .skill_state(slug)?
-        .map(|state| state.trusted)
-        .unwrap_or(false))
-}
-
 /// Resolves a script inside a skill, ready to execute.
 ///
 /// Returned as a pair so the caller can use the skill's slug and the file's real
 /// path without resolving twice. A path that is not a script, or not in this
 /// skill, is refused before anything is spawned.
-pub fn script_path(
-    database: &Database,
-    slug: &str,
-    path: &str,
-) -> Result<(Skill, PathBuf), String> {
-    let skill = resolve(database, slug)?;
+pub fn script_path(slug: &str, path: &str) -> Result<(Skill, PathBuf), String> {
+    let skill = resolve(slug)?;
     let dir = directory_of(&skill)?;
     let relative = relative_path(path)?;
     if !is_script(&relative) {
@@ -431,40 +328,14 @@ pub fn script_path(
     Ok((skill, target))
 }
 
-/// The folder a skill's files live in, for reading.
+/// The folder a skill lives in.
 pub fn directory_of(skill: &Skill) -> Result<PathBuf, String> {
-    directory_of_in(skill, &roots())
-}
-
-fn directory_of_in(skill: &Skill, roots: &Roots) -> Result<PathBuf, String> {
-    let user = roots.user.join(&skill.slug);
-    if user.is_dir() {
-        return Ok(user);
+    let dir = root().join(&skill.slug);
+    if dir.is_dir() {
+        Ok(dir)
+    } else {
+        Err(format!("The folder for `{}` is gone", skill.slug))
     }
-    let bundled = roots.bundled.join(&skill.slug);
-    if bundled.is_dir() {
-        return Ok(bundled);
-    }
-    Err(format!("The folder for `{}` is gone", skill.slug))
-}
-
-/// The folder a write should land in.
-///
-/// A bundled skill is copied into the user root the first time it is edited, so
-/// the app's own material is never modified in place and the user's version wins
-/// from then on. A delete of the user folder reveals the shipped one again.
-fn editable_dir(skill: &Skill) -> Result<PathBuf, String> {
-    let roots = roots();
-    let user = roots.user.join(&skill.slug);
-    if user.is_dir() {
-        return Ok(user);
-    }
-    let bundled = roots.bundled.join(&skill.slug);
-    if !bundled.is_dir() {
-        return Err(format!("The folder for `{}` is gone", skill.slug));
-    }
-    copy_tree(&bundled, &user)?;
-    Ok(user)
 }
 
 /// The supporting files of a skill, sorted by path.
@@ -611,7 +482,7 @@ pub fn slugify(name: &str) -> String {
     }
 }
 
-/// A slug no folder in the user root is using.
+/// A slug no folder in the root is using.
 fn unique_slug(root: &Path, base: &str) -> String {
     if !root.join(base).exists() {
         return base.to_string();
@@ -631,74 +502,11 @@ fn write_markdown(dir: &Path, text: &str) -> Result<(), String> {
     crate::ai::tools::write::atomic_write(&dir.join(SKILL_FILE), text.as_bytes())
 }
 
-/// Copies a folder tree, refusing links and enforcing the same size budget a
-/// listing does. Used only to fork a bundled skill into the user root.
-fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(to)
-        .map_err(|error| format!("Could not create {}: {error}", to.display()))?;
-    for entry in std::fs::read_dir(from)
-        .map_err(|error| format!("Could not read {}: {error}", from.display()))?
-        .flatten()
-    {
-        let source = entry.path();
-        let destination = to.join(entry.file_name());
-        let kind = entry
-            .file_type()
-            .map_err(|error| format!("Could not read {}: {error}", source.display()))?;
-        if kind.is_symlink() {
-            continue;
-        }
-        if kind.is_dir() {
-            copy_tree(&source, &destination)?;
-        } else {
-            let bytes = std::fs::read(&source)
-                .map_err(|error| format!("Could not read {}: {error}", source.display()))?;
-            if bytes.len() as u64 > MAX_ASSET_BYTES {
-                return Err(format!("{} is too large to copy", source.display()));
-            }
-            crate::ai::tools::write::atomic_write(&destination, &bytes)?;
-        }
-    }
-    Ok(())
-}
-
-/// Scans two roots. Crate-visible because the seed has to inspect the roots it
-/// just wrote rather than the installation's real ones.
-pub(crate) fn list_with(database: &Database, roots: &Roots) -> Result<Vec<Skill>, String> {
-    let states = database
-        .skill_states()
-        .map_err(|error| format!("Could not read skill state: {error}"))?
-        .into_iter()
-        .map(|state| (state.slug.clone(), state))
-        .collect::<HashMap<_, _>>();
-
-    let mut skills: HashMap<String, Skill> = HashMap::new();
-    // Bundled first, so a user folder of the same slug replaces it below.
-    for (root, origin) in [(&roots.bundled, true), (&roots.user, false)] {
-        for skill in scan(root, origin, &states) {
-            skills.insert(skill.slug.clone(), skill);
-        }
-    }
-    let mut skills = skills.into_values().collect::<Vec<_>>();
-    // Enabled first, then by label, then by slug. The final tie-break matters:
-    // the values came out of a `HashMap`, so two skills with the same label would
-    // otherwise swap places between launches -- and the model's index is a cached
-    // prefix that must be byte-identical from one request to the next.
-    skills.sort_by(|left, right| {
-        right
-            .enabled
-            .cmp(&left.enabled)
-            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
-            .then_with(|| left.slug.cmp(&right.slug))
-    });
-    Ok(skills)
-}
-
 /// Reads one root, skipping folders that are not skills.
 ///
 /// A malformed `SKILL.md` is logged and skipped rather than failing the list: one
 /// broken skill must not make every other skill disappear.
-fn scan(root: &Path, bundled: bool, states: &HashMap<String, SkillState>) -> Vec<Skill> {
+pub fn scan(root: &Path) -> Vec<Skill> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
     };
@@ -733,46 +541,20 @@ fn scan(root: &Path, bundled: bool, states: &HashMap<String, SkillState>) -> Vec
                 continue;
             }
         };
-        let state = states.get(slug);
         let files = manifest(&path);
-        let modified = std::fs::metadata(&markdown)
-            .and_then(|meta| meta.modified())
-            .ok()
-            .map(timestamp)
-            .unwrap_or_default();
-        let display = header.display_name();
+        let under = |folder: &str| files.iter().any(|file| file.path.starts_with(folder));
         skills.push(Skill {
             slug: slug.to_string(),
-            // The folder is the address even when the header disagrees, which is
-            // what keeps a hand-edited name from making a skill unreachable.
-            name: if display.trim().is_empty() {
-                slug.to_string()
-            } else {
-                display
-            },
+            // The folder is the address *and* the label.
+            name: frontmatter::humanize(slug),
             description: clean_text(&header.description),
-            skill_type: header.skill_type,
-            origin: if bundled {
-                SkillOrigin::Bundled
-            } else {
-                header.origin.unwrap_or(SkillOrigin::User)
-            },
-            enabled: state.map(|state| state.enabled).unwrap_or(true),
-            trusted: state.map(|state| state.trusted).unwrap_or(false),
-            use_count: state.map(|state| state.use_count).unwrap_or(0),
             file_count: files.len(),
             has_scripts: files.iter().any(|file| file.is_script),
-            created_at: state
-                .map(|state| state.created_at.clone())
-                .unwrap_or_else(|| modified.clone()),
-            updated_at: modified,
+            has_references: under("references/"),
+            has_assets: under("assets/") || under("templates/"),
         });
     }
     skills
-}
-
-fn timestamp(time: std::time::SystemTime) -> String {
-    chrono::DateTime::<chrono::Utc>::from(time).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 fn strip_type_suffix(label: &str) -> &str {
@@ -837,13 +619,13 @@ mod tests {
         path
     }
 
-    fn write_skill(root: &Path, slug: &str, title: &str) {
+    fn write_skill(root: &Path, slug: &str, description: &str) {
         let dir = root.join(slug);
         std::fs::create_dir_all(dir.join("scripts")).expect("dir");
         std::fs::create_dir_all(dir.join("references")).expect("refs");
         std::fs::write(
             dir.join(SKILL_FILE),
-            format!("---\nname: {slug}\ndescription: \"when {title}\"\nmetadata:\n  title: {title}\n  type: code\n---\n\nDo it.\n"),
+            format!("---\nname: {slug}\ndescription: \"{description}\"\n---\n\nDo it.\n"),
         )
         .expect("write");
         std::fs::write(dir.join("scripts/run.ps1"), "Write-Output hi").expect("script");
@@ -875,7 +657,7 @@ mod tests {
     #[test]
     fn a_manifest_excludes_the_skill_file_and_marks_scripts() {
         let root = temp("manifest");
-        write_skill(&root, "code-review", "Code review");
+        write_skill(&root, "code-review", "when reviewing");
         let files = manifest(&root.join("code-review"));
         let paths = files
             .iter()
@@ -899,8 +681,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The label printed by the index is `name [type]`; a model that copies the
-    /// whole label must still find the skill.
+    /// A folder is the whole skill: the label is the folder's name, and the
+    /// folders beside `SKILL.md` are what the row's glyphs report.
+    #[test]
+    fn a_folder_reads_as_one_skill() {
+        let root = temp("scan");
+        write_skill(&root, "code-review", "when reviewing");
+        let listed = scan(&root);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].slug, "code-review");
+        assert_eq!(listed[0].name, "Code review");
+        assert_eq!(listed[0].description.as_deref(), Some("when reviewing"));
+        assert_eq!(listed[0].file_count, 2);
+        assert!(listed[0].has_scripts);
+        assert!(listed[0].has_references);
+        assert!(!listed[0].has_assets);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A folder with no `SKILL.md` is not a skill, and neither is a file.
+    #[test]
+    fn a_folder_without_a_skill_file_is_skipped() {
+        let root = temp("skip");
+        std::fs::create_dir_all(root.join("notes")).expect("dir");
+        std::fs::write(root.join("loose.md"), "no").expect("write");
+        assert!(scan(&root).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The label an older index printed was `name [type]`; a transcript that
+    /// copies it must still find the skill.
     #[test]
     fn a_copied_index_label_resolves_to_its_slug() {
         assert_eq!(strip_type_suffix("Code review [code]"), "Code review");
@@ -909,46 +719,23 @@ mod tests {
     }
 
     #[test]
-    fn the_last_write_wins_when_both_roots_hold_a_slug() {
-        let user = temp("user");
-        let bundled = temp("bundled");
-        write_skill(&user, "code-review", "Mine");
-        write_skill(&bundled, "code-review", "Shipped");
-        let database = Database::in_memory().expect("db");
-        let listed = list_with(
-            &database,
-            &Roots {
-                user: user.clone(),
-                bundled: bundled.clone(),
-            },
-        )
-        .expect("list");
-        assert_eq!(listed.len(), 1);
-        // The user root is scanned second, so its copy replaces the shipped one --
-        // including the label it carries.
-        assert_eq!(listed[0].name, "Mine");
-        assert_eq!(listed[0].origin, SkillOrigin::User);
-        let _ = std::fs::remove_dir_all(&user);
-        let _ = std::fs::remove_dir_all(&bundled);
-    }
-
-    #[test]
-    fn a_new_row_reads_as_enabled_and_untrusted() {
-        let root = temp("state");
-        write_skill(&root, "code-review", "Code review");
-        let database = Database::in_memory().expect("db");
-        let listed = list_with(
-            &database,
-            &Roots {
-                user: root.clone(),
-                bundled: root.join("none"),
-            },
-        )
-        .expect("list");
-        assert!(listed[0].enabled);
-        assert!(!listed[0].trusted);
-        assert_eq!(listed[0].file_count, 2);
-        assert!(listed[0].has_scripts);
+    fn resolve_matches_a_slug_or_a_label() {
+        let root = temp("resolve");
+        write_skill(&root, "code-review", "when reviewing");
+        assert_eq!(
+            resolve_at(&root, "code-review").expect("slug").slug,
+            "code-review"
+        );
+        assert_eq!(
+            resolve_at(&root, "Code review").expect("label").slug,
+            "code-review"
+        );
+        assert_eq!(
+            resolve_at(&root, "Code review [code]")
+                .expect("legacy label")
+                .slug,
+            "code-review"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

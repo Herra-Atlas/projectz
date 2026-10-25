@@ -51,6 +51,14 @@ pub struct TtsSettings {
     /// rather than starting one in the reader's back. Off, the voice may load.
     #[serde(default = "yes")]
     pub auto_speak_only_loaded: bool,
+    /// Tidy the text before it is spoken: strip code, markup, and the separators
+    /// left where either was removed. Off, the reply is read as written.
+    #[serde(default = "yes")]
+    pub smart_speak: bool,
+    /// Synthesize sentence by sentence and start playing at once, instead of
+    /// waiting for the whole reply to be ready.
+    #[serde(default = "yes")]
+    pub stream_speech: bool,
     /// Written by the first version of this record, when there was one pace for
     /// every voice. Folded into `speeds` on load and never written again.
     #[serde(default, rename = "speed", skip_serializing)]
@@ -66,6 +74,8 @@ impl Default for TtsSettings {
             skip_markdown: true,
             auto_speak: false,
             auto_speak_only_loaded: true,
+            smart_speak: true,
+            stream_speech: true,
             legacy_speed: None,
         }
     }
@@ -162,6 +172,10 @@ pub struct TtsSettingsView {
     pub auto_speak: bool,
     /// Whether the auto read waits for an already-warm voice.
     pub auto_speak_only_loaded: bool,
+    /// Whether the text is tidied before it is spoken.
+    pub smart_speak: bool,
+    /// Whether synthesis is spoken sentence by sentence as it arrives.
+    pub stream_speech: bool,
 }
 
 impl TtsSettingsView {
@@ -175,6 +189,8 @@ impl TtsSettingsView {
             skip_markdown: settings.skip_markdown,
             auto_speak: settings.auto_speak,
             auto_speak_only_loaded: settings.auto_speak_only_loaded,
+            smart_speak: settings.smart_speak,
+            stream_speech: settings.stream_speech,
         }
     }
 }

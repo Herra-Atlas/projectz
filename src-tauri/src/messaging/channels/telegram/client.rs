@@ -29,6 +29,11 @@ const LONG_POLL_TIMEOUT: Duration = Duration::from_secs(LONG_POLL_SECONDS + 15);
 /// The bound on everything else, because a send that has not answered in twenty
 /// seconds has not worked.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+/// The largest file Telegram will accept from a bot. Anything larger would spend
+/// the upload and then be refused, so it is checked before the request.
+const MAX_UPLOAD_BYTES: u64 = 50 * 1024 * 1024;
+/// The largest file Telegram will serve to a bot.
+const MAX_DOWNLOAD_BYTES: u64 = 20 * 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BotUser {
@@ -72,6 +77,14 @@ impl TelegramClient {
         })
     }
 
+    /// A transport error without the bot token that sits in every API URL.
+    ///
+    /// `reqwest` includes the request URL in its display text, so passing that
+    /// through would put the credential in a settings field, a log or a chat.
+    fn redact(&self, error: impl std::fmt::Display) -> String {
+        error.to_string().replace(&self.token, "<bot token>")
+    }
+
     /// One Bot API call.
     ///
     /// Telegram answers `{ ok, result, description, error_code }` with HTTP 200 even
@@ -86,7 +99,7 @@ impl TelegramClient {
             .json(&body)
             .send()
             .await
-            .map_err(|error| format!("Telegram is unreachable: {error}"))?;
+            .map_err(|error| format!("Telegram is unreachable: {}", self.redact(error)))?;
         let payload: Value = response.json().await.unwrap_or_else(|_| Value::Null);
         if payload.get("ok").and_then(Value::as_bool) == Some(true) {
             return Ok(payload.get("result").cloned().unwrap_or(Value::Null));
@@ -129,6 +142,139 @@ impl TelegramClient {
             )
             .await?;
         Ok(result.as_array().cloned().unwrap_or_default())
+    }
+
+    /// Fetches a file the user sent.
+    ///
+    /// Telegram names a file with `file_id` and then serves its bytes from a
+    /// second URL carrying the bot token. Both halves live here so the core never
+    /// learns a token or a Telegram URL.
+    pub async fn download_file(&self, file_id: &str) -> Result<Vec<u8>, String> {
+        let result = self
+            .call(
+                "getFile",
+                json!({ "file_id": file_id }),
+                Duration::from_secs(20),
+            )
+            .await?;
+        let path = result
+            .get("file_path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Telegram did not return a file path".to_string())?;
+        if result
+            .get("file_size")
+            .and_then(Value::as_u64)
+            .is_some_and(|size| size > MAX_DOWNLOAD_BYTES)
+        {
+            return Err(
+                "The file is larger than Telegram will let a bot download (20 MB).".to_string(),
+            );
+        }
+
+        let response = self
+            .http
+            .get(format!("{API}/file/bot{}/{path}", self.token))
+            .timeout(Duration::from_secs(60))
+            .send()
+            .await
+            .map_err(|error| format!("Could not download the file: {}", self.redact(error)))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "Telegram refused the file download ({})",
+                response.status()
+            ));
+        }
+        if response
+            .content_length()
+            .is_some_and(|size| size > MAX_DOWNLOAD_BYTES)
+        {
+            return Err(
+                "The file is larger than Telegram will let a bot download (20 MB).".to_string(),
+            );
+        }
+        let bytes = response.bytes().await.map_err(|error| {
+            format!("Could not read the downloaded file: {}", self.redact(error))
+        })?;
+        if bytes.len() as u64 > MAX_DOWNLOAD_BYTES {
+            return Err(
+                "The file is larger than Telegram will let a bot download (20 MB).".to_string(),
+            );
+        }
+        Ok(bytes.to_vec())
+    }
+
+    /// Sends one file as a document, which preserves its bytes and its name.
+    ///
+    /// Documents rather than photos even for images: a photo is re-encoded and its
+    /// name disappears, which is wrong for a file the agent edited.
+    pub async fn send_document(
+        &self,
+        chat_id: &str,
+        path: &std::path::Path,
+        name: &str,
+    ) -> Result<SentMessage, String> {
+        let metadata = tokio::fs::metadata(path)
+            .await
+            .map_err(|error| format!("Could not read {name}: {error}"))?;
+        if metadata.len() > MAX_UPLOAD_BYTES {
+            return Err(format!(
+                "{name} is larger than Telegram's 50 MB upload limit."
+            ));
+        }
+        let bytes = tokio::fs::read(path)
+            .await
+            .map_err(|error| format!("Could not read {name}: {error}"))?;
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(name.to_string())
+            .mime_str(media_type(name))
+            .map_err(|error| format!("Could not prepare {name}: {error}"))?;
+        let form = reqwest::multipart::Form::new()
+            .text("chat_id", chat_id.to_string())
+            .part("document", part);
+        let response = self
+            .http
+            .post(format!("{API}/bot{}/sendDocument", self.token))
+            .timeout(Duration::from_secs(120))
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|error| format!("Telegram is unreachable: {}", self.redact(error)))?;
+        let payload: Value = response.json().await.unwrap_or_else(|_| Value::Null);
+        if payload.get("ok").and_then(Value::as_bool) == Some(true) {
+            let result = payload.get("result").cloned().unwrap_or(Value::Null);
+            let id = result
+                .get("message_id")
+                .and_then(Value::as_i64)
+                .map(|id| id.to_string())
+                .unwrap_or_default();
+            return Ok(SentMessage { id });
+        }
+        Err(payload
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("Telegram refused the file")
+            .to_string())
+    }
+
+    /// Removes a message the app sent.
+    pub async fn delete_message(&self, chat_id: &str, message_id: &str) -> Result<(), String> {
+        match self
+            .call(
+                "deleteMessage",
+                json!({ "chat_id": chat_id, "message_id": message_id }),
+                REQUEST_TIMEOUT,
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error)
+                if error.contains("message to delete not found")
+                    || error.contains("message is not found") =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn send_message(
@@ -202,6 +348,35 @@ impl TelegramClient {
     }
 }
 
+/// The media type Telegram should label an uploaded document with.
+///
+/// Applies only to the metadata; the bytes are sent unchanged. An unknown
+/// extension is a generic binary rather than a guess that could make a client
+/// try to render something it cannot.
+fn media_type(name: &str) -> &'static str {
+    match name
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        Some("pdf") => "application/pdf",
+        Some("txt") | Some("log") => "text/plain",
+        Some("md") | Some("markdown") => "text/markdown",
+        Some("json") => "application/json",
+        Some("csv") => "text/csv",
+        Some("html") | Some("htm") => "text/html",
+        Some("xml") => "application/xml",
+        Some("zip") => "application/zip",
+        Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        Some("xlsx") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        _ => "application/octet-stream",
+    }
+}
+
 /// One button per row, so a long label is readable instead of squeezed.
 fn keyboard(buttons: &[Button]) -> Option<Value> {
     if buttons.is_empty() {
@@ -252,6 +427,19 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0][0]["text"], "Allow");
         assert_eq!(rows[1][0]["callback_data"], "ap:1:n");
+    }
+
+    /// A transport error names the URL, and the URL contains the credential.
+    #[test]
+    fn a_transport_error_loses_the_token() {
+        let client = TelegramClient::new("123456:ABC-DEF").expect("client");
+        let error = format!(
+            "error sending request for url (https://api.telegram.org/bot{}/getMe)",
+            "123456:ABC-DEF"
+        );
+        let redacted = client.redact(error);
+        assert!(!redacted.contains("123456:ABC-DEF"));
+        assert!(redacted.contains("<bot token>"));
     }
 
     /// A bot's identity is its handle when it has one, because that is what a

@@ -6,33 +6,7 @@
  * this record crosses the boundary unchanged rather than being mapped, so the
  * fewer places a name can be mistranslated the better.
  */
-
-/** What a job is allowed to touch. Mirrors the Rust `AccessSet`. */
-export type AccessSet = {
-  read: boolean;
-  write: boolean;
-  terminal: boolean;
-  web: boolean;
-  subagents: boolean;
-  /**
-   * Whether the run may schedule work for later.
-   *
-   * Not offered as a switch anywhere: a job's own run always has it taken away, so
-   * scheduled work cannot schedule more of itself. It is here because the set has to
-   * round-trip whole.
-   */
-  jobs: boolean;
-};
-
-/** Everything on, which is what a hand-started run gets. */
-export const ALL_ACCESS: AccessSet = {
-  read: true,
-  write: true,
-  terminal: true,
-  web: true,
-  subagents: true,
-  jobs: true,
-};
+import { ALL_ACCESS, type AccessSet } from "../chat/access";
 
 /** Which model a job runs on. A local model is named by id; a remote pair is not. */
 export type JobModel =

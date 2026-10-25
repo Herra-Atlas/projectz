@@ -27,8 +27,7 @@
 use std::io::{Cursor, Read};
 use std::path::{Component, Path};
 
-use crate::database::Database;
-use crate::skills::{self, frontmatter, Roots, Skill, SKILL_FILE};
+use crate::skills::{self, frontmatter, Skill, SKILL_FILE};
 
 /// Largest archive this will download.
 const MAX_ARCHIVE_BYTES: usize = 16 * 1024 * 1024;
@@ -43,7 +42,7 @@ const MAX_TOTAL_BYTES: u64 = 24 * 1024 * 1024;
 const MAX_ENTRIES: usize = 300;
 
 /// Fetches and installs a skill from `url`.
-pub async fn install_from_url(database: &Database, url: &str) -> Result<Skill, String> {
+pub async fn install_from_url(url: &str) -> Result<Skill, String> {
     let url = normalize(url)?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(45))
@@ -76,21 +75,16 @@ pub async fn install_from_url(database: &Database, url: &str) -> Result<Skill, S
             bytes.len()
         ));
     }
-    install_archive(database, &bytes)
+    install_archive(&bytes)
 }
 
 /// Installs an archive already in memory.
-pub fn install_archive(database: &Database, bytes: &[u8]) -> Result<Skill, String> {
-    let roots = skills::roots();
-    install_archive_with(database, bytes, &roots)
+pub fn install_archive(bytes: &[u8]) -> Result<Skill, String> {
+    install_archive_with(bytes, &skills::root())
 }
 
-/// The testable half: install into explicit roots.
-pub fn install_archive_with(
-    database: &Database,
-    bytes: &[u8],
-    roots: &Roots,
-) -> Result<Skill, String> {
+/// The testable half: install into an explicit root.
+pub fn install_archive_with(bytes: &[u8], root: &Path) -> Result<Skill, String> {
     if !bytes.starts_with(b"PK") {
         return Err(
             "That link did not return a zip archive. Point it at a .zip file or a GitHub repository."
@@ -141,11 +135,14 @@ pub fn install_archive_with(
         files.push((name, contents));
     }
 
-    let root = skill_root(&files)?;
-    let prefix = if root.is_empty() {
+    // The folder the skill sits at inside the archive, not the destination root:
+    // a repo archive puts one skill under `repo-main/`, and everything outside it
+    // is beside the skill rather than in it.
+    let folder = skill_root(&files)?;
+    let prefix = if folder.is_empty() {
         String::new()
     } else {
-        format!("{root}/")
+        format!("{folder}/")
     };
 
     // The header supplies identity and the trigger. Both are required: a skill
@@ -161,7 +158,7 @@ pub fn install_archive_with(
     let slug = if header.name.trim().is_empty() {
         // A header without a name is a plain markdown note. The folder it was
         // packaged in is the only other identity available.
-        skills::slugify(root.rsplit('/').next().unwrap_or("skill"))
+        skills::slugify(folder.rsplit('/').next().unwrap_or("skill"))
     } else {
         validate_slug(&header.name)?
     };
@@ -170,13 +167,13 @@ pub fn install_archive_with(
             "That skill has no description, which is what the model chooses it by".to_string(),
         );
     }
-    if roots.user.join(&slug).exists() || roots.bundled.join(&slug).exists() {
+    if root.join(&slug).exists() {
         return Err(format!(
             "A skill named `{slug}` is already installed. Delete or rename it first."
         ));
     }
 
-    let destination = roots.user.join(&slug);
+    let destination = root.join(&slug);
     for (name, contents) in &files {
         let Some(relative) = name.strip_prefix(&prefix) else {
             // A file beside the skill rather than in it -- a README for the repo,
@@ -205,12 +202,10 @@ pub fn install_archive_with(
         return Err("The archive's SKILL.md was not extracted".to_string());
     }
 
-    database.ensure_skill_state(&slug)?;
-    // Enabled so a body-only skill works immediately; untrusted so a script does
-    // not. The user can flip both on the skill's page.
-    database.set_skill_enabled(&slug, true)?;
-    database.set_skill_trusted(&slug, false)?;
-    skills::get_with(database, &slug, roots).map(|detail| detail.skill)
+    // Read back through the installer's own resolution rather than the
+    // process-global root, so a test that installed into a temporary folder gets
+    // the skill it just wrote.
+    skills::resolve_at(root, &slug)
 }
 
 /// Turns a GitHub link into its archive, and refuses anything that is not HTTP.
@@ -404,34 +399,43 @@ mod tests {
     }
 
     /// The whole path, against a temporary root: the body lands, the script is
-    /// kept, and the skill starts enabled and untrusted.
+    /// kept, and the label comes from the folder rather than a header field.
     #[test]
-    fn an_archive_installs_as_an_untrusted_skill() {
-        let base = temp("install");
-        let roots = Roots {
-            user: base.join("skills"),
-            bundled: base.join("bundled"),
-        };
-        let database = Database::in_memory().expect("db");
+    fn an_archive_installs_as_a_skill_folder() {
+        let root = temp("install");
         let bytes = archive(&[
             (
                 "pdf-tools/SKILL.md",
-                "---\nname: pdf-tools\ndescription: \"Use when handling PDFs\"\nmetadata:\n  title: PDF tools\n---\n\nRead the PDF.",
+                "---\nname: pdf-tools\ndescription: \"Use when handling PDFs\"\n---\n\nRead the PDF.",
             ),
             ("pdf-tools/scripts/extract.py", "print('hi')"),
             ("README.md", "repo readme"),
         ]);
 
-        let skill = install_archive_with(&database, &bytes, &roots).expect("install");
+        let skill = install_archive_with(&bytes, &root).expect("install");
         assert_eq!(skill.slug, "pdf-tools");
-        assert_eq!(skill.name, "PDF tools");
-        assert!(skill.enabled);
-        assert!(!skill.trusted);
+        assert_eq!(skill.name, "Pdf tools");
         assert!(skill.has_scripts);
         assert_eq!(skill.file_count, 1);
-        assert!(roots.user.join("pdf-tools/scripts/extract.py").is_file());
+        assert!(root.join("pdf-tools/scripts/extract.py").is_file());
         // A file beside the skill folder is not copied into it.
-        assert!(!roots.user.join("pdf-tools/README.md").exists());
-        let _ = std::fs::remove_dir_all(&base);
+        assert!(!root.join("pdf-tools/README.md").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Installing the same skill twice is refused, because the second write would
+    /// silently replace what the user may have edited since the first.
+    #[test]
+    fn a_second_install_of_the_same_skill_is_refused() {
+        let root = temp("duplicate");
+        let bytes = archive(&[(
+            "pdf-tools/SKILL.md",
+            "---\nname: pdf-tools\ndescription: \"Use when handling PDFs\"\n---\n\nBody.",
+        )]);
+        install_archive_with(&bytes, &root).expect("first");
+        assert!(install_archive_with(&bytes, &root)
+            .expect_err("second")
+            .contains("already installed"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
