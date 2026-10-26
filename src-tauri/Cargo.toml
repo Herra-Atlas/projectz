@@ -88,6 +88,12 @@ tokio-tungstenite = "0.24"
 # feature note above.
 ash = { version = "0.38", optional = true }
 
+[target.'cfg(windows)'.dependencies]
+# The user's and machine's PATH live in the registry, and a child process only
+# inherits the app's copy from launch time. Read at spawn time so a tool installed
+# after the app started is usable without a restart; see `src/child/path.rs`.
+winreg = "0.55"
+
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

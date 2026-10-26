@@ -5,6 +5,12 @@ import { CircleHelp } from "lucide-react";
 export type PendingQuestion = {
   /** Ties the prompt to the run, so two sessions can each have one open. */
   runId: string;
+  /**
+   * The conversation the run belongs to, for the same reason as an approval: a
+   * question asked by another chat -- or by a phone message -- is answered
+   * there, not over whatever happens to be on screen.
+   */
+  sessionId: string | null;
   questionId: string;
   question: string;
   /** Suggested answers, offered as buttons. May be empty. */

@@ -8,6 +8,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import { NotificationHostProvider } from "./features/notifications/notificationHost";
 import { useCopiedNotification, useNotifications } from "./features/notifications/useNotifications";
 import Sidebar from "./components/Sidebar";
+import TooltipLayer from "./components/TooltipLayer";
 import ChatPage from "./pages/chat/ChatPage";
 import SettingsModal from "./components/SettingsModal";
 import StartupScreen from "./components/StartupScreen";
@@ -22,6 +23,7 @@ import { useAppearance } from "./features/appearance/useAppearance";
 import { useRightPanel } from "./features/rightPanel/useRightPanel";
 import { displayModelName } from "./features/models/modelName";
 import { useWorkspaces, workspaceLabel } from "./features/workspace/useWorkspaces";
+import { loadGeneralSettings } from "./features/settings/generalSettings";
 import { createPortal } from "react-dom";
 import type { ChatMessage, SessionActivity, SessionRunStatus } from "./features/chat/types";
 import type { WorkingMode } from "./features/chat/chatMode";
@@ -85,7 +87,6 @@ export default function App() {
 
 function AppShell() {
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsRefreshKey, setSettingsRefreshKey] = useState(0);
   const [startupDone, setStartupDone] = useState(false);
   const [startupError, setStartupError] = useState("");
   const [sessionReloadKey, setSessionReloadKey] = useState(0);
@@ -326,6 +327,11 @@ function AppShell() {
       setStartupProgress({ phase: "migration", message: "Importing existing data", progress: 94 });
       return chatRepository.initialize();
     }).then(() => {
+      // Behind the startup screen, so the chat page's greeting and the composer's
+      // preferences are already in memory when the app first renders. Read after
+      // the import above, which is what migrates this record on an old install.
+      return loadGeneralSettings().catch(() => undefined);
+    }).then(() => {
       if (!mounted) return;
       setStartupProgress({ phase: "ready", message: "Opening ProjectZ", progress: 100 });
       setStartupDone(true);
@@ -501,7 +507,7 @@ function AppShell() {
   const retryStartup = () => {
     setStartupError("");
     setStartupProgress({ phase: "database", message: "Opening database", progress: 4 });
-    void invoke("database_initialize").then(() => chatRepository.initialize()).then(() => {
+    void invoke("database_initialize").then(() => chatRepository.initialize()).then(() => loadGeneralSettings().catch(() => undefined)).then(() => {
       setStartupDone(true);
       setSessionReloadKey((key) => key + 1);
     }).catch((reason: unknown) => setStartupError(String(reason)));
@@ -669,14 +675,21 @@ function AppShell() {
             void invoke("local_model_select", { id });
           }}
           modelRefreshKey={endpointRefreshKey}
-          settingsRefreshKey={settingsRefreshKey}
           onMessagesChange={handleMessagesChange}
           onWorkingModeChange={chat.setSessionWorkingMode}
           onNotify={notify}
           onNotifyAction={notifyAction}
           onClearNotification={clearNotification}
           onOpenUrl={(url) => setRequestedUrl({ url, key: Date.now() })}
-          onOpenFile={setRequestedFile}
+          onOpenFile={(path) => {
+            // A file clicked in a reply belongs to the workspace. If the panel is
+            // still showing a skill folder from Settings, the request would be
+            // resolved against the skills root -- which is how a document named
+            // `NOTES.xlsx` came back as a missing file under `skills/`. Clearing
+            // the skill is the same switch the × in that header performs.
+            setOpenSkill(null);
+            setRequestedFile(path);
+          }}
           titleModels={preferences.sessionTitleModels}
           onAutoTitle={chat.setAutoTitle}
           workspaceRoot={workspaces.selected}
@@ -711,7 +724,8 @@ function AppShell() {
       />
 
       <NotificationStack notifications={notifications} copiedId={copiedNotificationId} onDismiss={dismissNotification} onCopy={copyNotification} />
-      <SettingsModal open={settingsOpen} onClose={() => { setSettingsOpen(false); setSettingsRefreshKey((key) => key + 1); }} onEndpointsChanged={() => setEndpointRefreshKey((key) => key + 1)} preferences={preferences} onPreferencesChange={savePreferences} appearance={appearance} onAppearanceChange={saveAppearance} notify={notify} onOpenSkill={(slug) => { setOpenSkill(slug); setSettingsOpen(false); }} />
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} onEndpointsChanged={() => setEndpointRefreshKey((key) => key + 1)} preferences={preferences} onPreferencesChange={savePreferences} appearance={appearance} onAppearanceChange={saveAppearance} notify={notify} onOpenSkill={(slug) => { setOpenSkill(slug); setSettingsOpen(false); }} />
+      <TooltipLayer />
     </div>
   );
 }

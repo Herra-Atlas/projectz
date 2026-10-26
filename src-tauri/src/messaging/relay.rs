@@ -147,6 +147,14 @@ pub async fn watch(
     if send_files {
         files::send_changed(channel.as_ref(), &chat, changed).await;
     }
+
+    // A question that outlived its run is not waiting for anything. Left in the
+    // state, the next message from this person would be taken as its answer and
+    // replied to with "Answered." -- to a prompt whose run had already ended.
+    hub.update_state(&key, |state| {
+        state.question = None;
+        state.question_options.clear();
+    });
 }
 
 /// Relays a pending tool prompt as a pair of buttons.
@@ -181,6 +189,12 @@ async fn post_approval(hub: &Messaging, channel: &dyn Channel, chat: &str, event
 }
 
 /// Relays `ask_user`, and remembers which question a typed answer belongs to.
+///
+/// The suggested answers go as buttons, because they are the one part of a
+/// question a phone can answer without typing. The callback data cannot carry the
+/// text -- Telegram caps it at 64 bytes and the question id spends most of that --
+/// so the option list is kept in the sender's state and the button carries its
+/// index instead. A question with no options is still a typed answer, and says so.
 async fn post_question(
     hub: &Messaging,
     channel: &dyn Channel,
@@ -196,14 +210,75 @@ async fn post_question(
     else {
         return;
     };
-    hub.update_state(key, |state| state.question = Some(question_id.to_string()));
+    let options: Vec<String> = event
+        .metrics
+        .as_ref()
+        .and_then(|metrics| metrics.get("options"))
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|option| !option.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    hub.update_state(key, |state| {
+        state.question = Some(question_id.to_string());
+        state.question_options = options.clone();
+    });
+
     let text = event
         .text
         .clone()
         .unwrap_or_else(|| "The agent has a question.".to_string());
-    let _ = channel
-        .send(chat, &format!("{text}\n\nReply with your answer."), &[])
-        .await;
+
+    // Four is what fits a phone's keyboard in one screenful without the buttons
+    // becoming a list of their own. A fifth suggestion is still in the message.
+    let mut buttons = Vec::new();
+    if channel.capabilities().buttons && !options.is_empty() {
+        for (index, option) in options.iter().enumerate().take(4) {
+            buttons.push(Button::new(
+                button_label(option),
+                format!("qa:{question_id}:{index}"),
+            ));
+        }
+    }
+    let text = if !buttons.is_empty() {
+        format!("{text}\n\nChoose one, or reply with your own answer.")
+    } else {
+        let listed = if options.is_empty() {
+            String::new()
+        } else {
+            let lines = options
+                .iter()
+                .enumerate()
+                .map(|(index, option)| format!("{}. {option}", index + 1))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("\n\n{lines}")
+        };
+        format!("{text}{listed}\n\nReply with your answer.")
+    };
+    let _ = channel.send(chat, &text, &buttons).await;
+}
+
+/// A button's caption, shortened to what a phone can show.
+///
+/// Truncated on characters rather than bytes so an option in a non-Latin script
+/// cannot be cut in the middle of a glyph.
+fn button_label(text: &str) -> String {
+    const MAX_CHARS: usize = 32;
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= MAX_CHARS {
+        return trimmed.to_string();
+    }
+    let mut label: String = trimmed.chars().take(MAX_CHARS - 1).collect();
+    label.push('…');
+    label
 }
 
 #[cfg(test)]
@@ -216,5 +291,17 @@ mod tests {
     fn the_edit_interval_is_a_second_and_a_bit() {
         assert!(EDIT_INTERVAL >= Duration::from_millis(1_000));
         assert!(EDIT_INTERVAL <= Duration::from_secs(2));
+    }
+
+    /// An option is a sentence as often as it is a word, and a button is not the
+    /// place for a paragraph. The cut is on characters so a non-Latin option is
+    /// not severed mid-glyph.
+    #[test]
+    fn a_long_option_is_shortened_for_a_button() {
+        assert_eq!(button_label("Yes"), "Yes");
+        let long = "a".repeat(50);
+        let label = button_label(&long);
+        assert_eq!(label.chars().count(), 32);
+        assert!(label.ends_with('…'));
     }
 }

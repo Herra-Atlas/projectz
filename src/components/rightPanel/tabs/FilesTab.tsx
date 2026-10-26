@@ -72,6 +72,26 @@ export default function FilesTab({ workspace, skill = null, onCloseSkill, reques
   const [query, setQuery] = useState("");
   const { root, error, loadingPath, isExpanded, childrenOf, toggle, expand, openAt, create, move, rename, delete: deleteFile } = useFileTree(skill);
 
+  /**
+   * Which tree the previewed file was opened under.
+   *
+   * A preview is a path relative to a root, so a file shown from the workspace
+   * means nothing while the tree is drawing the skills root. Stamping the root
+   * lets a switch clear an old preview without clearing one that arrived *with*
+   * the switch -- which is exactly what a click on a document in a reply does
+   * when the panel was left showing a skill folder.
+   */
+  const rootKey = `${skill ?? ""}\u0000${workspace ?? ""}`;
+  const previewRootRef = useRef<string | null>(null);
+  const showPreview = useCallback((entry: TreeEntry) => {
+    previewRootRef.current = rootKey;
+    setPreview(entry);
+  }, [rootKey]);
+  const closePreview = useCallback(() => {
+    previewRootRef.current = null;
+    setPreview(null);
+  }, []);
+
   /** The right-click being answered, or null. `target: null` is the blank space. */
   const [menu, setMenu] = useState<{ point: { x: number; y: number }; target: TreeEntry | null } | null>(null);
   /** The one rename or create field currently open, or null. */
@@ -95,9 +115,11 @@ export default function FilesTab({ workspace, skill = null, onCloseSkill, reques
   useEffect(() => {
     if (!requestedPath) return;
     const name = requestedPath.slice(requestedPath.lastIndexOf("/") + 1);
-    setPreview({ name, path: requestedPath, isDir: false, hasChildren: false });
+    showPreview({ name, path: requestedPath, isDir: false, hasChildren: false });
     acknowledgeRef.current();
-  }, [requestedPath]);
+    // `showPreview` is re-created only when the root changes. The request is
+    // consumed before any later root switch, so this cannot loop.
+  }, [requestedPath, showPreview]);
 
   // Re-read from the root whenever the folder changes. Without this the tree
   // would keep showing the *previous* workspace's contents next to the new
@@ -121,7 +143,6 @@ export default function FilesTab({ workspace, skill = null, onCloseSkill, reques
   // while its siblings stay listed, because the skills root is a folder like any
   // other and a person may well want the neighbouring one.
   const loadedRootRef = useRef<string | null | undefined>(undefined);
-  const rootKey = `${skill ?? ""}\u0000${workspace ?? ""}`;
 
   useEffect(() => {
     const previous = loadedRootRef.current;
@@ -130,7 +151,13 @@ export default function FilesTab({ workspace, skill = null, onCloseSkill, reques
       // A genuine switch: anything open against the old folder is stale, so the
       // preview and the filter go and the tree is read again for the new one.
       if (previous === rootKey) return;
-      setPreview(null);
+      // ...unless the preview was opened under the root being switched *to*.
+      // That is a file requested from a reply while a skill was showing: the
+      // request and the root change arrive in one commit, and clearing here
+      // would throw away the file the click asked for.
+      if (previewRootRef.current !== null && previewRootRef.current !== rootKey) {
+        closePreview();
+      }
       setQuery("");
       setEdit(null);
       setMenu(null);
@@ -139,7 +166,7 @@ export default function FilesTab({ workspace, skill = null, onCloseSkill, reques
     // in from the click that opened this panel, and clearing it here is what made
     // the first click on a changed file look lost.
     void openAt(skill ?? null);
-  }, [rootKey, skill, openAt]);
+  }, [rootKey, skill, openAt, closePreview]);
 
   const closeMenu = useCallback(() => setMenu(null), []);
 
@@ -239,8 +266,8 @@ export default function FilesTab({ workspace, skill = null, onCloseSkill, reques
   // A click that is the tail of a drag must not also open the file it ended on.
   const openFile = useCallback((entry: TreeEntry) => {
     if (treeDrag.shouldIgnoreClick()) return;
-    setPreview(entry);
-  }, [treeDrag]);
+    showPreview(entry);
+  }, [treeDrag, showPreview]);
 
   const toggleEntry = useCallback((path: string) => {
     if (treeDrag.shouldIgnoreClick()) return;
@@ -248,13 +275,13 @@ export default function FilesTab({ workspace, skill = null, onCloseSkill, reques
   }, [treeDrag, toggle]);
 
   const items = useMemo(() => buildFileMenuItems(menu?.target ?? null, {
-    onView: setPreview,
+    onView: showPreview,
     onCopyPath: (entry) => void copyPath(entry),
     onRename: startRename,
     onDelete: (entry) => void remove(entry),
     onCreateFile: (parent) => void startCreate(parent, false),
     onCreateFolder: (parent) => void startCreate(parent, true),
-  }), [menu, copyPath, startRename, remove, startCreate]);
+  }), [menu, copyPath, startRename, remove, startCreate, showPreview]);
 
   // A file opened under a folder that has since changed may no longer exist, so
   // returning to the tree is the only way to see what is there now.
@@ -263,7 +290,7 @@ export default function FilesTab({ workspace, skill = null, onCloseSkill, reques
   // skill's `assets/` is read through the same bytes command, and that command
   // needs to know which root the path is relative to.
   if (preview) {
-    return <FilePreview entry={preview} workspace={workspace} skill={skill} onBack={() => setPreview(null)} onPreviewInBrowser={onPreviewInBrowser} onNotify={onNotify} />;
+    return <FilePreview entry={preview} workspace={workspace} skill={skill} onBack={closePreview} onPreviewInBrowser={onPreviewInBrowser} onNotify={onNotify} />;
   }
 
   if (!workspace && !skill) {

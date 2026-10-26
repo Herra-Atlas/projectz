@@ -737,13 +737,47 @@ pub fn skills_folder(slug: String) -> Result<String, String> {
     Ok(crate::skills::directory_of(&skill)?.display().to_string())
 }
 
-/// Installs a skill from a `.zip` link or a GitHub repository.
+/// Installs a skill from a `.zip` link or a repository that holds exactly one.
 ///
 /// User-initiated by construction: this is a command the Settings button calls,
 /// never a tool the model can reach. See `skills::install` for why.
 #[tauri::command]
 pub async fn skills_install(url: String) -> Result<crate::skills::Skill, String> {
     crate::skills::install::install_from_url(&url).await
+}
+
+/// Resolves a GitHub repository link to the skills it publishes.
+///
+/// One tree request, not one per folder: the picker needs the list before the
+/// user chooses anything, and the API quota is small enough that spending it on
+/// discovery would make a seven-skill repository cost more than the skills.
+#[tauri::command]
+pub async fn skills_discover(
+    app: AppHandle,
+    url: String,
+) -> Result<crate::skills::github::Discovery, String> {
+    let progress = move |step: crate::skills::github::Progress| {
+        let _ = app.emit("skills-install", step);
+    };
+    crate::skills::github::discover_url(&url, &progress).await
+}
+
+/// Installs the folders the picker selected.
+///
+/// Progress rides on `skills-install` events between the first byte and the
+/// last row, so the dialog can show a bar rather than a spinner that says
+/// nothing about whether anything is happening.
+#[tauri::command]
+pub async fn skills_install_selected(
+    app: AppHandle,
+    url: String,
+    reference: String,
+    skills: Vec<String>,
+) -> Result<crate::skills::github::InstallReport, String> {
+    let progress = move |step: crate::skills::github::Progress| {
+        let _ = app.emit("skills-install", step);
+    };
+    crate::skills::github::install_url_selected(&url, &reference, &skills, &progress).await
 }
 
 /// Every saved job, for the editor's list.

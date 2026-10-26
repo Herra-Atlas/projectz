@@ -57,7 +57,10 @@ pub async fn handle(
     // A message that also carries a file is a new turn, not an answer.
     if inbound.files.is_empty() {
         if let Some(question_id) = hub.state(&key).question.clone() {
-            hub.update_state(&key, |state| state.question = None);
+            hub.update_state(&key, |state| {
+                state.question = None;
+                state.question_options.clear();
+            });
             if hub.runtime().answer_question(&question_id, text.clone()) {
                 return say(channel.as_ref(), &inbound.chat_id, "Answered.").await;
             }
@@ -492,6 +495,34 @@ async fn action(
             } else {
                 "That prompt is no longer waiting.".to_string()
             };
+        }
+    } else if let Some(rest) = data.strip_prefix("qa:") {
+        // An `ask_user` suggestion. The text lives in the sender's state because
+        // the callback data has room for an id and an index, not a sentence.
+        if let Some((question_id, index)) = rest.rsplit_once(':') {
+            let options = hub.state(&key).question_options;
+            let chosen = index
+                .parse::<usize>()
+                .ok()
+                .and_then(|index| options.get(index))
+                .cloned();
+            match chosen {
+                Some(answer) => {
+                    hub.update_state(&key, |state| {
+                        state.question = None;
+                        state.question_options.clear();
+                    });
+                    acknowledgement = if hub.runtime().answer_question(question_id, answer.clone())
+                    {
+                        format!("Answered: {answer}")
+                    } else {
+                        "That question is no longer waiting.".to_string()
+                    };
+                }
+                // The question ended between the buttons being drawn and the
+                // press. Said plainly rather than answered with someone else's text.
+                None => acknowledgement = "That question is no longer waiting.".to_string(),
+            }
         }
     } else if data == "x:stop" {
         match hub.state(&key).last_run {

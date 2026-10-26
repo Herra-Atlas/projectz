@@ -180,11 +180,15 @@ export default function SkillsPage({
       {installing && (
         <InstallSkillDialog
           onClose={() => setInstalling(false)}
-          onInstalled={(skill) => {
+          onInstalled={(installed) => {
             setInstalling(false);
             void reload();
-            notify("success", `${skill.name} installed`);
-            onOpenSkill(skill.slug);
+            if (installed.length === 1) {
+              notify("success", `${installed[0].name} installed`);
+              onOpenSkill(installed[0].slug);
+            } else if (installed.length > 1) {
+              notify("success", `${installed.length} skills installed`);
+            }
           }}
         />
       )}

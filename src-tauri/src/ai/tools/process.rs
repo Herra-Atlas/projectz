@@ -43,14 +43,11 @@ pub(crate) fn kill_tree(pid: u32) -> Result<(), String> {
 /// `taskkill /T /F` walks the tree from `pid` and force-terminates it.
 #[cfg(windows)]
 fn kill_tree_windows(pid: u32) -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
-
-    /// Do not flash a console window for the helper we spawn.
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-    let output = std::process::Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .creation_flags(CREATE_NO_WINDOW)
+    // The one process helper, so the console flag and the refreshed PATH are
+    // applied here as they are everywhere else.
+    let mut command = std::process::Command::new("taskkill");
+    command.args(["/PID", &pid.to_string(), "/T", "/F"]);
+    let output = crate::child::hide_console(&mut command)
         .output()
         .map_err(|error| format!("Could not run taskkill: {error}"))?;
     if output.status.success() {

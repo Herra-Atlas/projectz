@@ -11,10 +11,13 @@
 //!
 //! # What is accepted
 //!
-//! A `.zip` URL, or a GitHub repository link (which is turned into that
-//! repository's archive). The archive may contain one skill at any depth; the
-//! shallowest `SKILL.md` is its root, so both a bare skill folder and a repo with
-//! one under `skills/` work.
+//! A `.zip` URL, a GitHub repository link (which is turned into that
+//! repository's archive), or -- when the repository is larger than the archive
+//! cap -- a link to the skill's own folder inside it. A `/tree/` link reads only
+//! that folder through the contents API ([`super::github`]); a `/blob/` link
+//! reads the folder holding the named file. The archive may contain one skill at
+//! any depth; the shallowest `SKILL.md` is its root, so both a bare skill folder
+//! and a repo with one under `skills/` work.
 //!
 //! # The guards
 //!
@@ -27,30 +30,65 @@
 use std::io::{Cursor, Read};
 use std::path::{Component, Path};
 
-use crate::skills::{self, frontmatter, Skill, SKILL_FILE};
+use crate::skills::{self, frontmatter, github, Skill, SKILL_FILE};
 
-/// Largest archive this will download.
-const MAX_ARCHIVE_BYTES: usize = 16 * 1024 * 1024;
+/// Largest archive, or folder fetch, this will download.
+pub(super) const MAX_ARCHIVE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Largest single file after decompression.
-const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+pub(super) const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Largest total after decompression.
 const MAX_TOTAL_BYTES: u64 = 24 * 1024 * 1024;
 
-/// Most entries one archive may hold.
-const MAX_ENTRIES: usize = 300;
+/// Most entries one archive, or folder fetch, may hold.
+pub(super) const MAX_ENTRIES: usize = 300;
 
 /// Fetches and installs a skill from `url`.
+///
+/// A repository link resolves through the tree, and a repository with one skill
+/// installs it directly; one with several asks the caller to choose. The dialog
+/// does that choosing through [`github::discover_url`] and
+/// [`github::install_url_selected`]; this is the one-shot door for a link that
+/// names exactly one skill, and the only door for a `.zip`.
 pub async fn install_from_url(url: &str) -> Result<Skill, String> {
-    let url = normalize(url)?;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(45))
-        .user_agent("projectz-skills/1")
-        .build()
-        .map_err(|error| format!("Could not start the download: {error}"))?;
+    let client = github::client()?;
+    match github::parse(url)? {
+        github::Source::Github(repository) => {
+            let discovery = github::discover(&client, &repository, &|_| {}).await?;
+            let [found] = discovery.skills.as_slice() else {
+                return Err(format!(
+                    "That repository holds {} skills. Choose one in the install dialog.",
+                    discovery.skills.len()
+                ));
+            };
+            let report = github::install_selected(
+                &client,
+                &repository,
+                &discovery.reference,
+                &[found.id.clone()],
+                &|_| {},
+            )
+            .await?;
+            let github::InstallReport { installed, failed } = report;
+            installed.into_iter().next().ok_or_else(|| {
+                failed
+                    .into_iter()
+                    .next()
+                    .map(|failure| failure.message)
+                    .unwrap_or_else(|| "Nothing was installed".to_string())
+            })
+        }
+        github::Source::Zip(link) => install_zip(&client, &link).await,
+    }
+}
+
+/// The archive half: a `.zip` link, downloaded and unpacked.
+async fn install_zip(client: &reqwest::Client, url: &str) -> Result<Skill, String> {
+    let from_github =
+        url.starts_with("https://github.com/") || url.starts_with("http://github.com/");
     let response = client
-        .get(&url)
+        .get(url)
         .send()
         .await
         .map_err(|error| format!("Could not reach {url}: {error}"))?;
@@ -60,9 +98,7 @@ pub async fn install_from_url(url: &str) -> Result<Skill, String> {
     }
     if let Some(length) = response.content_length() {
         if length as usize > MAX_ARCHIVE_BYTES {
-            return Err(format!(
-                "That archive is {length} bytes; the limit is {MAX_ARCHIVE_BYTES}."
-            ));
+            return Err(too_large(length, from_github));
         }
     }
     let bytes = response
@@ -70,12 +106,20 @@ pub async fn install_from_url(url: &str) -> Result<Skill, String> {
         .await
         .map_err(|error| format!("The download failed: {error}"))?;
     if bytes.len() > MAX_ARCHIVE_BYTES {
-        return Err(format!(
-            "That archive is {} bytes; the limit is {MAX_ARCHIVE_BYTES}.",
-            bytes.len()
-        ));
+        return Err(too_large(bytes.len() as u64, from_github));
     }
     install_archive(&bytes)
+}
+
+/// The cap, and the way past it when the link asked for a whole repository.
+fn too_large(bytes: u64, from_github: bool) -> String {
+    let hint = if from_github {
+        " That is the whole repository; paste the skill's folder link \
+         (…/tree/<branch>/<path>) so only that folder is fetched."
+    } else {
+        ""
+    };
+    format!("That archive is {bytes} bytes; the limit is {MAX_ARCHIVE_BYTES}.{hint}")
 }
 
 /// Installs an archive already in memory.
@@ -135,10 +179,18 @@ pub fn install_archive_with(bytes: &[u8], root: &Path) -> Result<Skill, String> 
         files.push((name, contents));
     }
 
+    install_files_with(&files, root)
+}
+
+/// Installs files already read, laid out the way an archive would be.
+///
+/// A GitHub folder fetch produces the same names the archive half does, so both
+/// sources land here and pass through one set of checks.
+pub fn install_files_with(files: &[(String, Vec<u8>)], root: &Path) -> Result<Skill, String> {
     // The folder the skill sits at inside the archive, not the destination root:
     // a repo archive puts one skill under `repo-main/`, and everything outside it
     // is beside the skill rather than in it.
-    let folder = skill_root(&files)?;
+    let folder = skill_root(files)?;
     let prefix = if folder.is_empty() {
         String::new()
     } else {
@@ -151,7 +203,7 @@ pub fn install_archive_with(bytes: &[u8], root: &Path) -> Result<Skill, String> 
         .iter()
         .find(|(name, _)| name == &format!("{prefix}{SKILL_FILE}"))
         .map(|(_, bytes)| bytes)
-        .ok_or("The archive has no SKILL.md at the skill's root")?;
+        .ok_or("The skill's folder has no SKILL.md at its root")?;
     let text = std::str::from_utf8(markdown)
         .map_err(|_| "The skill's SKILL.md is not UTF-8 text".to_string())?;
     let (header, _) = frontmatter::parse(text)?;
@@ -174,7 +226,7 @@ pub fn install_archive_with(bytes: &[u8], root: &Path) -> Result<Skill, String> 
     }
 
     let destination = root.join(&slug);
-    for (name, contents) in &files {
+    for (name, contents) in files {
         let Some(relative) = name.strip_prefix(&prefix) else {
             // A file beside the skill rather than in it -- a README for the repo,
             // a license, another skill. Not part of this one.
@@ -199,41 +251,13 @@ pub fn install_archive_with(bytes: &[u8], root: &Path) -> Result<Skill, String> 
     // for an archive whose only copy was skipped as a link.
     if !destination.join(SKILL_FILE).is_file() {
         let _ = std::fs::remove_dir_all(&destination);
-        return Err("The archive's SKILL.md was not extracted".to_string());
+        return Err("The skill's SKILL.md was not extracted".to_string());
     }
 
     // Read back through the installer's own resolution rather than the
     // process-global root, so a test that installed into a temporary folder gets
     // the skill it just wrote.
     skills::resolve_at(root, &slug)
-}
-
-/// Turns a GitHub link into its archive, and refuses anything that is not HTTP.
-pub fn normalize(url: &str) -> Result<String, String> {
-    let url = url.trim();
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err("Paste an https:// link to a .zip or a GitHub repository.".to_string());
-    }
-    let without_scheme = url
-        .trim_start_matches("https://")
-        .trim_start_matches("http://");
-    let mut parts = without_scheme.split('/');
-    let host = parts.next().unwrap_or_default().to_lowercase();
-    if host == "github.com" || host == "www.github.com" {
-        let owner = parts.next().unwrap_or_default();
-        let repo = parts.next().unwrap_or_default();
-        if owner.is_empty() || repo.is_empty() {
-            return Err("That GitHub link does not name a repository".to_string());
-        }
-        let repo = repo.trim_end_matches(".git");
-        return Ok(format!(
-            "https://github.com/{owner}/{repo}/archive/HEAD.zip"
-        ));
-    }
-    if !url.to_lowercase().contains(".zip") {
-        return Err("Paste a .zip link or a GitHub repository link.".to_string());
-    }
-    Ok(url.to_string())
 }
 
 /// The shallowest folder holding a `SKILL.md`, as a prefix with no trailing slash.
@@ -351,22 +375,6 @@ mod tests {
     }
 
     #[test]
-    fn a_repository_link_becomes_an_archive_link() {
-        assert_eq!(
-            normalize("https://github.com/agent/skills").expect("url"),
-            "https://github.com/agent/skills/archive/HEAD.zip"
-        );
-        assert_eq!(
-            normalize("https://github.com/agent/skills/tree/main/pdf").expect("url"),
-            "https://github.com/agent/skills/archive/HEAD.zip"
-        );
-        assert!(normalize("ftp://example.test/skill.zip").is_err());
-        assert!(normalize("https://example.test/skill").is_err());
-    }
-
-    /// The traversal surface: `..`, an absolute path and a drive letter are all
-    /// refused before anything is written.
-    #[test]
     fn an_escaping_entry_is_refused() {
         assert!(safe_relative("../secret").is_none());
         assert!(safe_relative("/etc/passwd").is_none());
@@ -420,6 +428,23 @@ mod tests {
         assert!(root.join("pdf-tools/scripts/extract.py").is_file());
         // A file beside the skill folder is not copied into it.
         assert!(!root.join("pdf-tools/README.md").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The shape a GitHub folder fetch hands over: one `SKILL.md` under the
+    /// folder's own name, and nothing else, is a whole skill.
+    #[test]
+    fn a_folder_holding_only_a_skill_file_installs() {
+        let root = temp("body-only");
+        let files = vec![(
+            "brag-slim/SKILL.md".to_string(),
+            b"---\nname: brag-slim\ndescription: \"Use when launching\"\n---\n\nDo it.".to_vec(),
+        )];
+        let skill = install_files_with(&files, &root).expect("install");
+        assert_eq!(skill.slug, "brag-slim");
+        assert_eq!(skill.file_count, 0);
+        assert!(!skill.has_scripts);
+        assert!(root.join("brag-slim/SKILL.md").is_file());
         let _ = std::fs::remove_dir_all(&root);
     }
 

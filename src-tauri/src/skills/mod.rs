@@ -34,6 +34,7 @@
 //! ([`crate::ai::tools::resolve_within`]). `read_file` is not widened.
 
 pub mod frontmatter;
+pub mod github;
 pub mod install;
 
 use std::path::{Component, Path, PathBuf};

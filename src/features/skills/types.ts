@@ -48,3 +48,47 @@ export type SkillDraft = {
 /** The header template a new skill starts from. */
 export const blankSkillMarkdown = (name: string): string =>
   `---\nname: ${name}\ndescription: ""\n---\n\n`;
+
+/**
+ * One skill a repository offers, as the install picker draws it.
+ *
+ * `id` is the folder inside the repository and is what the install call sends
+ * back; the label and trigger are read from that folder's `SKILL.md` so the
+ * picker can describe a skill before any of it is written to disk.
+ */
+export type FoundSkill = {
+  id: string;
+  name: string;
+  description: string | null;
+  file_count: number;
+  has_scripts: boolean;
+};
+
+/** What a repository link resolved to (one tree request). */
+export type Discovery = {
+  owner: string;
+  repo: string;
+  reference: string;
+  /** GitHub's tree listing was too large to be complete. */
+  truncated: boolean;
+  skills: FoundSkill[];
+};
+
+export type FailedSkill = {
+  id: string;
+  message: string;
+};
+
+/** What an install did, per skill. */
+export type InstallReport = {
+  installed: Skill[];
+  failed: FailedSkill[];
+};
+
+/** A `skills-install` event while a repository is read and written. */
+export type InstallProgress = {
+  phase: "reading" | "downloading" | "installing" | "done";
+  message: string;
+  done: number;
+  total: number;
+};

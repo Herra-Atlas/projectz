@@ -319,8 +319,9 @@ function ToolRow({ steps, live }: { steps: ToolStep[]; live: boolean }) {
             onClick={() => setExpanded((value) => !value)}
             aria-expanded={expanded}
             // The row clips its detail to one line, so a long command is
-            // unreadable at a glance. The native tooltip is the whole of it,
-            // without spending the width the rest of the row needs.
+            // unreadable at a glance. The title carries the whole of it, and
+            // TooltipLayer draws it without spending the width the rest of the
+            // row needs.
             title={collapsible ? groupDetail(steps) : first.detail}
             className="flex min-h-7 min-w-0 flex-1 items-center gap-1.5 rounded text-left hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
           >

@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { CircleHelp } from "lucide-react";
 import { AccessSwitches } from "../../components/AccessSwitches";
+import HelpMark from "../../components/HelpMark";
 import { Toggle } from "../../components/SettingsSection";
 import { useModelRegistry } from "../../features/models/useModelRegistry";
 import { useMachineTotals } from "../../features/jobs/useJobs";
@@ -317,11 +317,7 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
     <div>
       <div className="mb-1.5 flex items-center gap-1.5 text-[13px] font-medium text-[var(--text)]">
         <span>{label}</span>
-        {hint && (
-          <span title={hint} className="cursor-help text-[var(--quiet)] transition-colors hover:text-[var(--text)]">
-            <CircleHelp size={13} aria-label={hint} />
-          </span>
-        )}
+        {hint && <HelpMark hint={hint} />}
       </div>
       {children}
     </div>

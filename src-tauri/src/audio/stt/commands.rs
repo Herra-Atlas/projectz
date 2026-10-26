@@ -112,6 +112,51 @@ pub fn stt_settings(database: State<'_, Arc<Database>>) -> SttSettings {
     models::settings(&database)
 }
 
+/// The capture endpoints the microphone picker offers.
+///
+/// `default` is what Windows would use with nothing chosen, so the row can say
+/// which device "system default" currently means instead of leaving it a phrase.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Inputs {
+    pub devices: Vec<String>,
+    pub default: Option<String>,
+}
+
+#[tauri::command]
+pub fn stt_inputs() -> Inputs {
+    let (devices, default) = capture::inputs();
+    Inputs { devices, default }
+}
+
+/// Chooses the microphone dictation records from, or none for the system default.
+///
+/// The name is checked against the endpoints that exist now: the picker only ever
+/// offers those, so a name it did not offer is a stale record rather than a
+/// choice, and storing it would fail on the user's next press instead of here.
+#[tauri::command]
+pub fn stt_select_input(
+    database: State<'_, Arc<Database>>,
+    device: Option<String>,
+) -> Result<SttSettings, String> {
+    let mut next = models::settings(&database);
+    next.device = match device
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+    {
+        Some(name) => {
+            let (devices, _) = capture::inputs();
+            if !devices.iter().any(|candidate| candidate == &name) {
+                return Err(format!("The microphone \"{name}\" is not connected."));
+            }
+            Some(name)
+        }
+        None => None,
+    };
+    models::save(&database, &next)?;
+    Ok(next)
+}
+
 #[tauri::command]
 pub fn stt_select_model(
     database: State<'_, Arc<Database>>,
@@ -185,15 +230,21 @@ pub fn stt_set_language(
 }
 
 /// Starts recording. Returns as soon as the device is actually open.
+///
+/// The device is read here rather than passed by the composer: which microphone
+/// is in force is a stored setting, not a property of the press, so a change made
+/// in Settings applies to the next recording without the chat page knowing the
+/// setting exists.
 #[tauri::command]
-pub fn stt_recording_start() -> Result<(), String> {
+pub fn stt_recording_start(database: State<'_, Arc<Database>>) -> Result<(), String> {
     let mut slot = RECORDING
         .lock()
         .map_err(|_| "The microphone is in an unusable state.".to_string())?;
     if slot.is_some() {
         return Err("The microphone is already recording.".to_string());
     }
-    *slot = Some(capture::start()?);
+    let device = models::settings(&database).device;
+    *slot = Some(capture::start(device.as_deref())?);
     Ok(())
 }
 

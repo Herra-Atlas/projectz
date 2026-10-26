@@ -20,37 +20,44 @@ import type { WeatherCondition } from "../../features/weather/weather";
  * unreachable.
  *
  * Who it is addressed to comes from `app.general.userName`, set in Settings →
- * General → Your name. "Sir" is the standing before a name was given -- the
- * greeting is never left speaking to nobody.
+ * General → Your name. With no name the greeting stands alone ("Good evening");
+ * naming somebody the greeting did not choose for them is the one thing it must
+ * not do.
  */
 function greetingFor(hour: number, name: string, weather: WeatherCondition | null): string {
   // A name typed in a hurry (" john") still reads as itself, capitalised once.
-  const whom = name ? name.charAt(0).toUpperCase() + name.slice(1) : "Sir";
-  if (weather) return weatherGreeting(weather, whom);
-  if (hour < 5) return `Working late, ${whom}`;
-  if (hour < 12) return `Good morning, ${whom}`;
-  if (hour < 18) return `Good afternoon, ${whom}`;
-  if (hour < 22) return `Good evening, ${whom}`;
-  return `Working late, ${whom}`;
+  const trimmed = name.trim();
+  const whom = trimmed ? trimmed.charAt(0).toUpperCase() + trimmed.slice(1) : "";
+  if (weather) return addressee(weatherGreeting(weather), whom);
+  if (hour < 5) return addressee("Working late", whom);
+  if (hour < 12) return addressee("Good morning", whom);
+  if (hour < 18) return addressee("Good afternoon", whom);
+  if (hour < 22) return addressee("Good evening", whom);
+  return addressee("Working late", whom);
+}
+
+/** "Good evening" alone, or "Good evening, Atlas" once a name is known. */
+function addressee(words: string, whom: string): string {
+  return whom ? `${words}, ${whom}` : words;
 }
 
 /** The headline for a condition, kept in one place so the wording stays short. */
-function weatherGreeting(weather: WeatherCondition, whom: string): string {
+function weatherGreeting(weather: WeatherCondition): string {
   switch (weather) {
     case "storm":
-      return `Stormy out there, ${whom}`;
+      return "Stormy out there";
     case "rain":
-      return `Rainy day, ${whom}`;
+      return "Rainy day";
     case "drizzle":
-      return `A drizzly day, ${whom}`;
+      return "A drizzly day";
     case "snow":
-      return `Snowy day, ${whom}`;
+      return "Snowy day";
     case "fog":
-      return `Foggy out there, ${whom}`;
+      return "Foggy out there";
     case "cloudy":
-      return `Cloudy day, ${whom}`;
+      return "Cloudy day";
     case "clear":
-      return `Clear skies, ${whom}`;
+      return "Clear skies";
   }
 }
 

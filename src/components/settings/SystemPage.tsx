@@ -7,6 +7,7 @@ import { formatBytes } from "../../features/downloads/format";
 import type { Notify } from "../../features/notifications/types";
 import { HoldToDelete } from "../HoldToDelete";
 import { SettingsPageTitle } from "../SettingsSection";
+import { MicrophoneSection } from "./MicrophoneSection";
 
 /** Mirrors `system::SystemInfo`. */
 type SystemInfo = {
@@ -80,6 +81,8 @@ export function SystemPage({ notify }: { notify: Notify }) {
       <p className="mb-6 px-1 text-[12px] text-[var(--muted)]">
         Version {info?.version ?? "—"}, built {info?.buildDate ?? "—"}.
       </p>
+
+      <MicrophoneSection notify={notify} />
 
       <section className="mb-8">
         <h3 className="mb-1.5 px-1 text-[11px] font-medium text-[var(--quiet)]">Storage</h3>

@@ -46,7 +46,8 @@ pub const WRITE_FILE: ToolSpec = ToolSpec {
     name: "write_file",
     description: "Write text to a file, replacing its current contents. Creates the file and any missing \
                   parent folders. Use this for a new file; use edit_file to change part of an existing one \
-                  so you do not have to reproduce the rest.",
+                  so you do not have to reproduce the rest. Set `append` to add to the end instead of \
+                  replacing, which is how a long file is built a section at a time.",
     parameters: r#"{
         "type": "object",
         "properties": {
@@ -56,7 +57,11 @@ pub const WRITE_FILE: ToolSpec = ToolSpec {
             },
             "content": {
                 "type": "string",
-                "description": "The full new contents of the file."
+                "description": "The full new contents of the file, or the text to add when appending."
+            },
+            "append": {
+                "type": "boolean",
+                "description": "Optional. Add `content` to the end of the file instead of replacing it. Creates the file if it does not exist."
             }
         },
         "required": ["path", "content"],
@@ -366,6 +371,10 @@ fn string_of(arguments: &Value, field: &str) -> Result<String, String> {
 fn write(arguments: Value, root: PathBuf, context: &super::ToolContext) -> Result<String, String> {
     let path = required_path(&arguments)?;
     let content = string_of(&arguments, "content")?;
+    let append = arguments
+        .get("append")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let resolved = super::file::resolve_within(&root, &path)?;
 
     let existed = resolved.exists();
@@ -375,19 +384,41 @@ fn write(arguments: Value, root: PathBuf, context: &super::ToolContext) -> Resul
     }
     // Read before writing, not after: once the file is replaced this text is the
     // only record of what was there, and it is what the panel's diff needs.
-    let previous = if existed {
-        std::fs::read_to_string(&resolved).unwrap_or_default()
+    //
+    // Bytes rather than a `String` so an append to a file that is not valid UTF-8
+    // adds to it instead of quietly starting over with an empty one. The diff
+    // below still compares text, since that is all it can draw.
+    let previous_bytes = if existed {
+        std::fs::read(&resolved).unwrap_or_default()
     } else {
-        String::new()
+        Vec::new()
     };
-    let previous_size = file_length(&resolved).unwrap_or(0);
-    atomic_write(&resolved, content.as_bytes())?;
-    context.report_diff(super::diff::diff(&previous, &content));
-
-    Ok(if existed {
-        format!("Wrote {previous_size} bytes to {path}, replacing its contents.")
+    let mut bytes = if append {
+        previous_bytes.clone()
     } else {
+        Vec::new()
+    };
+    bytes.extend_from_slice(content.as_bytes());
+    let previous_size = previous_bytes.len();
+
+    atomic_write(&resolved, &bytes)?;
+    context.report_diff(super::diff::diff(
+        &String::from_utf8_lossy(&previous_bytes),
+        &String::from_utf8_lossy(&bytes),
+    ));
+
+    Ok(if !existed {
         format!("Created {path}.")
+    } else if append {
+        // The new length is stated because an append that landed twice is the
+        // failure this mode can have, and the total is how it becomes visible.
+        format!(
+            "Appended {added} bytes to {path}, which is now {total} bytes.",
+            added = content.len(),
+            total = bytes.len()
+        )
+    } else {
+        format!("Wrote {previous_size} bytes to {path}, replacing its contents.")
     })
 }
 
@@ -627,12 +658,6 @@ fn required_path(arguments: &Value) -> Result<String, String> {
         .ok_or_else(|| "A non-empty string `path` is required".to_string())
 }
 
-fn file_length(path: &Path) -> Result<u64, String> {
-    std::fs::metadata(path)
-        .map(|meta| meta.len())
-        .map_err(|error| format!("Could not stat {}: {error}", path.display()))
-}
-
 /// Writes through a sibling temporary file and renames it over the target.
 ///
 /// The temporary file shares a directory with the target so the rename stays on
@@ -721,6 +746,36 @@ mod tests {
         .expect("write");
         assert!(out.contains("replacing"), "{out}");
         assert_eq!(body_of(&root, "a.txt"), "new");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Append is how a long file is built a section at a time without the model
+    /// reproducing what it already wrote.
+    #[test]
+    fn append_adds_to_the_end_and_keeps_what_was_there() {
+        let root = root();
+        std::fs::write(root.join("a.md"), "# One\n\n").expect("seed");
+        let out = write(
+            json!({ "path": "a.md", "content": "Second section.\n", "append": true }),
+            root.clone(),
+            &discarding(),
+        )
+        .expect("append");
+        assert!(out.contains("Appended"), "{out}");
+        assert_eq!(body_of(&root, "a.md"), "# One\n\nSecond section.\n");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn append_creates_a_file_that_does_not_exist_yet() {
+        let root = root();
+        write(
+            json!({ "path": "notes/a.md", "content": "first", "append": true }),
+            root.clone(),
+            &discarding(),
+        )
+        .expect("append");
+        assert_eq!(body_of(&root, "notes/a.md"), "first");
         let _ = std::fs::remove_dir_all(&root);
     }
 

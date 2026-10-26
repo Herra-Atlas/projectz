@@ -9,12 +9,14 @@ import { Markdown } from "./Markdown";
 import { PathText } from "./PathText";
 import { expandWorkspacePaths, trimWorkspacePaths } from "../../features/workspace/workspacePaths";
 import FileChanges from "./FileChanges";
+import DocumentCards from "./DocumentCards";
 import { markdownComponents, MarkdownActionsProvider } from "./markdownComponents";
 import ModelSwitcher from "../../components/ModelSwitcher";
 import ModeSelector from "../../components/ModeSelector";
 import SelectionActions, { type SelectionAction } from "./SelectionActions";
 import { SpeechButton } from "./SpeechButton";
 import { useSpeech } from "../../features/tts/useSpeech";
+import { useGeneralSettings } from "../../features/settings/useGeneralSettings";
 import type { TtsSettings } from "../../features/tts/types";
 import ToolApproval, { type PendingApproval } from "./ToolApproval";
 import ToolQuestion, { type PendingQuestion } from "./ToolQuestion";
@@ -177,8 +179,6 @@ type ChatPageProps = {
   onModelSelect: (endpointId: string, model: string) => void;
   onLocalModelSelect: (modelId: string) => void;
   modelRefreshKey: number;
-  /** Bumped when the settings modal closes, so chat behaviour settings are re-read. */
-  settingsRefreshKey?: number;
   onMessagesChange: (sessionId: string, messages: ChatMessage[]) => void;
   /**
    * Records the conversation's working mode and access level.
@@ -233,7 +233,7 @@ type ChatPageProps = {
   workspaceRoot?: string | null;
 };
 
-export default function ChatPage({ endpointId, model, localModelId, session, sessionLoading = false, activeId = null, onEnsureSession, onFirstSend, onActivity, onModelSelect, onLocalModelSelect, modelRefreshKey, settingsRefreshKey = 0, onMessagesChange, onWorkingModeChange, onNotify, onNotifyAction, onClearNotification, onOpenUrl, onOpenFile, titleModels, onAutoTitle, workspaceRoot, defaultEffort }: ChatPageProps) {
+export default function ChatPage({ endpointId, model, localModelId, session, sessionLoading = false, activeId = null, onEnsureSession, onFirstSend, onActivity, onModelSelect, onLocalModelSelect, modelRefreshKey, onMessagesChange, onWorkingModeChange, onNotify, onNotifyAction, onClearNotification, onOpenUrl, onOpenFile, titleModels, onAutoTitle, workspaceRoot, defaultEffort }: ChatPageProps) {
   const [messages, setMessages] = useState<ChatMessage[]>(session?.messages ?? []);
   // The latest transcript, for the run listener (a mount-time effect) to build on
   // when something arrives outside the current render -- a background sub-agent's
@@ -324,6 +324,25 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
    * concurrent runs can each be parked on one at the same moment.
    */
   const [pendingQuestions, setPendingQuestions] = useState<PendingQuestion[]>([]);
+  /**
+   * The prompts that belong to the conversation on screen.
+   *
+   * A run keeps waiting wherever it was started. A prompt raised by another
+   * conversation -- one still working in the background, or a message from
+   * Telegram -- stayed queued rather than being drawn here, so the screen never
+   * asks about work it cannot show. Switching to that conversation draws it,
+   * which is why the prompts are filtered rather than dropped on arrival.
+   *
+   * A prompt with no session (an older event, or a hand-built one) is shown
+   * wherever it lands: there is nothing to scope it by.
+   */
+  const activeSessionId = session?.id ?? null;
+  const visibleApprovals = pendingApprovals.filter(
+    (entry) => entry.sessionId === null || entry.sessionId === activeSessionId,
+  );
+  const visibleQuestions = pendingQuestions.filter(
+    (entry) => entry.sessionId === null || entry.sessionId === activeSessionId,
+  );
   /**
    * The agent's checklist, tagged with the session it belongs to so switching
    * conversations does not carry one session's plan onto another's screen.
@@ -430,15 +449,14 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   const generationStartedAtRef = useRef(0);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
   const [selection, setSelection] = useState<SelectedText | null>(null);
-  // Read once on mount from the same SQLite records Settings writes, so the composer
-  // matches the preferences without the settings modal having to push them down.
-  const [showMetrics, setShowMetrics] = useState(true);
+  // The shared record Settings writes. Startup primes it, so the greeting draws
+  // the stored name on its first frame instead of a fallback that was already on
+  // screen when the page opened. A save in Settings arrives through the store,
+  // so nothing here re-reads the database.
+  const { userName, showMetrics, sendWith: sendKey } = useGeneralSettings();
   // Auto-speak is served by the same read-aloud path a press uses; the finished
   // reply hands the event listener a ref because the listener registers once.
   const autoSpeakReplyRef = useRef<(text: string, key: string) => Promise<void> | null>(null);
-  const [sendKey, setSendKey] = useState<"Enter" | "Ctrl + Enter">("Enter");
-  // The empty screen greets by name when one was given; "" keeps the greeting's own wording.
-  const [userName, setUserName] = useState("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const backgroundRunsRef = useRef<Map<string, BackgroundRun>>(new Map());
   const sessionRunIdsRef = useRef<Map<string, string>>(new Map());
@@ -592,21 +610,6 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     setLivePromptTokens(run?.promptTokens ?? null);
     setRunning(Boolean(run));
   }, [activeId, session?.id, session?.messages, sessionLoading]);
-
-  useEffect(() => {
-    let active = true;
-    invoke<{ userName?: string; showMetrics?: boolean; sendWith?: "Enter" | "Ctrl + Enter" } | null>("database_get_setting", { key: "app.general" })
-      .then((general) => {
-        if (!active || !general) return;
-        // Trimmed here rather than in Welcome, so the greeting always draws a
-        // clean name and never the padding a paste left around it.
-        if (general.userName !== undefined) setUserName(general.userName.trim());
-        if (general.showMetrics !== undefined) setShowMetrics(general.showMetrics);
-        if (general.sendWith) setSendKey(general.sendWith);
-      })
-      .catch(() => undefined);
-    return () => { active = false; };
-  }, [settingsRefreshKey]);
 
   useEffect(() => {
     if (!localModelId) {
@@ -880,6 +883,10 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       if (payload.kind === "tool_approval" && payload.metrics?.approval_id) {
         const approval: PendingApproval = {
           runId: payload.run_id,
+          // The run's own conversation, stamped by the backend on every event.
+          // It is what keeps a prompt asked from Telegram -- or from a chat in
+          // the background -- off a conversation that did not ask for it.
+          sessionId: payload.session_id ?? null,
           approvalId: payload.metrics.approval_id,
           tool: payload.metrics.tool ?? "tool",
           command: payload.metrics.command ?? "",
@@ -895,6 +902,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       if (payload.kind === "user_question" && payload.metrics?.question_id) {
         const question: PendingQuestion = {
           runId: payload.run_id,
+          sessionId: payload.session_id ?? null,
           questionId: payload.metrics.question_id,
           question: payload.metrics.question ?? "The agent has a question.",
           options: Array.isArray(payload.metrics.options) ? payload.metrics.options : [],
@@ -2197,6 +2205,10 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
                         inside the panel you had to open it to learn anything was
                         written at all. */}
                     <FileChanges steps={message.activity ?? []} live={false} onOpenFile={onOpenFile} />
+                    {/* A document the reply produced gets its own card, because a
+                        `.docx`/`.xlsx`/`.pdf` has no line diff for the row above
+                        to report. Each card opens the file in the panel. */}
+                    <DocumentCards steps={message.activity ?? []} onOpenFile={onOpenFile} />
                     {/* Metadata and actions stay hidden until the message is hovered. `group-focus-within` keeps
                         them reachable for keyboard users, and the `min-h-8` row reserves the space up front so
                         revealing the bar never reflows the message text. */}
@@ -2294,10 +2306,10 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           {todoList && todoList.sessionId === (session?.id ?? null) && todoList.items.length > 0 && (
             <TodoStrip items={todoList.items} />
           )}
-          {pendingApprovals.length > 0 && (
+          {visibleApprovals.length > 0 && (
             <div className="mb-2">
               <ToolApproval
-                request={pendingApprovals[0]}
+                request={visibleApprovals[0]}
                 onAnswer={(approvalId, allow) => {
                   void invoke("ai_answer_approval", { approvalId, allow }).catch(() => {
                     // The run was already stopped, so there was nothing to answer.
@@ -2305,16 +2317,16 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
                   });
                   dismissApproval(approvalId);
                 }}
-                onCancel={() => dismissApproval(pendingApprovals[0].approvalId)}
+                onCancel={() => dismissApproval(visibleApprovals[0].approvalId)}
               />
             </div>
           )}
           {/* A question the agent is waiting on, in the same place as an approval
               for the same reason: the run is parked until it is answered. */}
-          {pendingQuestions.length > 0 && (
+          {visibleQuestions.length > 0 && (
             <div className="mb-2">
               <ToolQuestion
-                request={pendingQuestions[0]}
+                request={visibleQuestions[0]}
                 onAnswer={(questionId, answer) => {
                   void invoke("ai_answer_question", { questionId, answer }).catch(() => {
                     // The run was already stopped, so there was nothing to answer.

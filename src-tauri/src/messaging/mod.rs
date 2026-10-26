@@ -91,6 +91,13 @@ pub struct ChatState {
     pub pending_model: Option<Value>,
     /// An `ask_user` question waiting for a typed answer.
     pub question: Option<String>,
+    /// The suggested answers for that question, in the order they were offered.
+    ///
+    /// Kept beside the id so a button can answer with the option's own text:
+    /// Telegram's callback data is capped at 64 bytes, and the id alone already
+    /// spends 36 of them. Cleared with `question`, so a finished run never leaves
+    /// an old list to answer a prompt that is no longer waiting.
+    pub question_options: Vec<String>,
 }
 
 /// What the Settings page draws.

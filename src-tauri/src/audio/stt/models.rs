@@ -34,6 +34,11 @@ pub struct SttSettings {
     /// microphone that only ever hears one language.
     #[serde(default)]
     pub languages: std::collections::BTreeMap<String, String>,
+    /// The capture endpoint to record from, by name, or none for the system
+    /// default. A name rather than an index because the list renumbers as
+    /// devices come and go -- see `capture`.
+    #[serde(default)]
+    pub device: Option<String>,
 }
 
 impl SttSettings {
@@ -183,6 +188,22 @@ fn walk(directory: &Path, found: &mut Vec<Model>) {
         if let Some(model) = describe(&path) {
             found.push(model);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SttSettings;
+
+    /// A record written before the microphone could be chosen has no `device`
+    /// key. It must load with the system default rather than fail into
+    /// `unwrap_or_default`, which would silently forget the chosen model too.
+    #[test]
+    fn a_record_without_a_device_still_loads() {
+        let settings: SttSettings =
+            serde_json::from_str(r#"{"model":"/models/ggml-small.bin"}"#).unwrap();
+        assert_eq!(settings.device, None);
+        assert_eq!(settings.model.as_deref(), Some("/models/ggml-small.bin"));
     }
 }
 

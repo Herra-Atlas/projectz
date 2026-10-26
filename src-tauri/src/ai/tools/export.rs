@@ -37,6 +37,7 @@ use serde_json::Value;
 use super::ToolSpec;
 
 mod blocks;
+mod csv;
 mod docx;
 mod image;
 mod ooxml;
@@ -61,7 +62,11 @@ pub const WRITE_DOCUMENT: ToolSpec = ToolSpec {
                   `|---|---|` line, `---` rules, `**bold**`, `*italic*`, `` `code` `` and \
                   `![alt](path/to/image.png)` to place a picture from the workspace. Headings, \
                   lists, tables and pictures are rendered properly in .docx, so use them instead of \
-                  plain lines. For xlsx and csv, give `rows` instead.",
+                  plain lines. For xlsx and csv, give `rows` instead. For a long document, write \
+                  the Markdown into a workspace file with write_file first -- in sections, appending \
+                  each one -- then pass that file as `source`: the body is read from there, and \
+                  editing that file and calling this again re-renders the document without sending \
+                  it over the wire twice. `source` is CSV for xlsx and csv.",
     parameters: r#"{
         "type": "object",
         "properties": {
@@ -81,6 +86,10 @@ pub const WRITE_DOCUMENT: ToolSpec = ToolSpec {
             "content": {
                 "type": "string",
                 "description": "The body for docx, pdf, md and txt, written as Markdown. Headings, lists, tables, quotes, code and images are rendered as such in .docx."
+            },
+            "source": {
+                "type": "string",
+                "description": "Optional. A workspace file to read the body from instead of `content` (Markdown for docx/pdf/md/txt, CSV for xlsx/csv). Use this for a long document, so it can be written and edited in sections with write_file/edit_file."
             },
             "font": {
                 "type": "string",
@@ -162,8 +171,18 @@ fn build(arguments: Value, root: PathBuf, context: &super::ToolContext) -> Resul
     };
 
     let title = string_of(&arguments, "title");
-    let content = string_of(&arguments, "content");
-    let rows = rows_of(&arguments)?;
+    // `source` is the long-document door: the body already sits in a workspace
+    // file, so the render costs a path rather than the whole text again. It is
+    // read here rather than by each writer, so both shapes go through one
+    // containment check and one refusal when the two inputs are both given.
+    let source = string_of(&arguments, "source")
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty());
+
+    let (content, rows) = match format {
+        Format::Xlsx | Format::Csv => (None, rows_from(&arguments, source.as_deref(), &root)?),
+        _ => (content_from(&arguments, source.as_deref(), &root)?, None),
+    };
 
     let bytes = match format {
         Format::Docx => docx::bytes(
@@ -189,7 +208,7 @@ fn build(arguments: Value, root: PathBuf, context: &super::ToolContext) -> Resul
             text.push_str(&require_content(&content, "txt")?);
             text.into_bytes()
         }
-        Format::Csv => csv_bytes(&require_rows(&rows, "csv")?),
+        Format::Csv => csv::bytes(&require_rows(&rows, "csv")?),
         Format::Xlsx => xlsx::bytes(
             &require_rows(&rows, "xlsx")?,
             &string_of(&arguments, "sheet").unwrap_or_else(|| DEFAULT_SHEET.to_string()),
@@ -236,6 +255,53 @@ fn require_rows(rows: &Option<Vec<Vec<Cell>>>, format: &str) -> Result<Vec<Vec<C
     rows.clone()
         .filter(|rows| !rows.is_empty())
         .ok_or_else(|| format!("A `{format}` file needs `rows` — the cells to write."))
+}
+
+/// The body text: the workspace file named by `source`, or the inline `content`.
+///
+/// Both at once is refused rather than resolved. Silently preferring one would
+/// mean a model that edited its Markdown and also passed `content` would be
+/// answered with a document built from the copy it did not edit.
+fn content_from(
+    arguments: &Value,
+    source: Option<&str>,
+    root: &PathBuf,
+) -> Result<Option<String>, String> {
+    let Some(source) = source else {
+        return Ok(string_of(arguments, "content"));
+    };
+    if string_of(arguments, "content").is_some() {
+        return Err(
+            "Pass either `content` or `source` (a file to read the body from), not both."
+                .to_string(),
+        );
+    }
+    Ok(Some(read_source(root, source)?))
+}
+
+/// The cells: parsed from the CSV file named by `source`, or the inline `rows`.
+fn rows_from(
+    arguments: &Value,
+    source: Option<&str>,
+    root: &PathBuf,
+) -> Result<Option<Vec<Vec<Cell>>>, String> {
+    let Some(source) = source else {
+        return rows_of(arguments);
+    };
+    if arguments.get("rows").is_some() {
+        return Err("Pass either `rows` or `source` (a CSV file), not both.".to_string());
+    }
+    Ok(Some(csv::parse(&read_source(root, source)?)?))
+}
+
+/// Reads a file inside the workspace by a path the model gave.
+///
+/// The same containment check as every other file tool, so a `source` cannot
+/// reach outside the workspace just because it is read rather than written.
+fn read_source(root: &PathBuf, source: &str) -> Result<String, String> {
+    let resolved = super::file::resolve_within(root, source)?;
+    std::fs::read_to_string(&resolved)
+        .map_err(|error| format!("Could not read `{source}`: {error}"))
 }
 
 fn string_of(arguments: &Value, field: &str) -> Option<String> {
@@ -288,33 +354,6 @@ fn rows_of(arguments: &Value) -> Result<Option<Vec<Vec<Cell>>>, String> {
         );
     }
     Ok(Some(out))
-}
-
-/// Escapes one field for CSV, quoting when it contains a comma, a quote or a
-/// newline -- the only three cases a reader is allowed to misread.
-fn csv_bytes(rows: &[Vec<Cell>]) -> Vec<u8> {
-    let mut out = String::new();
-    for row in rows {
-        let line = row
-            .iter()
-            .map(|cell| {
-                let text = cell.as_text();
-                if text.contains(',')
-                    || text.contains('"')
-                    || text.contains('\n')
-                    || text.contains('\r')
-                {
-                    format!("\"{}\"", text.replace('"', "\"\""))
-                } else {
-                    text
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        out.push_str(&line);
-        out.push('\n');
-    }
-    out.into_bytes()
 }
 
 /// A simple, text-only PDF: one line of text per line, paginated.
@@ -528,7 +567,7 @@ mod tests {
             vec![Cell::Text("name".into()), Cell::Text("note".into())],
             vec![Cell::Text("Ada".into()), Cell::Text("has, a comma".into())],
         ];
-        let text = String::from_utf8(csv_bytes(&rows)).expect("utf8");
+        let text = String::from_utf8(csv::bytes(&rows)).expect("utf8");
         assert!(text.contains("name,note"), "{text}");
         assert!(text.contains("\"has, a comma\""), "{text}");
     }
@@ -536,7 +575,7 @@ mod tests {
     #[test]
     fn csv_escapes_a_quote_by_doubling_it() {
         let rows = vec![vec![Cell::Text("say \"hi\"".into())]];
-        let text = String::from_utf8(csv_bytes(&rows)).expect("utf8");
+        let text = String::from_utf8(csv::bytes(&rows)).expect("utf8");
         assert!(text.contains("\"say \"\"hi\"\"\""), "{text}");
     }
 
@@ -609,6 +648,91 @@ mod tests {
             std::fs::read_to_string(root.join("notes.md")).unwrap(),
             "body"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The long-document path: the body already sits in a workspace file, so a
+    /// report is written and edited in sections and only the render pays for the
+    /// text -- and rendering again after an edit is one call with one path.
+    #[test]
+    fn a_source_file_is_the_body_and_re_renders_after_an_edit() {
+        let root = root();
+        std::fs::write(root.join("report.md"), "# Heading\n\nFirst version.").expect("seed");
+        build(
+            json!({ "path": "out.docx", "source": "report.md" }),
+            root.clone(),
+            &discarding(),
+        )
+        .expect("write");
+        let first = crate::documents::extract(&root.join("out.docx"))
+            .expect("a document")
+            .expect("read");
+        assert!(first.contains("Heading"), "{first}");
+        assert!(first.contains("First version."), "{first}");
+
+        std::fs::write(root.join("report.md"), "# Heading\n\nSecond version.")
+            .expect("edit source");
+        build(
+            json!({ "path": "out.docx", "source": "report.md" }),
+            root.clone(),
+            &discarding(),
+        )
+        .expect("re-render");
+        let second = crate::documents::extract(&root.join("out.docx"))
+            .expect("a document")
+            .expect("read");
+        assert!(second.contains("Second version."), "{second}");
+        assert!(!second.contains("First version."), "{second}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A spreadsheet's rows can arrive as a CSV file, which is the shape a long
+    /// table is written in: a header line, then rows appended one section at a time.
+    #[test]
+    fn a_csv_source_builds_a_sheet() {
+        let root = root();
+        std::fs::write(root.join("rows.csv"), "Name,Score\nAda,42\n").expect("seed");
+        build(
+            json!({ "path": "out.xlsx", "source": "rows.csv" }),
+            root.clone(),
+            &discarding(),
+        )
+        .expect("write");
+        let text = crate::documents::extract(&root.join("out.xlsx"))
+            .expect("a document")
+            .expect("read");
+        assert!(text.contains("Ada"), "{text}");
+        assert!(text.contains("42"), "{text}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Both inputs at once is refused, not resolved: a model that edited its
+    /// Markdown and left `content` behind would otherwise get a document built
+    /// from the copy it did not edit.
+    #[test]
+    fn passing_both_content_and_source_is_refused() {
+        let root = root();
+        std::fs::write(root.join("report.md"), "body").expect("seed");
+        let error = build(
+            json!({ "path": "out.docx", "source": "report.md", "content": "inline" }),
+            root.clone(),
+            &discarding(),
+        )
+        .expect_err("both");
+        assert!(error.contains("not both"), "{error}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_source_outside_the_workspace_is_refused() {
+        let root = root();
+        let error = build(
+            json!({ "path": "out.docx", "source": "../secret.md" }),
+            root.clone(),
+            &discarding(),
+        )
+        .expect_err("escape");
+        assert!(error.contains("outside"), "{error}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

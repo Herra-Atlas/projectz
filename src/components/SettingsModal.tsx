@@ -23,6 +23,8 @@ import { TelegramSettingsPage } from "./communications/TelegramSettingsPage";
 import SettingsSearch, { pageForEntry } from "./settings/SettingsSearch";
 import { buildSettingsIndex, type SettingsEntry } from "./settings/settingsIndex";
 import { LocalAddMenu } from "./settings/local/LocalAddMenu";
+import { saveGeneralSettings, type GeneralSettings } from "../features/settings/generalSettings";
+import { useGeneralSettings } from "../features/settings/useGeneralSettings";
 import { SpeechToTextPage } from "./settings/voice/SpeechToTextPage";
 import { AudioEnginePage } from "./settings/voice/AudioEnginePage";
 import { AudioModelsPage } from "./settings/voice/AudioModelsPage";
@@ -83,19 +85,6 @@ type SettingsModalProps = { open: boolean; onClose: () => void; onEndpointsChang
 // The page union lives in `settings/settingsPages.ts` so the search index can name a page
 // without importing this modal. Re-exported here for the components that already imported it.
 export type { SettingsPage } from "./settings/settingsPages";
-
-type GeneralSettings = {
-  userName: string;
-  instructions: string;
-  responseNotifications: boolean;
-  showMetrics: boolean;
-  sendWith: "Enter" | "Ctrl + Enter";
-};
-
-const DEFAULT_GENERAL: GeneralSettings = { userName: "", instructions: "", responseNotifications: false, showMetrics: true, sendWith: "Enter" };
-
-/** Fills in defaults for any key the stored record predates. */
-const withGeneralDefaults = (saved: Partial<GeneralSettings> | null | undefined): GeneralSettings => ({ ...DEFAULT_GENERAL, ...(saved ?? {}) });
 
 const INSTRUCTION_EXAMPLES = [
   "Ask clarifying questions before giving detailed answers.",
@@ -215,7 +204,10 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
    * downloaded.
    */
   const [engineNames, setEngineNames] = useState<Pick<InstalledEngine, "id" | "version" | "source" | "installed">[]>([]);
-  const [generalSettings, setGeneralSettings] = useState<GeneralSettings>(DEFAULT_GENERAL);
+  // The shared record, not a local copy: editing the name here updates the chat
+  // greeting through the store, and the modal opens on what startup already read
+  // rather than fetching it again.
+  const generalSettings = useGeneralSettings();
   const [instructionExampleIndex, setInstructionExampleIndex] = useState(0);
   const [page, setPage] = useState<SettingsPage>({ view: "general" });
   /**
@@ -403,18 +395,8 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
   useEffect(() => {
     if (!open) return;
     let mounted = true;
-    invoke<Partial<GeneralSettings> | null>("database_get_setting", { key: "app.general" })
-      .then((saved) => {
-        if (!mounted) return;
-        if (saved) setGeneralSettings(withGeneralDefaults(saved));
-        else {
-          const legacy = localStorage.getItem("projectz.general-settings");
-          const migrated = withGeneralDefaults(legacy ? JSON.parse(legacy) as Partial<GeneralSettings> : null);
-          setGeneralSettings(migrated);
-          if (legacy) void invoke("database_set_setting", { key: "app.general", value: migrated });
-        }
-      })
-      .catch(() => { if (mounted) notify("error", "Could not load saved preferences."); });
+    // General settings are not read here: the shared store holds them, startup
+    // read them once, and this modal is the only thing that writes them.
     Promise.all([
       invoke<Endpoint[]>("ai_list_endpoints"),
       invoke<LocalModel[]>("local_models_list"),
@@ -572,8 +554,9 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
   };
 
   const updateGeneralSettings = (next: GeneralSettings) => {
-    setGeneralSettings(next);
-    void invoke("database_set_setting", { key: "app.general", value: next }).catch((reason) => notify("error", `Preferences could not be saved: ${String(reason)}`, "settings:general"));
+    // The store publishes before the write lands, so the control updates at once
+    // and every reader -- the chat greeting included -- sees the same value.
+    void saveGeneralSettings(next).catch((reason) => notify("error", `Preferences could not be saved: ${String(reason)}`, "settings:general"));
   };
 
   /**
@@ -1220,7 +1203,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
                     anchor="general.you"
                     label="Your name"
                     description="How the empty conversation screen greets you."
-                    control={<input type="text" value={generalSettings.userName} onChange={(event) => updateGeneralSettings({ ...generalSettings, userName: event.target.value })} maxLength={40} className="h-9 w-56 rounded-md border border-[var(--line)] bg-[var(--rail)] px-2.5 text-[13px] text-[var(--text)] placeholder:text-[var(--quiet)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" placeholder="Sir" />}
+                    control={<input type="text" value={generalSettings.userName} onChange={(event) => updateGeneralSettings({ ...generalSettings, userName: event.target.value })} maxLength={40} className="h-9 w-56 rounded-md border border-[var(--line)] bg-[var(--rail)] px-2.5 text-[13px] text-[var(--text)] placeholder:text-[var(--quiet)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" placeholder="Your name" />}
                   />
                 </SettingsSection>
 

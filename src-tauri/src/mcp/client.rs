@@ -432,15 +432,17 @@ fn spawn(server: &McpServer) -> Result<Child, String> {
                 .env("TMP", &scratch)
                 .env("TEMP", &scratch);
         }
+        // A server is usually a console program; without this, starting one opens
+        // a window over the app and closing it kills the server. The refreshed
+        // PATH is applied here too, before the server's own environment, so a
+        // user who set `PATH` for this server still wins.
+        crate::child::hide_console_async(&mut command);
         for (name, value) in &server.env {
             command.env(name, value);
         }
         if let Some((name, value)) = key_env(&server.key) {
             command.env(name, value);
         }
-        // A server is usually a console program; without this, starting one opens
-        // a window over the app and closing it kills the server.
-        crate::child::hide_console_async(&mut command);
         command
     };
 

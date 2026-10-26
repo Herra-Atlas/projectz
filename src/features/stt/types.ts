@@ -30,8 +30,22 @@ export type SttModel = {
   family: string;
 };
 
-/** Mirrors `stt::model::SttSettings`. */
+/** Mirrors `stt::models::SttSettings`. */
 export type SttSettings = {
   /** The chosen model's path, or null for the first one found. */
   model: string | null;
+  /**
+   * The capture endpoint to record from, by name, or null for the system
+   * default. A name rather than an index: the list renumbers as devices come
+   * and go.
+   */
+  device: string | null;
+};
+
+/** Mirrors `stt::commands::Inputs`. */
+export type SttInputs = {
+  /** Every capture endpoint this machine offers, sorted. */
+  devices: string[];
+  /** What Windows would use with nothing chosen, or null when it has no input. */
+  default: string | null;
 };

@@ -3,8 +3,17 @@ import ToolIcon from "../../components/ToolIcon";
 
 /** A tool call waiting on the user. */
 export type PendingApproval = {
-  /** Ties the dialog to the run, so two sessions can each have one open. */
+  /** Ties the prompt to the run, so two sessions can each have one open. */
   runId: string;
+  /**
+   * The conversation the run belongs to.
+   *
+   * A prompt is answered in the conversation that asked for it. Without this, a
+   * run started from Telegram -- or from another chat still working in the
+   * background -- asked for terminal access over whatever was on screen.
+   * `null` is a run that reported no session, which is drawn wherever it lands.
+   */
+  sessionId: string | null;
   approvalId: string;
   tool: string;
   /** Empty for a tool that is not a shell. */

@@ -19,6 +19,14 @@
 //! Nothing here allocates per callback beyond the shared buffer's growth, which is
 //! the one thing an audio callback must not do: a long `Vec` push is a pointer
 //! bump, and the reserve is done before the stream starts.
+//!
+//! # Why a name and not an index
+//!
+//! The chosen endpoint is stored as its name because the list renumbers as
+//! devices come and go: an index saved on Tuesday opens a different microphone
+//! once a headset is unplugged. The name is resolved against the live endpoints
+//! at every press, so a choice whose device is gone fails by name instead of
+//! recording from whatever the system default has become.
 
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
@@ -49,16 +57,37 @@ impl Session {
     }
 }
 
+/// Every capture endpoint this machine offers, and the one the system would use
+/// with nothing chosen.
+///
+/// Sorted and deduplicated because a name is what gets stored: two rows carrying
+/// one name would be two rows that choose the same device.
+pub fn inputs() -> (Vec<String>, Option<String>) {
+    let host = cpal::default_host();
+    let default = host
+        .default_input_device()
+        .and_then(|device| device.name().ok());
+    let mut names: Vec<String> = host
+        .input_devices()
+        .map(|devices| devices.filter_map(|device| device.name().ok()).collect())
+        .unwrap_or_default();
+    names.sort();
+    names.dedup();
+    (names, default)
+}
+
 /// Opens the microphone and starts recording.
 ///
+/// `device` names the endpoint to open, or is `None` for the system default.
 /// Returns once the stream is actually running, so a device that cannot be opened
 /// fails here rather than on the user's first sentence.
-pub fn start() -> Result<Session, String> {
+pub fn start(device: Option<&str>) -> Result<Session, String> {
+    let device = device.map(str::to_string);
     let (stop_tx, stop_rx) = mpsc::channel();
     let (audio_tx, audio_rx) = mpsc::channel();
     let (ready_tx, ready_rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let _ = audio_tx.send(record(stop_rx, ready_tx));
+        let _ = audio_tx.send(record(stop_rx, ready_tx, device));
     });
     ready_rx
         .recv_timeout(Duration::from_secs(5))
@@ -72,11 +101,10 @@ pub fn start() -> Result<Session, String> {
 fn record(
     stop: mpsc::Receiver<()>,
     ready: mpsc::Sender<Result<(), String>>,
+    name: Option<String>,
 ) -> Result<Vec<i16>, String> {
     let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or_else(|| "No microphone was found.".to_string())?;
+    let device = open_device(&host, name.as_deref())?;
     let (config, format) = pick_config(&device)?;
     let channels = config.channels as usize;
     let rate = config.sample_rate.0;
@@ -128,6 +156,25 @@ fn record(
         .map(|values| values.clone())
         .unwrap_or_default();
     Ok(resample(&recorded, rate, SAMPLE_RATE))
+}
+
+/// The endpoint a recording should open.
+///
+/// A chosen name is looked up among the live endpoints rather than trusted: a
+/// microphone unplugged since it was chosen must fail by name here, at the press,
+/// instead of silently recording from whatever Windows made the default.
+fn open_device(host: &cpal::Host, name: Option<&str>) -> Result<cpal::Device, String> {
+    let Some(name) = name else {
+        return host
+            .default_input_device()
+            .ok_or_else(|| "No microphone was found.".to_string());
+    };
+    let mut devices = host
+        .input_devices()
+        .map_err(|error| format!("The microphones could not be listed: {error}"))?;
+    devices
+        .find(|device| device.name().ok().as_deref() == Some(name))
+        .ok_or_else(|| format!("The microphone \"{name}\" is not connected."))
 }
 
 /// Prefers a configuration at 16 kHz, and falls back to whatever the device

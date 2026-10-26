@@ -466,6 +466,17 @@ const PAGES: IndexPage[] = [
         keywords: ["audio model", "gguf", "kokoro", "download", "voice", "transcribe", "parakeet", "options"] },
     ],
   },
+  {
+    view: "system",
+    name: "System",
+    entries: [
+      {
+        anchor: "system.microphone",
+        label: "Microphone",
+        keywords: ["mic", "input", "capture", "device", "audio in", "dictation", "default microphone"],
+      },
+    ],
+  },
 ];
 
 /**
