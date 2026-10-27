@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open as openFile } from "@tauri-apps/plugin-dialog";
-import { ArrowLeft, AudioLines, BookMarked, Bot, Brain, ChevronDown, ChevronRight, CircleDot, Cpu, Disc3, Download, GripVertical, Info, Lightbulb, Mic, MoveRight, Palette, Pencil, Plug, Plus, Scissors, Search, Server, Settings2, SlidersHorizontal, Smartphone, Sparkles, Trash2, Volume2, X, Zap } from "lucide-react";
+import { ArrowLeft, AudioLines, BookMarked, Bot, Brain, ChevronDown, ChevronRight, CircleDot, Cpu, Disc3, Download, GripVertical, Info, Mic, MoveRight, Palette, Pencil, Plug, Plus, Scissors, Search, Server, Settings2, SlidersHorizontal, Smartphone, Sparkles, Trash2, Volume2, X, Zap } from "lucide-react";
 import { resolveTheme, type Appearance } from "../features/appearance/appearance";
 import AccentPicker from "./appearance/AccentPicker";
 import ThemePicker from "./appearance/ThemePicker";
@@ -15,7 +15,6 @@ import RuntimeSettingsPage, { type LocalRuntimeSettings } from "./RuntimeSetting
 import EnginePicker from "./EnginePicker";
 import SkillsPage from "./SkillsPage";
 import McpSettingsPage from "./McpSettingsPage";
-import AssistSettingsPage from "./assist/AssistSettingsPage";
 import TasteSettingsPage from "./taste/TasteSettingsPage";
 import { CommunicationSecurityPage } from "./communications/CommunicationSecurityPage";
 import { CommunicationSettingsPage } from "./communications/CommunicationSettingsPage";
@@ -30,6 +29,7 @@ import { AudioEnginePage } from "./settings/voice/AudioEnginePage";
 import { AudioModelsPage } from "./settings/voice/AudioModelsPage";
 import { AudioModelSettingsPage } from "./settings/voice/AudioModelSettingsPage";
 import { SttModelSettingsPage } from "./settings/voice/SttModelSettingsPage";
+import { VoiceEnrollPage } from "./settings/voice/VoiceEnrollPage";
 import { SettingsNavGroup, navButtonClass } from "./settings/SettingsNavGroup";
 import { DownloadsPage } from "./settings/downloads/DownloadsPage";
 import { SystemPage } from "./settings/SystemPage";
@@ -39,7 +39,6 @@ import { TtsVoiceSettingsPage } from "./settings/voice/TtsVoiceSettingsPage";
 import { TextToSpeechPage } from "./settings/voice/TextToSpeechPage";
 import { DownloadPage } from "./settings/downloads/DownloadPage";
 import type { SettingsPage } from "./settings/settingsPages";
-import { useAssist } from "../features/assist/useAssist";
 import { useTaste } from "../features/taste/useTaste";
 import { useMessaging } from "../features/communications/useMessaging";
 import { ANCHOR_ATTRIBUTE, FlashHighlight, SettingsPageTitle, SettingsSearchScope, SettingsSection, SETTINGS_HIGHLIGHT_EVENT } from "./SettingsSection";
@@ -224,20 +223,18 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
     if (!open) setPage({ view: "general" });
   }, [open]);
   /**
-   * Assist's record and Taste's record, read by the *modal* rather than by their pages.
+   * Taste's record, read by the *modal* rather than by its page.
    *
    * The dialog outlives the page: it is mounted while open and the page is only the
    * selected section, so a read started here runs while the user is still clicking around
-   * in another section -- before the Assist or Taste click that would otherwise be the
+   * in another section -- before the Taste click that would otherwise be the
    * first moment the read could begin, and that click is exactly when they are waiting.
    * Mounting the hook in the page instead meant the "Reading settings…" placeholder was
    * on screen for the whole read every single visit.
    *
-   * Both are always enabled: `enabled` is not about whether the feature is on, it is
-   * about whether the hook is subscribed at all, and "the user may look at this page" is
-   * the answer here.
+   * `enabled` is not about whether the feature is on, it is about whether the hook is
+   * subscribed at all, and "the user may look at this page" is the answer here.
    */
-  const assistStore = useAssist(open);
   const tasteStore = useTaste(open);
   // Messaging follows the same rule: the dialog outlives the page, so the read
   // starts when the dialog opens rather than on the click that selects the page.
@@ -782,19 +779,19 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
   const backTarget: SettingsPage =
     page.view === "model" ? { view: "local" }
       : page.view === "download"
-        ? page.kind === "stt" ? { view: "stt" } : page.kind === "tts" ? { view: "tts" } : page.kind === "audio" ? { view: "audioModels" } : { view: "local" }
+        ? page.kind === "stt" ? { view: "stt" } : page.kind === "tts" ? { view: "tts" } : page.kind === "wake" ? { view: "stt" } : page.kind === "audio" ? { view: "audioModels" } : { view: "local" }
       : page.view === "ttsVoice" ? { view: "tts" }
       : page.view === "sttModel" ? { view: "stt" }
       : page.view === "audioModels" ? { view: "audio" }
-      : page.view === "audioModel" ? { view: "audioModels" }
+      : page.view === "audioModel" ? (page.from === "wake" ? { view: "stt" } : { view: "audioModels" })
       : { view: "providers" };
   const backLabel =
     page.view === "model" ? "Back to local models"
-      : page.view === "download" ? (page.kind === "stt" ? "Back to speech to text" : page.kind === "tts" ? "Back to text to speech" : page.kind === "audio" ? "Back to audio models" : "Back to local models")
+      : page.view === "download" ? (page.kind === "stt" ? "Back to speech to text" : page.kind === "tts" ? "Back to text to speech" : page.kind === "wake" ? "Back to wake word" : page.kind === "audio" ? "Back to audio models" : "Back to local models")
       : page.view === "ttsVoice" ? "Back to text to speech"
       : page.view === "sttModel" ? "Back to speech to text"
       : page.view === "audioModels" ? "Back to audio engine"
-      : page.view === "audioModel" ? "Back to audio models"
+      : page.view === "audioModel" ? (page.from === "wake" ? "Back to wake word" : "Back to audio models")
       : "Back to providers";
 
   // The two collapsible nav groups stay tinted while *any* page they own is the
@@ -804,8 +801,8 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
     page.view === "providers" || page.view === "local" || page.view === "engines" || page.view === "model" ||
     (page.view === "download" && page.kind === "llama");
   const voiceGroupActive =
-    page.view === "stt" || page.view === "tts" || page.view === "audio" || page.view === "sttModel" || page.view === "ttsVoice" || page.view === "audioModels" || page.view === "audioModel" ||
-    (page.view === "download" && (page.kind === "stt" || page.kind === "tts" || page.kind === "audio"));
+    page.view === "stt" || page.view === "tts" || page.view === "voiceEnroll" || page.view === "audio" || page.view === "sttModel" || page.view === "ttsVoice" || page.view === "audioModels" || page.view === "audioModel" ||
+    (page.view === "download" && (page.kind === "stt" || page.kind === "tts" || page.kind === "wake" || page.kind === "audio"));
   // The Model section's four pages tint its parent together: like Providers and
   // Voice, the group stays findable while any page it owns is showing, which is
   // what keeps a reader on the Context page from wondering which heading
@@ -855,12 +852,11 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
             <p className="hidden px-2.5 pb-1.5 pt-1 text-[11px] font-medium text-[var(--quiet)] sm:block">Application</p>
             <button type="button" data-settings-nav="general" aria-label="General" onClick={() => setPage({ view: "general" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "general" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><SlidersHorizontal size={16} />General</button>
             <button type="button" data-settings-nav="appearance" aria-label="Appearance" onClick={() => setPage({ view: "appearance" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "appearance" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Palette size={16} />Appearance</button>
-            {/* The assistant's own surfaces: what it does (Assist), what it can load
-                (Skills) and what it can reach (MCP). They were in Application, where a
-                reader looking for "where do I change the browser" found them mixed in
-                with the theme picker. */}
+            {/* The assistant's own surfaces: what it can learn (Taste), what it can
+                load (Skills) and what it can reach (MCP). They were in Application,
+                where a reader looking for "where do I change the browser" found them
+                mixed in with the theme picker. */}
             <p className="hidden px-2.5 pb-1.5 pt-5 text-[11px] font-medium text-[var(--quiet)] sm:block">Assistant</p>
-            <button type="button" data-settings-nav="assist" aria-label="Assist" onClick={() => setPage({ view: "assist" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "assist" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Lightbulb size={16} />Assist</button>
             <button type="button" data-settings-nav="taste" aria-label="Taste" onClick={() => setPage({ view: "taste" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "taste" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Brain size={16} />Taste</button>
             <button type="button" data-settings-nav="skills" aria-label="Skills" onClick={() => setPage({ view: "skills" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "skills" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><BookMarked size={16} />Skills</button>
             <button type="button" data-settings-nav="mcp" aria-label="MCP servers" onClick={() => setPage({ view: "mcp" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "mcp" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Plug size={16} />MCP</button>
@@ -927,7 +923,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
               {/* No `key`: a search result on the page already open must not remount the
                   scope, or the dim it is about to set is thrown away with the old node. */}
               <SettingsSearchScope>
-              {page.view === "assist" ? <AssistSettingsPage notify={notify} store={assistStore} groups={providerModelGroups} localModels={localModels} /> : page.view === "communicationsTelegram" ? <TelegramSettingsPage notify={notify} store={messagingStore} /> : page.view === "communicationsSettings" ? <CommunicationSettingsPage notify={notify} store={messagingStore} /> : page.view === "communicationsSecurity" ? <CommunicationSecurityPage notify={notify} store={messagingStore} /> : page.view === "taste" ? <TasteSettingsPage notify={notify} store={tasteStore} groups={providerModelGroups} localModels={localModels} /> : page.view === "providers" ? <>
+              {page.view === "communicationsTelegram" ? <TelegramSettingsPage notify={notify} store={messagingStore} /> : page.view === "communicationsSettings" ? <CommunicationSettingsPage notify={notify} store={messagingStore} /> : page.view === "communicationsSecurity" ? <CommunicationSecurityPage notify={notify} store={messagingStore} /> : page.view === "taste" ? <TasteSettingsPage notify={notify} store={tasteStore} groups={providerModelGroups} localModels={localModels} /> : page.view === "providers" ? <>
                 <SettingsPageTitle>
                   <h2 className="text-[17px] font-semibold tracking-tight"><FlashHighlight anchor="providers.list" />Providers</h2>
                   <button type="button" {...{ [ANCHOR_ATTRIBUTE]: "providers.add" }} onClick={openAdd} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 text-[13px] font-medium text-[var(--text)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><FlashHighlight anchor="providers.add" /><Plus size={15} />Add provider</button>
@@ -1129,11 +1125,24 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
                   </article>)}
                 </div>}
               </>
-              : page.view === "stt" ? <SpeechToTextPage onDownload={() => setPage({ view: "download", kind: "stt" })} onModelSettings={(model) => setPage({ view: "sttModel", model })} notify={notify} />
+              : page.view === "stt" ? <SpeechToTextPage
+                onDownload={() => setPage({ view: "download", kind: "stt" })}
+                onAudioDownload={() => setPage({ view: "download", kind: "audio" })}
+                // An audio.cpp model's settings are its family spec, not the
+                // whisper model page: same list, two kinds of file behind it.
+                onModelSettings={(model) => setPage(model.toLowerCase().endsWith(".gguf") ? { view: "audioModel", model } : { view: "sttModel", model })}
+                // A wake pack's spec page returns to the wake stage, not to the
+                // audio models list it was never opened from.
+                onWakeModelSettings={(model) => setPage({ view: "audioModel", model, from: "wake" })}
+                onDownloadWake={() => setPage({ view: "download", kind: "wake" })}
+                onCreateVoice={() => setPage({ view: "voiceEnroll" })}
+                notify={notify}
+              />
               : page.view === "tts" ? <TextToSpeechPage onDownload={(engine) => setPage({ view: "download", kind: engine })} onVoiceSettings={(voice, engine) => setPage(engine === "audiocpp" ? { view: "audioModel", model: voice } : { view: "ttsVoice", voice })} notify={notify} />
+              : page.view === "voiceEnroll" ? <VoiceEnrollPage notify={notify} onBack={() => setPage({ view: "stt" })} />
               : page.view === "audio" ? <AudioEnginePage notify={notify} />
               : page.view === "audioModels" ? <AudioModelsPage onDownload={() => setPage({ view: "download", kind: "audio" })} onModelSettings={(model) => setPage({ view: "audioModel", model })} notify={notify} />
-              : page.view === "audioModel" ? <AudioModelSettingsPage modelPath={page.model} onBack={() => setPage({ view: "audioModels" })} notify={notify} />
+              : page.view === "audioModel" ? <AudioModelSettingsPage modelPath={page.model} onBack={() => setPage(backTarget)} backLabel={backLabel} notify={notify} />
               : page.view === "download" ? <DownloadPage kind={page.kind} notify={notify} onModelInstalled={() => void refreshLocalModels()} />
               : page.view === "ttsVoice" ? <TtsVoiceSettingsPage voice={page.voice} notify={notify} />
               : page.view === "sttModel" ? <SttModelSettingsPage model={page.model} notify={notify} />

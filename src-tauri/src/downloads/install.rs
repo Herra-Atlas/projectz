@@ -55,7 +55,17 @@ pub async fn fetch(
     flags: &Flags,
     mut report: impl FnMut(u64, Option<u64>),
 ) -> Result<Ending, String> {
-    let url = format!("{API}/{repo}/resolve/main/{path}");
+    // A Hub repository resolves through `resolve/main`; a GitHub one is served
+    // raw. Paths there can contain spaces (`Hey Lara/lara.onnx`), and a URL with
+    // a space in it is not a URL.
+    let url = if repo == crate::downloads::catalog::WAKEWORDS_REPO {
+        format!(
+            "https://raw.githubusercontent.com/{repo}/main/{}",
+            path.replace(' ', "%20")
+        )
+    } else {
+        format!("{API}/{repo}/resolve/main/{path}")
+    };
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;

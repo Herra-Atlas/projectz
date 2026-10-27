@@ -98,7 +98,14 @@ export function useNotifications() {
   useEffect(() => {
     const timer = window.setInterval(() => {
       const now = Date.now();
-      setNotifications((current) => current.filter((notification) => notification.expiresAt === null || notification.expiresAt > now));
+      setNotifications((current) => {
+        const kept = current.filter(
+          (notification) => notification.expiresAt === null || notification.expiresAt > now,
+        );
+        // The same array when nothing expired. A fresh one would re-render the
+        // whole stack four times a second even while it holds nothing at all.
+        return kept.length === current.length ? current : kept;
+      });
     }, SWEEP_MS);
     return () => window.clearInterval(timer);
   }, []);

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::database::Database;
 
-/// The settings key, beside `app.assist` and `app.taste`.
+/// The settings key, beside `app.taste` and `app.stt`.
 pub const KEY: &str = "app.tts";
 
 /// The pace range a voice may be asked for.

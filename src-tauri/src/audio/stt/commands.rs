@@ -79,7 +79,10 @@ pub struct ModelRow {
 
 #[tauri::command]
 pub fn stt_models() -> Result<Vec<ModelRow>, String> {
-    let mut rows: Vec<ModelRow> = models::list()
+    // One list, both engines: `models::list` already walks whisper.cpp's folder
+    // and appends audio.cpp's recognisers, so nothing is added twice here. The
+    // page groups on `audio`.
+    Ok(models::list()
         .into_iter()
         .map(|model| ModelRow {
             path: model.path,
@@ -87,24 +90,10 @@ pub fn stt_models() -> Result<Vec<ModelRow>, String> {
             repo: model.repo,
             size: model.size,
             parakeet: model.parakeet,
-            audio: false,
-            family: String::new(),
-        })
-        .collect();
-    for model in audiocpp::models() {
-        rows.push(ModelRow {
-            path: model.path.display().to_string(),
-            name: model.name,
-            // The family is what a reader recognises about this model; the
-            // repository folder is a packaging detail nobody types.
-            repo: model.family.clone(),
-            size: model.size,
-            parakeet: false,
-            audio: true,
+            audio: model.audio,
             family: model.family,
-        });
-    }
-    Ok(rows)
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -166,9 +155,42 @@ pub fn stt_select_model(
         return Err("That model is no longer on disk.".to_string());
     }
     let mut next = models::settings(&database);
+    // A resident engine holds one model; choosing another means the process is
+    // holding the wrong weights, so it goes now and the new one starts on the
+    // next recording.
+    super::resident::stop();
     next.model = Some(model);
     models::save(&database, &next)?;
     Ok(next)
+}
+
+/// Keeps the recognition model in memory between recordings, or stops doing so.
+///
+/// Turning it off stops the resident engine at once: the memory is the only thing
+/// the switch is about, so leaving it up after the switch says off would be a lie
+/// the task manager could see.
+#[tauri::command]
+pub async fn stt_set_keep_loaded(
+    app: AppHandle,
+    database: State<'_, Arc<Database>>,
+    keep: bool,
+) -> Result<SttSettings, String> {
+    let mut settings = models::settings(&database);
+    settings.keep_loaded = keep;
+    models::save(&database, &settings)?;
+    if !keep {
+        super::resident::stop();
+        // A whisper model lives in the resident process above, but an audio.cpp
+        // model lives inside that engine's server. "Off" has to reach it too, or
+        // the weights stay resident while the switch says otherwise.
+        if matches!(
+            models::resolve(&settings),
+            Ok(models::Selected::Audiocpp(_))
+        ) {
+            crate::audio::audiocpp::stop(crate::audio::audiocpp::Purpose::Speech, &app).await;
+        }
+    }
+    Ok(settings)
 }
 
 /// Removes a model and forgets everything stored about it.
@@ -195,6 +217,11 @@ pub fn stt_remove_model(database: State<'_, Arc<Database>>, model: String) -> Re
         settings.model = None;
     }
     settings.languages.remove(&model);
+    // A deleted model must not stay in memory: the file is gone, and the process
+    // holding it is the only thing that would keep it alive.
+    if super::resident::running_model().as_deref() == Some(std::path::Path::new(&model)) {
+        super::resident::stop();
+    }
     models::save(&database, &settings)
 }
 
@@ -236,7 +263,10 @@ pub fn stt_set_language(
 /// in Settings applies to the next recording without the chat page knowing the
 /// setting exists.
 #[tauri::command]
-pub fn stt_recording_start(database: State<'_, Arc<Database>>) -> Result<(), String> {
+pub fn stt_recording_start(
+    app: AppHandle,
+    database: State<'_, Arc<Database>>,
+) -> Result<(), String> {
     let mut slot = RECORDING
         .lock()
         .map_err(|_| "The microphone is in an unusable state.".to_string())?;
@@ -244,7 +274,9 @@ pub fn stt_recording_start(database: State<'_, Arc<Database>>) -> Result<(), Str
         return Err("The microphone is already recording.".to_string());
     }
     let device = models::settings(&database).device;
-    *slot = Some(capture::start(device.as_deref())?);
+    // The app handle rides along so the recording can report that it ended
+    // itself: the composer has no other way to know the silence was heard.
+    *slot = Some(capture::start(device.as_deref(), Some(app))?);
     Ok(())
 }
 

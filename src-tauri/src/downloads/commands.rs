@@ -111,6 +111,22 @@ pub async fn downloads_search(kind: Kind, query: String) -> Result<Vec<DownloadF
             let tree = client::tree(client.http(), catalog::AUDIO_REPO).await?;
             catalog::audio_packages(catalog::AUDIO_REPO, &tree, &query)
         }
+        // The same repository and the same install rule; only the rows differ.
+        Kind::Wake => {
+            let tree = client::tree(client.http(), catalog::AUDIO_REPO).await?;
+            let mut files = catalog::wake_packages(catalog::AUDIO_REPO, &tree, &query);
+            // A second source for the same kind: one places a GGUF the audio.cpp
+            // engine runs, the other a head the ONNX path runs. A collection that
+            // cannot be listed is not a reason to fail the rows that can.
+            if let Ok(tree) = client::github_tree(client.http(), catalog::WAKEWORDS_REPO).await {
+                files.extend(catalog::collection_heads(
+                    catalog::WAKEWORDS_REPO,
+                    &tree,
+                    &query,
+                ));
+            }
+            files
+        }
     };
     files.truncate(MAX_ROWS);
     Ok(files)
@@ -137,6 +153,34 @@ pub async fn downloads_installed(kind: Kind) -> Result<Vec<InstalledFile>, Strin
     let root = super::kinds::models_root_for(kind);
     let mut found = Vec::new();
     collect(&root, kind, &mut found);
+    // Word heads live beside the ONNX engine rather than under `models/`, so the
+    // walk above cannot see them; a head that is on disk must still say so, or
+    // the page offers the same file again after installing it.
+    if matches!(kind, Kind::Wake) {
+        let heads = crate::audio::engines::openwakeword::heads_dir();
+        if let Ok(entries) = std::fs::read_dir(&heads) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let named = path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("onnx"));
+                if !named {
+                    continue;
+                }
+                found.push(InstalledFile {
+                    name: path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    repo: crate::downloads::catalog::WAKEWORDS_REPO.to_string(),
+                    path: path.display().to_string(),
+                    size: std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0),
+                });
+            }
+        }
+    }
     found.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(found)
 }

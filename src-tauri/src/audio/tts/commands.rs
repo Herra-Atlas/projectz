@@ -176,7 +176,9 @@ pub async fn tts_voice_warm(
     let target = voice.or_else(|| settings.voice.clone());
     match voices::resolve(target.as_deref()).await {
         Ok(Speaking::Piper(_)) => Ok(true),
-        Ok(Speaking::Audiocpp(_)) => Ok(crate::audio::audiocpp::running().await),
+        Ok(Speaking::Audiocpp(_)) => {
+            Ok(crate::audio::audiocpp::running(crate::audio::audiocpp::Purpose::Speech).await)
+        }
         Err(_) => Ok(false),
     }
 }

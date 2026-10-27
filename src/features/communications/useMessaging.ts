@@ -11,7 +11,7 @@ import type { MessagingSettings, MessagingStatus } from "./types";
  *
  * The master switch, the allowlist and each channel's token are one configuration
  * read and one page. Two hooks would mean two reads that can disagree about whether
- * messaging is on -- the same reason `useAssist` owns both its switch and its
+ * messaging is on -- the same reason `useTaste` owns both its switch and its
  * status.
  *
  * # Why it is mounted by the modal rather than by the page

@@ -39,18 +39,9 @@ export interface ChatRepository {
   clear(): Promise<number>;
 }
 
-const STORAGE_KEY = "projectz.chat-sessions.v1";
 class SqliteChatRepository implements ChatRepository {
-  async initialize(): Promise<void> {
-    try {
-      if (await invoke<boolean>("database_frontend_imported")) return;
-      const legacy = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]") as ChatSession[];
-      const general = JSON.parse(localStorage.getItem("projectz.general-settings") ?? "{}");
-      await invoke("database_import_frontend", { sessions: legacy, generalSettings: general });
-    } catch (error) {
-      throw new Error(`Could not migrate existing ProjectZ data: ${String(error)}`);
-    }
-  }
+  /** The database is opened by the startup sequence; there is nothing to import. */
+  async initialize(): Promise<void> {}
 
   list(): Promise<ChatSession[]> {
     return invoke<ChatSession[]>("database_list_sessions");

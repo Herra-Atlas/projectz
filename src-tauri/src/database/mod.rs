@@ -102,51 +102,6 @@ impl Database {
         migrate(&mut connection)
     }
 
-    pub fn import_legacy(&self, data_dir: &std::path::Path) -> Result<(), String> {
-        let connection = self.connection.lock().map_err(|error| error.to_string())?;
-        let imported: bool = connection
-            .query_row(
-                "SELECT value FROM settings WHERE key = 'migration.legacy_json_imported'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(|error| error.to_string())?
-            .is_some();
-        if imported {
-            return Ok(());
-        }
-        let tx = connection
-            .unchecked_transaction()
-            .map_err(|error| error.to_string())?;
-        if let Some(endpoints) = read_json::<Vec<Endpoint>>(&data_dir.join("endpoints.json")) {
-            for endpoint in endpoints {
-                tx.execute("INSERT OR IGNORE INTO providers (id, name, endpoint_url, api_key, settings_json) VALUES (?1, ?2, ?3, ?4, ?5)", params![endpoint.id, endpoint.name, endpoint.base_url, endpoint.api_key, json(&serde_json::json!({"models": endpoint.models, "enabled": endpoint.enabled}))?]).map_err(|error| error.to_string())?;
-            }
-        }
-        if let Some(models) = read_json::<Vec<LocalModel>>(&data_dir.join("local-models.json")) {
-            for model in models {
-                tx.execute("INSERT OR IGNORE INTO local_models (id, name, path, size_bytes, settings_json) VALUES (?1, ?2, ?3, ?4, '{}')", params![model.id, model.name, model.path, i64::try_from(model.size_bytes).map_err(|error| error.to_string())?]).map_err(|error| error.to_string())?;
-            }
-        }
-        if let Some(selected) = read_json::<String>(&data_dir.join("local-model-selection.json")) {
-            put_setting_tx(&tx, "local.selected_model", &selected)?;
-        }
-        if let Some(settings) =
-            read_json::<serde_json::Value>(&data_dir.join("local-runtime-settings.json"))
-        {
-            if settings.get("context").is_some() || settings.get("parallel").is_some() {
-                put_setting_tx(&tx, "local.runtime.default", &settings)?;
-            } else if let Some(object) = settings.as_object() {
-                for (model_id, value) in object {
-                    put_setting_tx(&tx, &format!("local.runtime.{model_id}"), value)?;
-                }
-            }
-        }
-        tx.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('migration.legacy_json_imported', 'true')", []).map_err(|error| error.to_string())?;
-        tx.commit().map_err(|error| error.to_string())
-    }
-
     pub fn list_endpoints(&self) -> Result<Vec<Endpoint>, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         // Providers are read first and their models looked up afterwards,
@@ -550,37 +505,6 @@ impl Database {
         self.set_setting(&format!("local.runtime.{model_id}"), settings)
     }
 
-    pub fn frontend_imported(&self) -> bool {
-        self.setting::<bool>("migration.frontend_localstorage_imported")
-            .unwrap_or(false)
-    }
-
-    pub fn import_frontend_data(
-        &self,
-        sessions: &[serde_json::Value],
-        general_settings: &serde_json::Value,
-    ) -> Result<(), String> {
-        let connection = self.connection.lock().map_err(|error| error.to_string())?;
-        let tx = connection
-            .unchecked_transaction()
-            .map_err(|error| error.to_string())?;
-        for session in sessions {
-            Self::save_chat_session_tx(&tx, session)?;
-        }
-        let has_general = tx
-            .query_row("SELECT 1 FROM settings WHERE key='app.general'", [], |_| {
-                Ok(())
-            })
-            .optional()
-            .map_err(|error| error.to_string())?
-            .is_some();
-        if !has_general {
-            put_setting_tx(&tx, "app.general", general_settings)?;
-        }
-        put_setting_tx(&tx, "migration.frontend_localstorage_imported", &true)?;
-        tx.commit().map_err(|error| error.to_string())
-    }
-
     /// The session row as JSON, in the shape `save_chat_session` takes back.
     ///
     /// Used when a change originates on this side -- today the manual compaction
@@ -972,16 +896,6 @@ impl Database {
         // before the label. Swapping them filters on `since = "month"`, which
         // matches nothing and makes the page look empty.
         statistics::build_report(&connection, since, range, bucket_sql)
-    }
-
-    /// Records what one assist request cost.
-    ///
-    /// A thin passthrough rather than the watcher reaching for a connection of its own: the
-    /// one lock over the connection lives here, and a second path to it would be a second
-    /// place that can hold it while something else wants it.
-    pub fn record_assist_usage(&self, usage: &statistics::AssistUsage) -> Result<(), String> {
-        let connection = self.connection.lock().map_err(|error| error.to_string())?;
-        statistics::record_assist_usage(&connection, usage)
     }
 
     /// Stores what each model of a provider can do.
@@ -1674,41 +1588,6 @@ fn migrate(connection: &mut Connection) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
         tx.commit().map_err(|error| error.to_string())?;
     }
-    // What assist spent.
-    //
-    // A table of its own rather than a row on `sessions`, because an assist answer is not a
-    // conversation: it has no transcript, it is never opened, and folding it into the
-    // session rollups would make "conversations" count something that is not one. One row
-    // per request that reached a model, so the statistics page can report assist's tokens
-    // beside everything else's -- and by model, which is the only way to answer "what is
-    // this feature costing me, and on what".
-    if version < 16 {
-        let tx = connection
-            .transaction()
-            .map_err(|error| error.to_string())?;
-        tx.execute_batch(&format!(
-            "CREATE TABLE IF NOT EXISTS assist_usage (
-                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 created_at TEXT NOT NULL,
-                 model_id TEXT NOT NULL,
-                 provider_id TEXT NOT NULL DEFAULT '',
-                 -- Nullable with no default, like `messages.cached_tokens`: NULL is how a
-                 -- row records that the provider reported no cache figure, and a default of
-                 -- zero would turn an unknown into a fact.
-                 prompt_tokens INTEGER,
-                 completion_tokens INTEGER,
-                 cached_tokens INTEGER,
-                 -- How much the page offered and how much came back, so the figures can be
-                 -- read as three cards from twenty-four blocks rather than as a bare count.
-                 blocks INTEGER NOT NULL DEFAULT 0,
-                 cards INTEGER NOT NULL DEFAULT 0
-             );
-             CREATE INDEX IF NOT EXISTS idx_assist_usage_at ON assist_usage(created_at);
-             PRAGMA user_version={LATEST_SCHEMA_VERSION};"
-        ))
-        .map_err(|error| error.to_string())?;
-        tx.commit().map_err(|error| error.to_string())?;
-    }
     // What ProjectZ has learned about the user, and what each learning run did.
     //
     // Three tables rather than a settings blob: the profile has a hard size cap
@@ -1771,41 +1650,9 @@ fn migrate(connection: &mut Connection) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
         tx.commit().map_err(|error| error.to_string())?;
     }
-    // Skill state is gone, and the table with it.
-    //
-    // A skill is a folder -- `SKILL.md` plus whatever scripts and references it
-    // carries -- and the folder is the whole record: its name is the label, its
-    // description is the trigger, its presence is whether it is offered, and a
-    // script inside it is what `skill_run` may execute. `skill_state` held a
-    // second copy of each of those facts, kept in step by writes that could be
-    // missed (an edit in Explorer, a folder copied in by hand), so it has been
-    // dropped rather than left as a table nothing reads.
-    //
-    // **Dropped rather than deleted from a migration bump alone.** An install
-    // that has never had the table is unaffected; one that has gets its rows
-    // discarded on the first launch after this, which is correct because the
-    // folders beside them are already the truth. `DROP TABLE IF EXISTS` is the
-    // idempotent guard, and the unconditional block runs on every launch at the
-    // cost of one no-op statement.
-    {
-        let tx = connection
-            .transaction()
-            .map_err(|error| error.to_string())?;
-        tx.execute_batch(&format!(
-            "DROP TABLE IF EXISTS skill_state;
-             PRAGMA user_version={LATEST_SCHEMA_VERSION};"
-        ))
-        .map_err(|error| error.to_string())?;
-        tx.commit().map_err(|error| error.to_string())?;
-    }
     Ok(())
 }
 
-fn read_json<T: DeserializeOwned>(path: &std::path::Path) -> Option<T> {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-}
 fn json<T: Serialize>(value: &T) -> Result<String, String> {
     serde_json::to_string(value).map_err(|error| error.to_string())
 }
@@ -3189,6 +3036,9 @@ mod tests {
     }
 }
 
+/// Only the migration tests write a setting through a transaction of their own;
+/// the app's own writes go through `Database::set_setting`.
+#[cfg(test)]
 fn put_setting_tx<T: Serialize>(
     tx: &rusqlite::Transaction<'_>,
     key: &str,

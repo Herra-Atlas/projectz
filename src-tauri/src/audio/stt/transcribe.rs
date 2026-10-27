@@ -34,11 +34,35 @@ pub async fn samples(
     let language = settings.language_for(&selected.path()).map(str::to_string);
 
     let text = match selected {
-        Selected::WhisperFile(model) => tokio::task::spawn_blocking(move || {
-            whisper::transcribe(&model, &samples, language.as_deref())
-        })
-        .await
-        .map_err(|error| format!("Transcription was interrupted: {error}"))??,
+        Selected::WhisperFile(model) => {
+            // A resident engine holds the weights between recordings; without it
+            // each press pays for reading the model from disk again.
+            if settings.keep_loaded && !model.parakeet {
+                // The server, not the model's own CLI: `whisper-cli` answers these
+                // arguments with its help text and a successful exit.
+                let executable =
+                    crate::audio::engines::whisper::executable(
+                        crate::audio::engines::whisper::SERVER_EXE,
+                    )
+                    .ok_or_else(|| {
+                        "whisper-server is missing from the speech engine. Reinstall it from the Local page."
+                            .to_string()
+                    })?;
+                super::resident::transcribe(
+                    std::path::Path::new(&model.path),
+                    &executable,
+                    &samples,
+                    language.as_deref(),
+                )
+                .await?
+            } else {
+                tokio::task::spawn_blocking(move || {
+                    whisper::transcribe(&model, &samples, language.as_deref())
+                })
+                .await
+                .map_err(|error| format!("Transcription was interrupted: {error}"))??
+            }
+        }
         Selected::Audiocpp(model) => {
             let wav = whisper::write_wav(&samples)?;
             let outcome = audiocpp::transcribe(&model, &wav, app, database).await;

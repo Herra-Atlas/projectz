@@ -60,11 +60,10 @@ export default function StatisticsPage({
   // would leave the view index past the end.
   const modelGroup = groups[Math.min(modelView, groups.length - 1)];
 
-  const tokenViews = ["Totals", "Per model", "Assist", "Taste"];
+  const tokenViews = ["Totals", "Per model", "Taste"];
   const tokenTitles = [
     "Tokens over time",
     "Tokens per model",
-    "Assist tokens per model",
     "Taste tokens per model",
   ];
 
@@ -100,24 +99,12 @@ export default function StatisticsPage({
                 ? <TokenChart timeline={report.timeline} axis={current.axis} days={current.days} />
                 : tokenView === 1
                   ? <ModelTokenChart timeline={report.model_timeline} axis={current.axis} />
-                  // Assist's own series, drawn by the same chart: the figures come from its own
-                  // table, so this is the same data with a different source rather than a second
-                  // way of counting. The line above it answers "how much, in total, in this
-                  // period" -- the number the card at the top of the page shows, in the company
-                  // of the models that spent it.
-                  : tokenView === 2
-                    ? <>
-                        <p className="px-4 pt-3 text-[11px] text-[var(--quiet)]">
-                          {formatTokens(report.assist_total_tokens)} tokens over {report.assist_requests === 1 ? "1 request" : `${report.assist_requests} requests`} since {report.since}.
-                        </p>
-                        <ModelTokenChart timeline={report.assist_timeline} axis={current.axis} />
-                      </>
-                    : <>
-                        <p className="px-4 pt-3 text-[11px] text-[var(--quiet)]">
-                          {formatTokens(report.taste_total_tokens)} tokens over {report.taste_runs === 1 ? "1 run" : `${report.taste_runs} runs`} since {report.since}.
-                        </p>
-                        <ModelTokenChart timeline={report.taste_timeline} axis={current.axis} />
-                      </>}
+                  : <>
+                      <p className="px-4 pt-3 text-[11px] text-[var(--quiet)]">
+                        {formatTokens(report.taste_total_tokens)} tokens over {report.taste_runs === 1 ? "1 run" : `${report.taste_runs} runs`} since {report.since}.
+                      </p>
+                      <ModelTokenChart timeline={report.taste_timeline} axis={current.axis} />
+                    </>}
           </Panel>
         </div>
 

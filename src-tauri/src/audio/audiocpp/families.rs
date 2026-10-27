@@ -25,17 +25,21 @@ pub enum Task {
     Tts,
     /// Speech to text.
     Asr,
+    /// Wake-word detection: is the phrase this model was made for being said.
+    Wake,
 }
 
 /// One row of the family table.
 ///
 /// `token` is the shortest word that identifies the family in a package name.
-/// `tts` and `asr` are the family ids to send for each task; a row with both is
-/// ambiguous on its own, and the file name has to say which side it is.
+/// `tts`, `asr` and `wake` are the family ids to send for each task; a row with
+/// more than one is ambiguous on its own, and the file name has to say which
+/// side it is.
 struct Family {
     token: &'static str,
     tts: Option<&'static str>,
     asr: Option<&'static str>,
+    wake: Option<&'static str>,
 }
 
 const fn family(token: &'static str, tts: Option<&'static str>) -> Family {
@@ -43,6 +47,7 @@ const fn family(token: &'static str, tts: Option<&'static str>) -> Family {
         token,
         tts,
         asr: None,
+        wake: None,
     }
 }
 
@@ -51,6 +56,7 @@ const fn recognition(token: &'static str, asr: &'static str) -> Family {
         token,
         tts: None,
         asr: Some(asr),
+        wake: None,
     }
 }
 
@@ -59,12 +65,29 @@ const fn twin(token: &'static str, tts: &'static str, asr: &'static str) -> Fami
         token,
         tts: Some(tts),
         asr: Some(asr),
+        wake: None,
+    }
+}
+
+const fn wake_word(token: &'static str, id: &'static str) -> Family {
+    Family {
+        token,
+        tts: None,
+        asr: None,
+        wake: Some(id),
     }
 }
 
 /// Longest token first, so `drama3` is matched before the `fish` that also
 /// appears in the same name.
 const FAMILIES: &[Family] = &[
+    // The three wake-word families the engine ships specs for. `micro` is a row
+    // of its own rather than left to the spec folder: a machine with no engine
+    // installed still has to name the file it holds, and the table is what
+    // answers that.
+    wake_word("micro", "micro_wake_word"),
+    wake_word("wake", "open_wake_word"),
+    wake_word("kws", "sherpa_kws"),
     family("drama3", Some("fish_drama3")),
     twin("qwen3", "qwen3_tts", "qwen3_asr"),
     twin("index", "index_tts2", "index_echo"),
@@ -181,11 +204,12 @@ pub fn classify(name: &str) -> Option<(String, Task)> {
         }
     }
     let (_, _, entry) = found?;
-    let task = match (task_words(&file_words), entry.tts, entry.asr) {
+    let task = match (task_words(&file_words), entry.tts, entry.asr, entry.wake) {
         (Some(task), ..) => task,
-        (None, Some(_), _) => Task::Tts,
-        (None, None, Some(_)) => Task::Asr,
-        (None, None, None) => return None,
+        (None, Some(_), _, _) => Task::Tts,
+        (None, None, Some(_), _) => Task::Asr,
+        (None, None, None, Some(_)) => Task::Wake,
+        (None, None, None, None) => return None,
     };
     // The table names first; the engine's own spec folder corrects it. A token
     // match read `chatterbox` and the installed specs say `chatterbox_turbo`
@@ -194,6 +218,7 @@ pub fn classify(name: &str) -> Option<(String, Task)> {
     let id = match task {
         Task::Tts => entry.tts,
         Task::Asr => entry.asr,
+        Task::Wake => entry.wake,
     };
     let id = match id {
         Some(id) => refined_family(&file_words, &id),
@@ -425,6 +450,28 @@ mod tests {
         assert_eq!(
             classify("index-echo-s2tt-9b.gguf"),
             Some(("index_echo".to_string(), Task::Asr))
+        );
+    }
+
+    #[test]
+    fn a_wake_word_package_names_its_family() {
+        // The names the download page actually lists, and the names a model
+        // trained outside this app has to be given to be recognisable at all.
+        assert_eq!(
+            classify("open-wake-word-alexa-f32.gguf"),
+            Some(("open_wake_word".to_string(), Task::Wake))
+        );
+        assert_eq!(
+            classify("micro-wake-word-okay-nabu-f32.gguf"),
+            Some(("micro_wake_word".to_string(), Task::Wake))
+        );
+        assert_eq!(
+            classify("sherpa-kws-zipformer-zh-en-3m-f32.gguf"),
+            Some(("sherpa_kws".to_string(), Task::Wake))
+        );
+        assert_eq!(
+            classify("open-wake-word-sara-f32.gguf"),
+            Some(("open_wake_word".to_string(), Task::Wake))
         );
     }
 

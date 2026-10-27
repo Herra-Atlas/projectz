@@ -23,6 +23,10 @@ pub enum Kind {
     /// An audio.cpp model: one gguf package under `models/audio`, whose file
     /// name carries the family it belongs to.
     Audio,
+    /// A wake-word package from the same audio.cpp catalogue. Its own kind only
+    /// because the *search* must show one task's packages: it installs exactly
+    /// where `Audio` does, because that is the folder the wake server reads.
+    Wake,
 }
 
 impl Kind {
@@ -32,7 +36,7 @@ impl Kind {
             Self::Llama => "llama",
             Self::Tts => "tts",
             Self::Stt => "stt",
-            Self::Audio => "audio",
+            Self::Audio | Self::Wake => "audio",
         }
     }
 
@@ -46,7 +50,7 @@ impl Kind {
             Self::Llama => "gguf",
             Self::Tts => "onnx",
             Self::Stt => "bin",
-            Self::Audio => "gguf",
+            Self::Audio | Self::Wake => "gguf",
         }
     }
 
@@ -69,13 +73,18 @@ impl Kind {
     /// folders deep (`en/en_US/amy/low/...`), and the name already carries the
     /// language, the voice and the quality -- the folders would only repeat it.
     pub fn destination(self, repo: &str, path: &str) -> PathBuf {
+        // A word head belongs beside the ONNX engine that runs it, not in the
+        // folder the audio.cpp server reads: two engines, two folders.
+        if matches!(self, Self::Wake) && repo == crate::downloads::catalog::WAKEWORDS_REPO {
+            return crate::audio::engines::openwakeword::heads_dir().join(file_name(path));
+        }
         let relative = match self {
             Self::Llama => PathBuf::from(path),
             // A voice, a Whisper model and an audio.cpp package are named for
             // themselves: the repository path is a packaging detail, and a
             // reader looking for one should not have to walk the folders it
             // happens to sit in.
-            Self::Tts | Self::Stt | Self::Audio => PathBuf::from(file_name(path)),
+            Self::Tts | Self::Stt | Self::Audio | Self::Wake => PathBuf::from(file_name(path)),
         };
         self.install_dir(repo).join(relative)
     }
@@ -90,7 +99,7 @@ impl Kind {
     /// still worth installing, because the family's docs name the rest.
     pub fn companions(self, path: &str) -> Vec<String> {
         match self {
-            Self::Llama | Self::Stt | Self::Audio => vec![path.to_string()],
+            Self::Llama | Self::Stt | Self::Audio | Self::Wake => vec![path.to_string()],
             Self::Tts => vec![path.to_string(), format!("{path}.json")],
         }
     }

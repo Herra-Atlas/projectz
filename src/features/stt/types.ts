@@ -40,6 +40,8 @@ export type SttSettings = {
    * and go.
    */
   device: string | null;
+  /** Keep the recognition model in memory between recordings. */
+  keepLoaded: boolean;
 };
 
 /** Mirrors `stt::commands::Inputs`. */

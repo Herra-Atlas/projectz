@@ -9,7 +9,9 @@
 pub mod audiocpp;
 pub mod commands;
 pub mod espeak;
+pub mod openwakeword;
 pub mod piper;
+pub mod sherpa;
 pub mod whisper;
 
 /// The root every engine install sits under: `<data>/engines/<id>/`.

@@ -89,8 +89,7 @@ pub fn workspace_note(root: Option<&str>) -> String {
 /// may be a summary, a piece of research, a document or a personal task, and a
 /// prompt that drifts towards the code case gets in the way of the others. What is
 /// here is true whatever the task is; anything belonging to one kind of work is a
-/// skill ([`crate::database::bundled_skills`]), which loads when it applies instead
-/// of riding in every request.
+/// skill, which loads when it applies instead of riding in every request.
 ///
 /// The irreversible-action sentence is the one rule that could not go in a skill.
 /// A skill is read only when the model chooses to read it, and the moment this one

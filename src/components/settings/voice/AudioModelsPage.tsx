@@ -103,7 +103,7 @@ export function AudioModelsPage({
                 <div className="min-w-0 flex-1">
                   <h4 className="truncate text-xs font-medium text-[var(--muted)]">{model.name}</h4>
                   <p className="truncate text-[11px] text-[var(--quiet)]">
-                    {model.task === "tts" ? "speech" : model.task === "asr" ? "recognition" : "unknown family"} ·{" "}
+                    {model.task === "tts" ? "speech" : model.task === "asr" ? "recognition" : model.task === "wake" ? "wake word" : "unknown family"} ·{" "}
                     {model.family.replace(/_/g, " ")} · {formatBytes(model.size)}
                   </p>
                 </div>

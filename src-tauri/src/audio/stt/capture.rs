@@ -28,11 +28,14 @@
 //! at every press, so a choice whose device is gone fails by name instead of
 //! recording from whatever the system default has become.
 
-use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
+use tauri::{AppHandle, Emitter};
 
 /// What the engine is told the audio is.
 pub const SAMPLE_RATE: u32 = 16_000;
@@ -41,13 +44,43 @@ pub const SAMPLE_RATE: u32 = 16_000;
 /// recording is a stray click on the button, not speech.
 pub const MIN_SAMPLES: usize = (SAMPLE_RATE as usize) / 4;
 
+/// How often the recording looks at what it has heard.
+const POLL: Duration = Duration::from_millis(100);
+
+/// The level on the `-1..1` scale that counts as speech rather than room.
+const SPEECH_LEVEL: f32 = 0.02;
+
+/// How much quiet ends a recording, once speech has been heard.
+///
+/// A wake word starts the microphone without a second press, so the recording
+/// has to be able to end itself; without this it waits for the end button
+/// forever, which is exactly what it used to do.
+const SILENCE_LIMIT: Duration = Duration::from_millis(1500);
+
+/// A recording that hears nothing at all ends here, so a wake word that fired on
+/// a noise cannot leave the microphone open.
+const IDLE_LIMIT: Duration = Duration::from_secs(10);
+
+/// The longest one recording may run, whatever it hears.
+const MAX_RECORDING: Duration = Duration::from_secs(120);
+
 /// A recording in progress.
 pub struct Session {
     stop: mpsc::Sender<()>,
     audio: mpsc::Receiver<Result<Vec<i16>, String>>,
+    ended: Arc<AtomicBool>,
 }
 
 impl Session {
+    /// Whether the recording has already ended by itself (silence, or the cap).
+    ///
+    /// A caller that started a recording with no button behind it -- enrolling a
+    /// voice is the one -- waits on this instead of guessing a duration, so a
+    /// two-second sentence returns in two seconds rather than in the cap.
+    pub fn ended(&self) -> bool {
+        self.ended.load(Ordering::Relaxed)
+    }
+
     /// Ends the recording and returns what was heard.
     pub fn finish(self) -> Result<Vec<i16>, String> {
         let _ = self.stop.send(());
@@ -81,13 +114,18 @@ pub fn inputs() -> (Vec<String>, Option<String>) {
 /// `device` names the endpoint to open, or is `None` for the system default.
 /// Returns once the stream is actually running, so a device that cannot be opened
 /// fails here rather than on the user's first sentence.
-pub fn start(device: Option<&str>) -> Result<Session, String> {
+/// `app` is how the recorder tells the composer it ended by itself. A caller
+/// with no composer -- voice enrollment is the one -- passes `None`, and the
+/// recording stays silent about itself rather than starting a dictation.
+pub fn start(device: Option<&str>, app: Option<AppHandle>) -> Result<Session, String> {
     let device = device.map(str::to_string);
     let (stop_tx, stop_rx) = mpsc::channel();
     let (audio_tx, audio_rx) = mpsc::channel();
     let (ready_tx, ready_rx) = mpsc::channel();
+    let ended = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&ended);
     std::thread::spawn(move || {
-        let _ = audio_tx.send(record(stop_rx, ready_tx, device));
+        let _ = audio_tx.send(record(stop_rx, ready_tx, device, app, flag));
     });
     ready_rx
         .recv_timeout(Duration::from_secs(5))
@@ -95,6 +133,7 @@ pub fn start(device: Option<&str>) -> Result<Session, String> {
     Ok(Session {
         stop: stop_tx,
         audio: audio_rx,
+        ended,
     })
 }
 
@@ -102,6 +141,8 @@ fn record(
     stop: mpsc::Receiver<()>,
     ready: mpsc::Sender<Result<(), String>>,
     name: Option<String>,
+    app: Option<AppHandle>,
+    ended: Arc<AtomicBool>,
 ) -> Result<Vec<i16>, String> {
     let host = cpal::default_host();
     let device = open_device(&host, name.as_deref())?;
@@ -146,10 +187,49 @@ fn record(
         .map_err(|error| format!("The microphone could not start: {error}"))?;
     let _ = ready.send(Ok(()));
 
-    // Blocks until the command asks to stop; the stream keeps filling the buffer
-    // on the driver's own thread meanwhile.
-    let _ = stop.recv();
+    // The stream keeps filling the buffer on the driver's own thread while this
+    // one watches it: a recording ends on the stop command, or on its own when
+    // the speech that started it has finished.
+    let started = Instant::now();
+    let window = (rate as usize / 10).max(1);
+    let mut speech_heard = false;
+    let mut quiet_for = Duration::ZERO;
+    let mut ended_by_itself = false;
+    loop {
+        match stop.recv_timeout(POLL) {
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+        let level = recent_level(&collected, window);
+        if level >= SPEECH_LEVEL {
+            speech_heard = true;
+            quiet_for = Duration::ZERO;
+        } else {
+            quiet_for += POLL;
+        }
+        let elapsed = started.elapsed();
+        // Before any speech, quiet means "not yet"; after it, quiet means done.
+        let finished = if speech_heard {
+            quiet_for >= SILENCE_LIMIT
+        } else {
+            elapsed >= IDLE_LIMIT
+        };
+        if finished || elapsed >= MAX_RECORDING {
+            ended_by_itself = true;
+            break;
+        }
+    }
     drop(stream);
+    // Before the samples are moved, so a caller polling `ended` never waits on
+    // a recording that is already over.
+    ended.store(true, Ordering::Relaxed);
+    if ended_by_itself {
+        // The composer is holding a button that says "recording"; it has to be
+        // told to finish, or it waits for a press that is never coming.
+        if let Some(app) = &app {
+            let _ = app.emit("stt-recording-auto-stopped", ());
+        }
+    }
 
     let recorded = collected
         .lock()
@@ -158,12 +238,29 @@ fn record(
     Ok(resample(&recorded, rate, SAMPLE_RATE))
 }
 
+/// The loudness of the newest slice of what has been recorded.
+///
+/// The root mean square over about a tenth of a second: speech clears
+/// `SPEECH_LEVEL` easily and a room does not, which is all the decision needs.
+/// Cheap on purpose -- it is read every 100 ms while a recording runs.
+fn recent_level(collected: &Arc<Mutex<Vec<f32>>>, window: usize) -> f32 {
+    let Ok(values) = collected.lock() else {
+        return 0.0;
+    };
+    let from = values.len().saturating_sub(window);
+    let slice = &values[from..];
+    if slice.is_empty() {
+        return 0.0;
+    }
+    (slice.iter().map(|value| value * value).sum::<f32>() / slice.len() as f32).sqrt()
+}
+
 /// The endpoint a recording should open.
 ///
 /// A chosen name is looked up among the live endpoints rather than trusted: a
 /// microphone unplugged since it was chosen must fail by name here, at the press,
 /// instead of silently recording from whatever Windows made the default.
-fn open_device(host: &cpal::Host, name: Option<&str>) -> Result<cpal::Device, String> {
+pub(crate) fn open_device(host: &cpal::Host, name: Option<&str>) -> Result<cpal::Device, String> {
     let Some(name) = name else {
         return host
             .default_input_device()
@@ -183,7 +280,9 @@ fn open_device(host: &cpal::Host, name: Option<&str>) -> Result<cpal::Device, St
 /// The sample format comes back with the configuration because it is a property
 /// of the range, not of the stream: the caller has to dispatch on it to build the
 /// right callback.
-fn pick_config(device: &cpal::Device) -> Result<(cpal::StreamConfig, SampleFormat), String> {
+pub(crate) fn pick_config(
+    device: &cpal::Device,
+) -> Result<(cpal::StreamConfig, SampleFormat), String> {
     if let Ok(ranges) = device.supported_input_configs() {
         for range in ranges {
             let (low, high) = (range.min_sample_rate().0, range.max_sample_rate().0);

@@ -33,7 +33,8 @@ pub async fn show(
             .map(|model| model.name)
             .unwrap_or(id)
     });
-    let audio_running = crate::audio::audiocpp::running().await;
+    let audio_running =
+        crate::audio::audiocpp::running(crate::audio::audiocpp::Purpose::Speech).await;
 
     let mut lines = vec!["Local engines".to_string()];
     lines.push(match &chat_name {
@@ -108,10 +109,10 @@ pub async fn handle(
             if !user.allow_stt_start {
                 return Err("You do not have access to stop the speech-to-text engine.".to_string());
             }
-            if !crate::audio::audiocpp::running().await {
+            if !crate::audio::audiocpp::running(crate::audio::audiocpp::Purpose::Speech).await {
                 return Err("voice.cpp is not running.".to_string());
             }
-            crate::audio::audiocpp::stop(hub.app()).await;
+            crate::audio::audiocpp::stop_all(hub.app()).await;
             channel
                 .send(chat, "Stopped voice.cpp / audio.cpp.", &[])
                 .await?;

@@ -39,6 +39,13 @@ pub struct SttSettings {
     /// devices come and go -- see `capture`.
     #[serde(default)]
     pub device: Option<String>,
+    /// Keep the recognition model in memory between recordings.
+    ///
+    /// The CLI loads a model, transcribes one file and exits, so without this the
+    /// weights are read from disk for every press. On means a resident engine
+    /// (`whisper-server`) that holds them; the cost is memory and one process.
+    #[serde(default)]
+    pub keep_loaded: bool,
 }
 
 impl SttSettings {
@@ -61,6 +68,11 @@ pub struct Model {
     pub size: u64,
     /// Parakeet is a different model family, read by a different executable.
     pub parakeet: bool,
+    /// Served by audio.cpp rather than read by the whisper.cpp CLI. The page
+    /// groups on this, because the two engines keep their files in two folders.
+    pub audio: bool,
+    /// The audio.cpp family, for the rows that engine serves. Empty otherwise.
+    pub family: String,
 }
 
 impl Model {
@@ -106,9 +118,26 @@ pub fn remove(path: &str) -> Result<(), String> {
 pub fn list() -> Vec<Model> {
     let mut found = Vec::new();
     walk(&models_root().join("stt"), &mut found);
+    // audio.cpp's recognisers live in the other engine's folder, and this page
+    // chooses a *model*, not an engine, so both are listed. `repo` carries the
+    // grouping label the page paints.
+    found.extend(
+        families::installed_for(families::Task::Asr)
+            .into_iter()
+            .map(|model| Model {
+                path: model.path.display().to_string(),
+                name: model.name.clone(),
+                repo: "audio.cpp".to_string(),
+                size: model.size,
+                parakeet: false,
+                audio: true,
+                family: model.family.clone(),
+            }),
+    );
     found.sort_by(|left, right| {
-        left.parakeet
-            .cmp(&right.parakeet)
+        left.audio
+            .cmp(&right.audio)
+            .then_with(|| left.parakeet.cmp(&right.parakeet))
             .then_with(|| left.name.cmp(&right.name))
     });
     found
@@ -142,7 +171,11 @@ impl Selected {
 /// Falls back to the first installed model when the stored choice is gone -- a
 /// deleted model should not leave the microphone pointing at nothing.
 pub fn resolve(settings: &SttSettings) -> Result<Selected, String> {
-    let whisper_models = list();
+    // `list` carries both engines' rows for the settings page, so every
+    // whisper fallback below names the engine (`!model.audio`) instead of
+    // trusting the order: an audio.cpp gguf handed to `whisper-cli` is a model
+    // that cannot load, however plausible the list looked.
+    let installed = list();
     let audio_models = super::audiocpp::models();
     if let Some(chosen) = settings.model.as_deref() {
         if super::audiocpp::owns_path(chosen) {
@@ -152,16 +185,19 @@ pub fn resolve(settings: &SttSettings) -> Result<Selected, String> {
             {
                 return Ok(Selected::Audiocpp(found.clone()));
             }
-        } else if let Some(found) = whisper_models.iter().find(|model| model.path == chosen) {
+        } else if let Some(found) = installed
+            .iter()
+            .find(|model| !model.audio && model.path == chosen)
+        {
             return Ok(Selected::WhisperFile(found.clone()));
         }
     }
-    if let Some(first) = whisper_models.into_iter().next() {
-        return Ok(Selected::WhisperFile(first));
+    // whisper.cpp is the engine this app came with, so it answers first.
+    if let Some(first) = installed.iter().find(|model| !model.audio) {
+        return Ok(Selected::WhisperFile(first.clone()));
     }
-    // No whisper model installed, or the audio engine's are the only ones:
-    // either way this is the honest next answer rather than a second error
-    // message about an engine the user never asked for.
+    // Only the audio engine's models are installed: that is the honest next
+    // answer rather than a second error about an engine nobody asked for.
     if let Some(first) = audio_models.into_iter().next() {
         return Ok(Selected::Audiocpp(first));
     }
@@ -223,5 +259,7 @@ fn describe(path: &PathBuf) -> Option<Model> {
         repo,
         size,
         parakeet,
+        audio: false,
+        family: String::new(),
     })
 }

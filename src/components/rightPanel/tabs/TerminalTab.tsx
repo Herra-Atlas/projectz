@@ -43,11 +43,20 @@ export default function TerminalTab({ sessions, activeId, workspace, loadedModel
   useEffect(() => {
     if (!serverId) return;
     let mounted = true;
-    // The audio.cpp server answers its own command; llama keeps its own. The
-    // listener above is shared, so lines from either server land on the same
-    // map keyed by the id the session carries.
-    const head = serverId === "audiocpp" ? "audio_logs" : "local_model_logs";
-    void invoke<string[]>(head).then((lines) => {
+    // Each engine answers its own command; llama keeps its own. The listener
+    // above is shared, so lines land on one map keyed by the id the session
+    // carries -- and the two audio engines are separate processes, so the
+    // session's id is what says which one's buffer to read.
+    const audio = serverId === "audiocpp-wake" ? "wake" : serverId === "audiocpp" ? "speech" : null;
+    // The ONNX wake engine has no process, so its lines come from the app's own
+    // buffer rather than from a child's stdout.
+    const request: Promise<string[]> =
+      serverId === "openwakeword"
+        ? invoke<string[]>("wake_logs")
+        : audio
+          ? invoke<string[]>("audio_logs", { purpose: audio })
+          : invoke<string[]>("local_model_logs");
+    void request.then((lines) => {
       if (mounted) setLogs((current) => ({ ...current, [serverId]: lines.slice(-MAX_LINES) }));
     }).catch(() => undefined);
     return () => { mounted = false; };

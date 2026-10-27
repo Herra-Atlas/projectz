@@ -85,7 +85,7 @@ pub fn paths() -> Option<(PathBuf, PathBuf)> {
 /// holding the previous library open, and Windows does not let a DLL be
 /// replaced from under a running holder.
 pub async fn install(app: &AppHandle) -> Result<(), String> {
-    crate::audio::audiocpp::stop(app).await;
+    crate::audio::audiocpp::stop_all(app).await;
     if is_installed() {
         // Replacing a working install over itself is how a corrupted one is
         // re-laid -- the button stays useful because of this line.
@@ -129,7 +129,7 @@ pub async fn install(app: &AppHandle) -> Result<(), String> {
 /// the disk at every start, and a phonemizing model without eSpeak fails
 /// loudly rather than quietly.
 pub async fn uninstall(app: &AppHandle) -> Result<(), String> {
-    crate::audio::audiocpp::stop(app).await;
+    crate::audio::audiocpp::stop_all(app).await;
     let directory = install_dir();
     if !directory.exists() {
         return Err("The eSpeak phonemizer is not installed.".to_string());

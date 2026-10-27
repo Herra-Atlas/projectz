@@ -78,6 +78,26 @@ pub async fn audio_engines_builtin() -> Vec<EngineRow> {
             assets: 0,
             kind: "fixed".to_string(),
         },
+        EngineRow {
+            // Optional, and last, because it is the one engine that is only
+            // used if the user turns voice recognition on: it exists so a
+            // wake word can check *who* said it.
+            id: "sherpa".to_string(),
+            name: "Sherpa-onnx speaker models".to_string(),
+            version: super::sherpa::installed_version().unwrap_or_default(),
+            installed: super::sherpa::is_installed(),
+            assets: usize::from(super::sherpa::is_installed()),
+            kind: "fixed".to_string(),
+        },
+        // The ONNX runtime and the two models every openWakeWord head shares.
+        EngineRow {
+            id: "openwakeword".to_string(),
+            name: "openWakeWord".to_string(),
+            version: super::openwakeword::installed_version().unwrap_or_default(),
+            installed: super::openwakeword::is_installed(),
+            assets: usize::from(super::openwakeword::is_installed()),
+            kind: "fixed".to_string(),
+        },
     ]
 }
 
@@ -126,6 +146,8 @@ pub async fn audio_builtin_install(app: AppHandle, id: String) -> Result<(), Str
         "whisper" => whisper::install(&app).await,
         "piper" => piper::install(&app).await,
         "espeak" => super::espeak::install(&app).await,
+        "sherpa" => super::sherpa::install(&app).await,
+        "openwakeword" => super::openwakeword::install(&app).await,
         other => Err(format!("Unknown engine: {other}")),
     }
 }
@@ -145,7 +167,7 @@ pub async fn audio_builtin_uninstall(app: AppHandle, id: String) -> Result<(), S
         // `audiocpp` is the page's way of saying "whichever is installed", so
         // the row does not have to know the version it shipped.
         "audiocpp" => {
-            crate::audio::audiocpp::stop(&app).await;
+            crate::audio::audiocpp::stop_all(&app).await;
             let Some(directory) = audiocpp::installed_dir() else {
                 return Err("The audio.cpp engine is not installed.".to_string());
             };
@@ -159,10 +181,19 @@ pub async fn audio_builtin_uninstall(app: AppHandle, id: String) -> Result<(), S
             audiocpp::uninstall(&engine_id)
         }
         other if other.starts_with(audiocpp::ID_PREFIX) => {
-            crate::audio::audiocpp::stop(&app).await;
+            crate::audio::audiocpp::stop_all(&app).await;
             audiocpp::uninstall(other)
         }
         "espeak" => super::espeak::uninstall(&app).await,
+        // The library is loaded into the running app, so it is unloaded first:
+        // Windows will not delete a DLL a process still holds open.
+        "sherpa" => {
+            crate::audio::voice::unload();
+            super::sherpa::uninstall()
+        }
+        // No DLL is loaded from this engine's folder by a running app yet, so
+        // there is nothing to release before the directory goes.
+        "openwakeword" => super::openwakeword::uninstall(),
         other => Err(format!("Unknown engine: {other}")),
     }
 }

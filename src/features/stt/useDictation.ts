@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 /** What the microphone is doing, in the order it does it. */
 export type DictationState = "idle" | "recording" | "transcribing";
@@ -8,6 +9,12 @@ export type Dictation = {
   state: DictationState;
   /** Starts a recording on a press, ends and transcribes it on the next. */
   toggle: () => void;
+  /**
+   * Begins recording, unless one is already running or the last one is still
+   * being transcribed. Used by the wake word, which presses the button for the
+   * user; a toggle there would stop a recording someone had already started.
+   */
+  start: () => void;
 };
 
 /**
@@ -29,37 +36,41 @@ export function useDictation(
   const recording = useRef(false);
   recording.current = state === "recording";
 
-  const toggle = useCallback(() => {
+  // One finish, for the press and for the backend ending a recording by itself:
+  // the two paths have to leave the composer in exactly the same state.
+  const finish = useCallback(() => {
     if (busy.current) return;
     busy.current = true;
+    setState("transcribing");
+    void invoke<string>("stt_recording_stop")
+      .then((text) => {
+        const trimmed = text.trim();
+        if (trimmed) onText(trimmed);
+      })
+      .catch((reason: unknown) => onError(String(reason)))
+      .finally(() => {
+        busy.current = false;
+        setState("idle");
+      });
+  }, [onText, onError]);
+
+  const toggle = useCallback(() => {
+    if (busy.current) return;
 
     if (state === "recording") {
-      setState("transcribing");
-      void invoke<string>("stt_recording_stop")
-        .then((text) => {
-          const trimmed = text.trim();
-          if (trimmed) onText(trimmed);
-        })
-        .catch((reason: unknown) => onError(String(reason)))
-        .finally(() => {
-          busy.current = false;
-          setState("idle");
-        });
+      finish();
       return;
     }
+    if (state === "transcribing") return;
 
-    if (state === "transcribing") {
-      busy.current = false;
-      return;
-    }
-
+    busy.current = true;
     void invoke("stt_recording_start")
       .then(() => setState("recording"))
       .catch((reason: unknown) => onError(String(reason)))
       .finally(() => {
         busy.current = false;
       });
-  }, [state, onText, onError]);
+  }, [state, finish, onError]);
 
   // Leaving the page must not leave the device open: the stream is owned by the
   // backend, so it is closed there rather than by dropping a handle here.
@@ -71,5 +82,32 @@ export function useDictation(
     [],
   );
 
-  return { state, toggle };
+  // A recording ends itself once the speech stops -- which is the only thing
+  // that makes a wake word usable, because nobody is going to press the button
+  // a second time. The listener is subscribed once; the ref is how it sees the
+  // current state and the current callbacks.
+  const finishRef = useRef(finish);
+  finishRef.current = finish;
+  useEffect(() => {
+    let live = true;
+    let stop: (() => void) | undefined;
+    void listen("stt-recording-auto-stopped", () => {
+      if (!live || !recording.current) return;
+      finishRef.current();
+    }).then((unlisten) => {
+      if (live) stop = unlisten;
+      else unlisten();
+    });
+    return () => {
+      live = false;
+      stop?.();
+    };
+  }, []);
+
+  const start = useCallback(() => {
+    if (state !== "idle") return;
+    toggle();
+  }, [state, toggle]);
+
+  return { state, toggle, start };
 }

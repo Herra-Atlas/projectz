@@ -156,6 +156,28 @@ pub const PARAKEET_REPO: &str = "ggml-org/parakeet-GGUF";
 /// the way the Piper voices do.
 pub const AUDIO_REPO: &str = "audio-cpp/audio.cpp-gguf";
 
+/// The community wake-word collection: openWakeWord classifier heads, one file
+/// per word. Only `en/` is listed, since the rows carry their own path and the
+/// other languages are a different phrase set entirely.
+pub const WAKEWORDS_REPO: &str = "fwartner/home-assistant-wakewords-collection";
+
+pub fn collection_heads(repo: &str, tree: &[TreeEntry], query: &str) -> Vec<DownloadFile> {
+    let needle = query.trim().to_ascii_lowercase();
+    tree.iter()
+        .filter(|entry| entry.entry_type == "file")
+        .filter(|entry| entry.path.starts_with("en/"))
+        .filter(|entry| entry.path.to_ascii_lowercase().ends_with(".onnx"))
+        .filter(|entry| needle.is_empty() || entry.path.to_ascii_lowercase().contains(&needle))
+        .map(|entry| DownloadFile {
+            repo: repo.to_string(),
+            path: entry.path.clone(),
+            name: file_name(&entry.path).to_string(),
+            size: entry.size,
+            note: "openWakeWord · English".to_string(),
+        })
+        .collect()
+}
+
 /// The `.gguf` packages an audio.cpp repository offers, labelled by family.
 pub fn audio_packages(repo: &str, tree: &[TreeEntry], query: &str) -> Vec<DownloadFile> {
     use crate::audio::audiocpp::families::{self, Task};
@@ -178,6 +200,7 @@ pub fn audio_packages(repo: &str, tree: &[TreeEntry], query: &str) -> Vec<Downlo
                     match task {
                         Task::Tts => "speech",
                         Task::Asr => "recognition",
+                        Task::Wake => "wake word",
                     }
                 ),
                 None => "unknown family".to_string(),
@@ -190,6 +213,20 @@ pub fn audio_packages(repo: &str, tree: &[TreeEntry], query: &str) -> Vec<Downlo
                 note,
             })
         })
+        .collect()
+}
+
+/// The same audio.cpp tree, narrowed to the wake-word families.
+///
+/// One catalogue, two pages: the models page shows everything the engine can
+/// run, and the wake page shows what it can listen for. Filtering here rather
+/// than in the page keeps the rule next to the classification it depends on.
+pub fn wake_packages(repo: &str, tree: &[TreeEntry], query: &str) -> Vec<DownloadFile> {
+    use crate::audio::audiocpp::families::{self, Task};
+
+    audio_packages(repo, tree, query)
+        .into_iter()
+        .filter(|file| matches!(families::classify(&file.name), Some((_, Task::Wake))))
         .collect()
 }
 

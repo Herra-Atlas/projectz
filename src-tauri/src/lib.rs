@@ -1,6 +1,5 @@
 mod ai;
 mod app_paths;
-mod assist;
 mod audio;
 mod child;
 mod commands;
@@ -45,29 +44,6 @@ pub fn sync_jobs_toggle(app: &tauri::AppHandle, paused: bool) {
     } else {
         "Jobs running"
     });
-}
-
-/// The tray's assist item, held in app state.
-///
-/// The third door into the same switch as the Settings row and the extension's
-/// own popup. Held here for the reason the jobs item is: whichever door moves it,
-/// the other two have to be told, and the item that only knows about its own
-/// clicks is the one that shows the user the wrong thing.
-#[derive(Clone)]
-pub struct AssistToggle(pub CheckMenuItem<tauri::Wry>);
-
-/// Puts the assist switch on the tray item.
-///
-/// Labelled with the situation rather than the action, like the jobs item: the
-/// reader is told what is true now, and the tick says whether it is on.
-pub fn sync_assist_toggle(app: &tauri::AppHandle, enabled: bool) {
-    let Some(item) = app.try_state::<AssistToggle>() else {
-        return;
-    };
-    let _ = item.0.set_checked(enabled);
-    let _ = item
-        .0
-        .set_text(if enabled { "Assist on" } else { "Assist off" });
 }
 
 /// Brings the main window up and in front.
@@ -126,6 +102,19 @@ pub fn run() {
                     .map_err(std::io::Error::other)?,
             );
             app.manage(std::sync::Arc::clone(&database));
+            // A wake word that was listening when the app closed is listening
+            // when it opens: the switch is a setting, and a setting that has to
+            // be re-armed by hand every launch reads as broken.
+            let wake_database = std::sync::Arc::clone(&database);
+            let wake_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if crate::audio::wake::settings(&wake_database).enabled {
+                    if let Err(message) = crate::audio::wake::start(&wake_app, wake_database).await
+                    {
+                        eprintln!("wake: {message}");
+                    }
+                }
+            });
             // Downloads live for the life of the app: the list is the work in
             // flight, not a stored record.
             app.manage(std::sync::Arc::new(downloads::jobs::Jobs::new()));
@@ -142,24 +131,6 @@ pub fn run() {
             // it starts needs the runtime while a command may be using the same
             // entry, and a clone is what keeps those two from borrowing one.
             let scheduler = jobs::Scheduler::start(app.handle().clone(), runtime.clone());
-            // The assist watcher: settings, the dedupe memory, and the socket the
-            // browser extension pairs with. Started before the runtime is managed
-            // for the same reason the scheduler is -- the bridge task holds its own
-            // clone, so a run it answers never borrows the entry a command is using.
-            //
-            // The extension folder is what the setup page hands over as a download, so
-            // it is resolved from the source tree in development, and simply absent in a
-            // build that did not ship it -- which the page states rather than offering a
-            // link that would 404.
-            let extension_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("..")
-                .join("extension")
-                .canonicalize()
-                .ok()
-                .filter(|path| path.is_dir());
-            let assist = assist::Assist::new(std::sync::Arc::clone(&database), extension_dir);
-            app.manage(assist.clone());
-            assist.start(app.handle().clone(), runtime.clone());
             // The learner. Its cache is primed here and refreshed again once the
             // database has been migrated by `database_initialize`, because setup
             // runs before the frontend asks for that.
@@ -205,19 +176,6 @@ pub fn run() {
             // the reader to work out what is true now.
             let jobs_item =
                 CheckMenuItem::with_id(app, "jobs", "Jobs running", true, true, None::<&str>)?;
-            // Read from the stored record rather than defaulted to off, so a user
-            // who left assist on finds the tray telling the truth at launch. On the
-            // very first launch the table does not exist yet and the default -- off
-            // -- is what is read, which is the same answer.
-            let assist_on = assist::AssistSettings::load(database.as_ref()).enabled;
-            let assist_item = CheckMenuItem::with_id(
-                app,
-                "assist",
-                if assist_on { "Assist on" } else { "Assist off" },
-                true,
-                assist_on,
-                None::<&str>,
-            )?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(
                 app,
@@ -225,7 +183,6 @@ pub fn run() {
                     &show,
                     &PredefinedMenuItem::separator(app)?,
                     &jobs_item,
-                    &assist_item,
                     &PredefinedMenuItem::separator(app)?,
                     &quit,
                 ],
@@ -240,7 +197,6 @@ pub fn run() {
             // click would raise a menu over it.
             let jobs_toggle = jobs_item.clone();
             app.manage(JobsToggle(jobs_toggle.clone()));
-            app.manage(AssistToggle(assist_item.clone()));
             tray.show_menu_on_left_click(false)
                 .on_menu_event(move |app, event| match event.id().as_ref() {
                     "show" => show_main(app),
@@ -258,19 +214,6 @@ pub fn run() {
                             "job-event",
                             serde_json::json!({ "status": "paused", "paused": pause }),
                         );
-                    }
-                    "assist" => {
-                        // Read the stored value rather than the item's own tick, so
-                        // the tray, the Settings row and an extension popup all
-                        // move one fact -- and an item that is somehow out of step
-                        // corrects itself here instead of inverting the wrong way.
-                        let Some(assist) = app.try_state::<assist::Assist>() else {
-                            return;
-                        };
-                        let enabled = !assist.settings().enabled;
-                        if let Err(error) = assist.set_enabled(app, enabled) {
-                            tracing::warn!(%error, "the assist switch could not be moved");
-                        }
                     }
                     "quit" => {
                         if let Some(runtime) = app.try_state::<ai::runtime::AiRuntime>() {
@@ -324,10 +267,6 @@ pub fn run() {
             commands::ai_answer_question,
             commands::ai_set_viewed_session,
             commands::ai_generate_title,
-            commands::assist_status,
-            commands::assist_settings,
-            commands::assist_save_settings,
-            commands::assist_set_enabled,
             commands::messaging_status,
             commands::messaging_save_settings,
             commands::messaging_set_enabled,
@@ -361,8 +300,6 @@ pub fn run() {
             commands::job_scheduler_pause,
             commands::job_machine_totals,
             commands::database_initialize,
-            commands::database_frontend_imported,
-            commands::database_import_frontend,
             commands::database_list_sessions,
             commands::database_list_session_headers,
             commands::database_list_subagents,
@@ -477,11 +414,26 @@ pub fn run() {
             audio::stt::commands::stt_inputs,
             audio::stt::commands::stt_select_input,
             audio::stt::commands::stt_select_model,
+            audio::stt::commands::stt_set_keep_loaded,
             audio::stt::commands::stt_remove_model,
             audio::stt::commands::stt_model_language,
             audio::stt::commands::stt_set_language,
             audio::stt::commands::stt_recording_start,
             audio::stt::commands::stt_recording_stop,
+            audio::voice::commands::voice_status,
+            audio::voice::commands::voice_set_enabled,
+            audio::voice::commands::voice_set_threshold,
+            audio::voice::commands::voice_enroll_clip,
+            audio::voice::commands::voice_enroll_finish,
+            audio::voice::commands::voice_enroll_cancel,
+            audio::voice::commands::voice_delete,
+            audio::wake::commands::wake_status,
+            audio::wake::commands::wake_set_enabled,
+            audio::wake::commands::wake_select_model,
+            audio::wake::commands::wake_set_threshold,
+            audio::wake::commands::wake_add_model,
+            audio::wake::commands::wake_remove_model,
+            audio::wake::commands::wake_logs,
             audio::audiocpp::commands::audio_status,
             audio::audiocpp::commands::audio_start,
             audio::audiocpp::commands::audio_stop,
@@ -506,7 +458,11 @@ pub fn run() {
                 // llama-server does -- an explicit stop, because the held
                 // child's `kill_on_drop` only runs when its task's state is
                 // dropped, and the static that holds it outlives run loop.
-                tauri::async_runtime::block_on(audio::audiocpp::stop(app));
+                tauri::async_runtime::block_on(audio::audiocpp::stop_all(app));
+                // The resident recognition engine holds a model in memory, so it
+                // is stopped the same way: a static is never dropped, and a child
+                // left behind would keep both the port and the weights.
+                audio::stt::resident::stop();
                 // A final write for every exit path that reaches here without
                 // passing through the tray menu -- a normal quit, or a window
                 // closed by the OS at session end.

@@ -147,102 +147,6 @@ const PAGES: IndexPage[] = [
     ],
   },
   {
-    view: "assist",
-    name: "Assist",
-    entries: [
-      {
-        anchor: "assist.enabled",
-        label: "Help without being asked",
-        keywords: ["assist", "read page", "browser answers", "on", "off"],
-      },
-      {
-        anchor: "assist.model",
-        label: "The model that answers",
-        keywords: ["assist model", "local", "provider"],
-      },
-      {
-        anchor: "assist.setup",
-        label: "Set up the extension",
-        keywords: ["browser extension", "pair", "chrome", "install", "connect"],
-      },
-      {
-        anchor: "assist.performance",
-        label: "Performance",
-        keywords: ["efficient", "normal", "high", "level", "preset", "cost"],
-      },
-      {
-        anchor: "assist.subjects",
-        label: "Worth more of your attention",
-        keywords: ["subjects", "topics", "weight", "priorities"],
-      },
-      {
-        anchor: "assist.hint",
-        label: "Anything to keep in mind",
-        keywords: ["hint", "preference", "prompt", "custom"],
-      },
-      {
-        anchor: "assist.kinds",
-        label: "What it may help with",
-        keywords: ["kinds", "answer", "explain", "summarize", "translate", "check"],
-      },
-      {
-        anchor: "assist.confidence",
-        label: "Only speak when sure",
-        keywords: ["confidence", "floor", "strict", "eager", "quiet"],
-      },
-      {
-        anchor: "assist.thinking",
-        label: "Let the model think before answering",
-        keywords: ["reasoning", "thinking", "chain of thought"],
-      },
-      {
-        anchor: "assist.minChars",
-        label: "Shortest to look at",
-        keywords: ["minimum length", "characters", "floor", "blocks"],
-      },
-      {
-        anchor: "assist.candidates",
-        label: "Candidates considered",
-        keywords: ["candidates", "blocks", "short list"],
-      },
-      {
-        anchor: "assist.perRequest",
-        label: "Candidates per request",
-        keywords: ["batch", "per request", "candidates"],
-      },
-      {
-        anchor: "assist.answers",
-        label: "Answers per reply",
-        keywords: ["answers", "cards", "reply", "max"],
-      },
-      {
-        anchor: "assist.tokens",
-        label: "Token ceiling",
-        keywords: ["tokens", "limit", "budget", "max tokens"],
-      },
-      {
-        anchor: "assist.requests",
-        label: "Requests per look",
-        keywords: ["requests", "batches", "look"],
-      },
-      {
-        anchor: "assist.perHour",
-        label: "Answers an hour",
-        keywords: ["hourly", "rate limit", "budget", "per hour"],
-      },
-      {
-        anchor: "assist.dryRun",
-        label: "Show me what it would have answered",
-        keywords: ["dry run", "test", "preview", "debug"],
-      },
-      {
-        anchor: "assist.usage",
-        label: "This session",
-        keywords: ["requests", "usage", "spent", "hour"],
-      },
-    ],
-  },
-  {
     view: "taste",
     name: "Taste",
     entries: [
@@ -404,6 +308,58 @@ const PAGES: IndexPage[] = [
     ],
   },
   {
+    view: "stt",
+    name: "Voice recognition",
+    entries: [
+      {
+        anchor: "voiceid.enabled",
+        label: "Recognise voices",
+        keywords: ["speaker", "who is talking", "voice id", "enroll", "only me", "voiceprint"],
+      },
+      {
+        anchor: "voiceid.threshold",
+        label: "How close a match",
+        keywords: ["threshold", "sensitivity", "similarity", "score"],
+      },
+      {
+        anchor: "voiceid.create",
+        label: "Create a voice",
+        keywords: ["add voice", "enroll", "record", "fingerprint", "new speaker"],
+      },
+    ],
+  },
+  {
+    view: "stt",
+    name: "Wake word",
+    entries: [
+      {
+        anchor: "wake.enabled",
+        label: "Listen for a wake word",
+        keywords: ["wake word", "hotword", "hey", "always listening", "microphone", "on", "off"],
+      },
+      {
+        anchor: "wake.download",
+        label: "Download a wake word model",
+        keywords: ["wake model", "download", "hotword package", "alexa", "nabu"],
+      },
+      {
+        anchor: "wake.threshold",
+        label: "How sure it has to be",
+        keywords: ["threshold", "confidence", "sensitivity", "false positives"],
+      },
+      {
+        anchor: "wake.add",
+        label: "Add a model",
+        keywords: ["gguf", "trained", "custom", "own name", "import", "wake model"],
+      },
+      {
+        anchor: "wake.addHead",
+        label: "Add an openWakeWord head",
+        keywords: ["onnx", "head", "openwakeword", "custom", "own name", "import"],
+      },
+    ],
+  },
+  {
     view: "tts",
     name: "Text to speech",
     entries: [
@@ -451,9 +407,8 @@ const PAGES: IndexPage[] = [
       {
         anchor: "audio.engine",
         label: "Audio engine",
-        keywords: ["audio.cpp", "engine", "vulkan", "install", "uninstall", "kokoro", "qwen3", "server", "amd", "whisper", "piper"],
+        keywords: ["audio.cpp", "engine", "vulkan", "install", "uninstall", "kokoro", "qwen3", "amd", "whisper", "piper"],
       },
-      { anchor: "audio.server", label: "Engine server", keywords: ["start", "stop", "server", "running", "audio.cpp"] },
     ],
   },
   {

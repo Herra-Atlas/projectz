@@ -435,16 +435,21 @@ function AppShell() {
 
   /**
    * What is resident right now, in the header: the warm llama.cpp model and
-   * the running audio.cpp server. A slow poll of two cheap status reads --
-   * this corner is a glance, not a dashboard -- with the llama name resolved
-   * through the same list the chat page keeps.
+   * each running audio.cpp process. A slow poll of cheap status reads -- this
+   * corner is a glance, not a dashboard -- with the llama name resolved through
+   * the same list the chat page keeps.
+   *
+   * The two audio purposes are two processes with two resident models, so they
+   * are held apart here. One combined "canary asr + sherpa kws" could not be
+   * stopped a half at a time, and the row a reader saw was not the process
+   * they could end.
    */
   const [residentServers, setResidentServers] = useState<{
     llama: string | null;
     llamaStartedAt: number | null;
-    audio: boolean;
-    audioStartedAt: number | null;
-  }>({ llama: null, llamaStartedAt: null, audio: false, audioStartedAt: null });
+    speech: { model: string | null; startedAt: number | null } | null;
+    wake: { model: string | null; startedAt: number | null } | null;
+  }>({ llama: null, llamaStartedAt: null, speech: null, wake: null });
   const [serversMenuOpen, setServersMenuOpen] = useState(false);
   /** Where the portaled menu hangs: measured from the chip on every open, so
       window resizes or a title wrapping to two lines never strand it. */
@@ -456,9 +461,10 @@ function AppShell() {
     const poll = async () => {
       // Each side answers independently; a failure on one must not blank the
       // other, so the last known figures stay.
-      const [llama, audio] = await Promise.allSettled([
+      const [llama, speech, wake] = await Promise.allSettled([
         invoke<{ loaded_model_id: string | null; loading_model_id: string | null; started_at: number | null }>("local_model_status"),
-        invoke<{ running: boolean; startedAt: number | null }>("audio_status"),
+        invoke<{ running: boolean; startedAt: number | null; loaded: string | null }>("audio_status", { purpose: "speech" }),
+        invoke<{ running: boolean; startedAt: number | null; loaded: string | null }>("audio_status", { purpose: "wake" }),
       ]);
       if (!live) return;
       const llamaId = llama.status === "fulfilled" ? llama.value.loaded_model_id : null;
@@ -479,11 +485,18 @@ function AppShell() {
       const llamaName = llamaId ? await invoke<{ id: string; name: string }[]>("local_models_list")
         .then((models) => models.find((model) => model.id === llamaId)?.name ?? null)
         .catch(() => null) : null;
+      // One audio process per purpose: a purpose that is not answering keeps
+      // its last figure rather than blinking out of the chip, and a purpose
+      // that answered "not running" really is gone.
+      const resident = (result: typeof speech | typeof wake) =>
+        result.status === "fulfilled" && result.value.running
+          ? { model: result.value.loaded, startedAt: result.value.startedAt }
+          : null;
       setResidentServers((current) => ({
         llama: llamaName ?? (llamaId ? current.llama : null),
         llamaStartedAt: llama.status === "fulfilled" && llamaId ? llama.value.started_at : null,
-        audio: audio.status === "fulfilled" ? audio.value.running : current.audio,
-        audioStartedAt: audio.status === "fulfilled" ? audio.value.startedAt : current.audioStartedAt,
+        speech: speech.status === "fulfilled" ? resident(speech) : current.speech,
+        wake: wake.status === "fulfilled" ? resident(wake) : current.wake,
       }));
     };
     void poll();
@@ -494,11 +507,11 @@ function AppShell() {
     };
   }, []);
 
-  /** Stops the audio server from its header row; the next poll confirms. */
-  const stopAudioServer = async () => {
+  /** Stops one audio engine from its own header row; the next poll confirms. */
+  const stopAudioServer = async (purpose: "speech" | "wake") => {
     try {
-      await invoke("audio_stop");
-      setResidentServers((current) => ({ ...current, audio: false, audioStartedAt: null }));
+      await invoke("audio_stop", { purpose });
+      setResidentServers((current) => ({ ...current, [purpose]: null }));
     } catch (reason) {
       notify("error", String(reason));
     }
@@ -574,7 +587,7 @@ function AppShell() {
           </div>
           <div className="min-w-0 flex-1" />
           {workspaceError && <span className="max-w-56 truncate text-[11px] text-[var(--danger)]">{workspaceError}</span>}
-          {(residentServers.llama !== null || residentServers.audio) && (
+          {(residentServers.llama !== null || residentServers.speech !== null || residentServers.wake !== null) && (
             <div className="relative">
               <button
                 ref={serversChipRef}
@@ -596,9 +609,14 @@ function AppShell() {
                 className="inline-flex min-h-9 items-center gap-2 rounded-md border border-[var(--line)] bg-[var(--panel)] px-3 text-xs font-medium text-[var(--muted)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
               >
                 <ChevronDown size={14} className={`transition-transform ${serversMenuOpen ? "rotate-180" : ""}`} />
-                {residentServers.llama
-                  ? `${displayModelName(residentServers.llama)}${residentServers.audio ? " + audio.cpp" : ""}`
-                  : "audio.cpp"}
+                {[
+                  residentServers.llama ? displayModelName(residentServers.llama) : null,
+                  residentServers.speech ? residentServers.speech.model ?? "audio.cpp" : null,
+                  residentServers.wake ? residentServers.wake.model ?? "audio.cpp" : null,
+                ]
+                  .filter((label): label is string => Boolean(label))
+                  .filter((label, index, all) => all.indexOf(label) === index)
+                  .join(" · ")}
               </button>
               {/* The menu is portaled to the document body and pinned by the
                   chip's own measured rect: the chat page directly below this
@@ -633,23 +651,29 @@ function AppShell() {
                         </button>
                       </div>
                     )}
-                    {residentServers.audio && (
-                      <div role="menuitem" className="flex min-h-10 items-center gap-3 rounded-md px-2.5 py-1.5">
-                        <div className="min-w-0 flex-1">
-                          <h4 className="truncate text-xs font-medium text-[var(--text)]">audiocpp_server</h4>
-                          <p className="truncate text-[11px] text-[var(--quiet)]">
-                            audio.cpp · running
-                            {residentServers.audioStartedAt !== null && <ResidentFor startedAt={residentServers.audioStartedAt} />}
-                          </p>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => { void stopAudioServer(); setServersMenuOpen(false); }}
-                          className="inline-flex min-h-7 shrink-0 items-center gap-1 rounded px-2 text-[11px] text-[var(--text)] hover:bg-[var(--raised)] hover:text-[var(--danger)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
-                        >
-                          Stop
-                        </button>
-                      </div>
+                    {([["speech", residentServers.speech], ["wake", residentServers.wake]] as const).map(
+                      ([purpose, entry]) =>
+                        entry && (
+                          <div key={purpose} role="menuitem" className="flex min-h-10 items-center gap-3 rounded-md px-2.5 py-1.5">
+                            <div className="min-w-0 flex-1">
+                              <h4 className="truncate text-xs font-medium text-[var(--text)]">
+                                {entry.model ?? "audio.cpp"}
+                              </h4>
+                              <p className="truncate text-[11px] text-[var(--quiet)]">
+                                audio.cpp · {purpose} · running
+                                {entry.startedAt !== null && <ResidentFor startedAt={entry.startedAt} />}
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => { void stopAudioServer(purpose); setServersMenuOpen(false); }}
+                              className="inline-flex min-h-7 shrink-0 items-center gap-1 rounded px-2 text-[11px] text-[var(--text)] hover:bg-[var(--raised)] hover:text-[var(--danger)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+                            >
+                              <Power size={13} />
+                              Stop
+                            </button>
+                          </div>
+                        ),
                     )}
                   </div>
                 </>,

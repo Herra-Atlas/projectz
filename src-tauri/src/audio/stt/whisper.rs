@@ -83,7 +83,7 @@ pub fn transcribe(
 
 /// Half the cores, at least two: the engine scales poorly past that on a small
 /// model and the rest of the app still has to run while it works.
-fn threads() -> usize {
+pub(crate) fn threads() -> usize {
     std::thread::available_parallelism()
         .map(|count| (count.get() / 2).clamp(2, 8))
         .unwrap_or(2)
@@ -125,7 +125,7 @@ pub fn write_wav(samples: &[i16]) -> Result<PathBuf, String> {
 ///
 /// Whisper answers silence with a bare `.` or a marker rather than nothing, and
 /// either would arrive in the composer as a message that says nothing.
-fn clean(raw: &str) -> String {
+pub(crate) fn clean(raw: &str) -> String {
     let text = raw
         .lines()
         .map(str::trim)

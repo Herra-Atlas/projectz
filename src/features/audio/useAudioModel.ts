@@ -25,7 +25,7 @@ export type AudioModelSpec = {
   family: string;
   displayName: string | null;
   tasks: string[];
-  task: "tts" | "asr" | "unknown";
+  task: "tts" | "asr" | "wake" | "unknown";
   capabilities: Record<string, string[]>;
   options: AudioOption[];
   values: Record<string, unknown>;
@@ -62,6 +62,14 @@ export function useAudioModel(
   // the save against, not the render's snapshot.
   const valuesRef = useRef(values);
 
+  // Held rather than depended on: both callbacks arrive as inline arrows at the
+  // call site, and depending on them would give `load` a new identity every
+  // render -- which re-read the model's spec off disk once per frame.
+  const report = useRef(onError);
+  report.current = onError;
+  const gone = useRef(onModelGone);
+  gone.current = onModelGone;
+
   const load = useCallback(async () => {
     try {
       const next = await invoke<AudioModelSpec>("audio_model_spec", { path });
@@ -73,10 +81,10 @@ export function useAudioModel(
     } catch (reason) {
       // A stale path is the one failure the page cannot render around; the
       // message is what caused it, and going back is the way out.
-      onError(String(reason));
-      onModelGone();
+      report.current(String(reason));
+      gone.current();
     }
-  }, [onModelGone, onError, path]);
+  }, [path]);
 
   useEffect(() => {
     void load();
@@ -90,10 +98,10 @@ export function useAudioModel(
       try {
         await invoke("audio_model_save_options", { path, values: next });
       } catch (reason) {
-        onError(`The setting could not be saved: ${String(reason)}`);
+        report.current(`The setting could not be saved: ${String(reason)}`);
       }
     },
-    [onError, path],
+    [path],
   );
 
   const reset = useCallback(async () => {
@@ -102,9 +110,9 @@ export function useAudioModel(
       valuesRef.current = {};
       setValues({});
     } catch (reason) {
-      onError(`The settings could not be cleared: ${String(reason)}`);
+      report.current(`The settings could not be cleared: ${String(reason)}`);
     }
-  }, [onError, path]);
+  }, [path]);
 
   return { model, spec, values, set, reset };
 }

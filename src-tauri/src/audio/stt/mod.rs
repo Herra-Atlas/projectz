@@ -20,5 +20,6 @@ pub mod audiocpp;
 pub mod capture;
 pub mod commands;
 pub mod models;
+pub mod resident;
 pub mod transcribe;
 pub mod whisper;

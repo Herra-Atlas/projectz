@@ -217,67 +217,6 @@ pub fn taste_delete_item(
     taste.delete_item(&app, id)
 }
 
-/// The Assist record and its derived bounds, without live bridge or model state.
-///
-/// The settings page's fast path: it can draw every control from this answer
-/// while the slower full status is still reading the local model list.
-#[tauri::command]
-pub fn assist_settings(
-    assist: State<'_, crate::assist::Assist>,
-) -> crate::assist::AssistSettingsView {
-    assist.settings_view()
-}
-
-/// Everything the Assist settings page and the tray item draw.
-///
-/// Also brings the tray item into step with the stored record. The item is built
-/// during setup, before the database has been migrated on a first launch, so this
-/// is where it converges on the truth rather than staying at whatever the default
-/// happened to be.
-///
-/// **Cheap by construction.** The only expensive thing this used to do was name the chosen
-/// local model through `LocalModelManager::list`, which stats every model file and reads
-/// its GGUF header. It now reads the stored rows (`stored`), because a name needs a row and
-/// not a file -- so the bridge, the budget and the database lock are all this touches. The
-/// page also no longer waits here: the modal reads the record when the dialog opens.
-#[tauri::command]
-pub fn assist_status(
-    app: AppHandle,
-    runtime: State<'_, AiRuntime>,
-    assist: State<'_, crate::assist::Assist>,
-) -> crate::assist::AssistStatus {
-    let status = assist.status(&runtime);
-    crate::sync_assist_toggle(&app, status.enabled);
-    status
-}
-
-/// Writes the assist record, clamped, and answers with what was stored.
-#[tauri::command]
-pub fn assist_save_settings(
-    app: AppHandle,
-    assist: State<'_, crate::assist::Assist>,
-    settings: crate::assist::AssistSettings,
-) -> Result<crate::assist::AssistSettings, String> {
-    let saved = assist.save(&settings)?;
-    crate::sync_assist_toggle(&app, saved.enabled);
-    Ok(saved)
-}
-
-/// Moves the one switch the tray, Settings and the extension all read.
-///
-/// The same call the tray's own item makes, so the three doors cannot drift: each
-/// of them ends up writing the record and announcing it from this one place.
-#[tauri::command]
-pub fn assist_set_enabled(
-    app: AppHandle,
-    runtime: State<'_, AiRuntime>,
-    assist: State<'_, crate::assist::Assist>,
-    enabled: bool,
-) -> Result<crate::assist::AssistStatus, String> {
-    assist.set_enabled(&app, enabled)?;
-    Ok(assist.status(&runtime))
-}
-
 /// Everything the Communications page draws: the record and each channel's state.
 ///
 /// One read rather than one per channel, so a page with two transports cannot show
@@ -353,10 +292,6 @@ pub async fn database_initialize(
     // The taste tables exist only once the migration has run, so the prompt cache
     // primed during setup could not have read them. Prime it again now.
     crate::taste::refresh_prompt_cache(&runtime.database());
-    let legacy_data_dir = dirs::data_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("projectz");
-    runtime.database().import_legacy(&legacy_data_dir)?;
     let _ = app.emit(
         "startup-progress",
         serde_json::json!({"phase":"migrations","message":"Database ready","progress":38}),
@@ -394,24 +329,6 @@ pub async fn database_initialize(
         serde_json::json!({"phase":"ready","message":"Startup complete","progress":100}),
     );
     Ok(())
-}
-
-#[tauri::command]
-pub fn database_frontend_imported(runtime: State<'_, AiRuntime>) -> bool {
-    runtime.database().frontend_imported()
-}
-
-#[tauri::command]
-pub fn database_import_frontend(
-    runtime: State<'_, AiRuntime>,
-    sessions: Vec<serde_json::Value>,
-    general_settings: serde_json::Value,
-) -> Result<(), String> {
-    let database = runtime.database();
-    if database.frontend_imported() {
-        return Ok(());
-    }
-    database.import_frontend_data(&sessions, &general_settings)
 }
 
 #[tauri::command]

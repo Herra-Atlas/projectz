@@ -15,10 +15,15 @@ use tauri::{AppHandle, Emitter, State};
 use super::families;
 use crate::database::Database;
 
-/// The Engine server row's status.
+/// One of the two engines, from the key the frontend holds.
+fn parse(key: &str) -> Result<super::Purpose, String> {
+    super::Purpose::from_key(key).ok_or_else(|| format!("Unknown audio purpose: {key}"))
+}
+
+/// One engine's status; `purpose` is `speech` or `wake`.
 #[tauri::command]
-pub async fn audio_status() -> super::Status {
-    super::status().await
+pub async fn audio_status(purpose: String) -> Result<super::Status, String> {
+    Ok(super::status(parse(&purpose)?).await)
 }
 
 /// Starts the server, reporting the status a start produced.
@@ -32,26 +37,49 @@ pub async fn audio_status() -> super::Status {
 pub async fn audio_start(
     app: AppHandle,
     database: State<'_, Arc<Database>>,
+    purpose: String,
 ) -> Result<super::Status, String> {
-    super::ensure_started(&app, &database).await?;
-    let _ = app.emit("audio-server-state", json!({ "running": true }));
-    Ok(super::status().await)
+    let purpose = parse(&purpose)?;
+    super::ensure_started_for(purpose, &app, &database).await?;
+    let _ = app.emit(
+        "audio-server-state",
+        json!({ "running": true, "purpose": purpose.key() }),
+    );
+    Ok(super::status(purpose).await)
 }
 
-/// Stops the held server, if one is held.
-#[tauri::command]
-pub async fn audio_stop(app: AppHandle) -> Result<super::Status, String> {
-    super::stop(&app).await;
-    Ok(super::status().await)
-}
-
-/// The server's output, as the Logs panel reads it.
+/// Stops one engine, if it is held.
 ///
-/// The same shape `local_model_logs` answers with, under the audiocpp session's
+/// The wake word has to go first. It asks its engine for a window every second,
+/// and the next window would start the server straight back -- which is why
+/// pressing stop used to look like a restart. The record is corrected with it,
+/// so the Wake word page's switch agrees with what happened.
+#[tauri::command]
+pub async fn audio_stop(
+    app: AppHandle,
+    database: State<'_, Arc<Database>>,
+    purpose: String,
+) -> Result<super::Status, String> {
+    let purpose = parse(&purpose)?;
+    if purpose == super::Purpose::Wake && crate::audio::wake::running() {
+        crate::audio::wake::stop();
+        let mut settings = crate::audio::wake::settings(&database);
+        if settings.enabled {
+            settings.enabled = false;
+            let _ = crate::audio::wake::save(&database, &settings);
+        }
+    }
+    super::stop(purpose, &app).await;
+    Ok(super::status(purpose).await)
+}
+
+/// One engine's output, as the Logs panel reads it.
+///
+/// The same shape `local_model_logs` answers with, under that purpose's session
 /// `id` -- so the panel consumes both servers with one drawing path.
 #[tauri::command]
-pub async fn audio_logs() -> Vec<String> {
-    super::logs()
+pub async fn audio_logs(purpose: String) -> Result<Vec<String>, String> {
+    Ok(super::logs(parse(&purpose)?))
 }
 
 /// What the audio models page draws: name, family, task, size per model.
@@ -75,6 +103,7 @@ fn rows() -> Vec<Row> {
             task: match model.task {
                 Some(families::Task::Tts) => "tts".to_string(),
                 Some(families::Task::Asr) => "asr".to_string(),
+                Some(families::Task::Wake) => "wake".to_string(),
                 None => "unknown".to_string(),
             },
             size: model.size,
@@ -182,6 +211,7 @@ pub async fn audio_model_spec(
         task: match model.task {
             Some(families::Task::Tts) => "tts".to_string(),
             Some(families::Task::Asr) => "asr".to_string(),
+            Some(families::Task::Wake) => "wake".to_string(),
             None => "unknown".to_string(),
         },
         capabilities: spec

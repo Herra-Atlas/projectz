@@ -21,7 +21,7 @@ export function SettingsSection({ title, children }: SettingsSectionProps) {
     // `App.css` (`[data-settings-title] + section`) rather than by `first:`, because the
     // band and the first section are siblings and `first-child` would never match. The
     // band already ends in a hairline; a second rule 30px below it is the "two lines" that
-    // made General, Appearance, Assist and Taste look framed twice.
+    // made General, Appearance and Taste look framed twice.
     <section className="settings-section mt-8">
       <div className="settings-section-rule h-px w-full bg-[linear-gradient(to_right,var(--line-strong),var(--line)_45%,transparent)]" />
       {/* Aligned with the row labels, not the page edge: without the panel there is no

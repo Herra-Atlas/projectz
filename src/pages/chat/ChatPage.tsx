@@ -1953,6 +1953,31 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     (message) => onNotify("error", message),
   );
 
+  // A wake word presses the microphone, because that is what saying it meant:
+  // "listen to the next thing I say". The whole conversation is subscribed once
+  // -- the ref is how a listener that outlives many renders sees the current
+  // state -- and a detection while a recording is already running is ignored,
+  // so the phrase can never stop a sentence the user is in the middle of.
+  const startDictation = dictation.start;
+  const startDictationRef = useRef(startDictation);
+  startDictationRef.current = startDictation;
+  useEffect(() => {
+    let live = true;
+    let stop: (() => void) | undefined;
+    void listen("wake-detected", () => {
+      if (!live) return;
+      startDictationRef.current();
+      inputRef.current?.focus();
+    }).then((unlisten) => {
+      if (live) stop = unlisten;
+      else unlisten();
+    });
+    return () => {
+      live = false;
+      stop?.();
+    };
+  }, []);
+
   // Selection inside a reply: only show the bar when the highlight is real,
   // and ignore selections the user made in the composer or their own message.
   const handleThreadSelection = (event: React.MouseEvent) => {

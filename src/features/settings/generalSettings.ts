@@ -18,9 +18,6 @@ import { invoke } from "@tauri-apps/api/core";
 /** The settings key the Rust side reads for instructions and notifications. */
 export const GENERAL_SETTINGS_KEY = "app.general";
 
-/** Where the pre-database build kept this record, read once to migrate it. */
-const LEGACY_STORAGE_KEY = "projectz.general-settings";
-
 export type GeneralSettings = {
   userName: string;
   instructions: string;
@@ -78,28 +75,12 @@ function publish(next: GeneralSettings) {
   for (const listener of listeners) listener(next);
 }
 
-/** Reads the record, migrating the localStorage one when the database has none. */
+/** Reads the record, or the defaults when this installation has none yet. */
 async function readStored(): Promise<GeneralSettings> {
   const saved = await invoke<Partial<GeneralSettings> | null>("database_get_setting", {
     key: GENERAL_SETTINGS_KEY,
   });
   if (saved) return withGeneralDefaults(saved);
-
-  // The legacy record is only ever adopted once; `chatRepository` already copies
-  // it over on a first launch, so this covers the install that migrated chats but
-  // not this record.
-  try {
-    const legacy = localStorage.getItem(LEGACY_STORAGE_KEY);
-    if (legacy) {
-      const migrated = withGeneralDefaults(JSON.parse(legacy) as Partial<GeneralSettings>);
-      await invoke("database_set_setting", { key: GENERAL_SETTINGS_KEY, value: migrated });
-      localStorage.removeItem(LEGACY_STORAGE_KEY);
-      return migrated;
-    }
-  } catch {
-    // An unreadable legacy record is not worth failing startup over; the defaults
-    // below are what a fresh install has.
-  }
   return { ...DEFAULT_GENERAL };
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "projectz"
-version = "0.5.5"
+version = "0.6.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -63,6 +63,15 @@ notify = "8.2"
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
 sha2 = "0.10"
+# The speaker-embedding engine is a shared library loaded at runtime, because it
+# is an optional install the user may never add: linking it would make every
+# build require it. `bzip2` and `tar` unpack its release archive.
+libloading = "0.8"
+# ONNX Runtime for openWakeWord: loaded at runtime, so nothing is linked at
+# build time and the DLL stays an installed engine rather than a build dep.
+ort = { version = "2.0.0-rc.15", features = ["load-dynamic"] }
+bzip2 = "0.4"
+tar = "0.4"
 # Already in the tree as a transitive dependency of tauri; promoted to direct so
 # the tool cache can stamp UTC ISO-8601 timestamps in the same format the
 # frontend writes. Those timestamps are compared as strings, so the format is a
@@ -80,10 +89,6 @@ glob = "0.3"
 lopdf = "0.42"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 kestrel-rs = "11"
-# The Assist extension bridge accepts a WebSocket from a browser extension on
-# `127.0.0.1`: JSON on a socket, so there is nothing to encrypt and nothing extra
-# to ship. See `assist/source/browser/bridge.rs`.
-tokio-tungstenite = "0.24"
 # Optional: only with the `vulkan-query` feature, which is off by default. See the
 # feature note above.
 ash = { version = "0.38", optional = true }

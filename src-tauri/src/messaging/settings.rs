@@ -4,7 +4,7 @@
 //!
 //! A channel is a handful of fields, and a field added tomorrow must not cost a
 //! schema version. The record lives under one settings key, the way the MCP server
-//! list and the assist record do. A channel's own secret is a *second* key
+//! list does. A channel's own secret is a *second* key
 //! (`app.messaging.telegram`), so the core record never learns what a Telegram
 //! token is -- that is the adapter's business, and a future Discord token lands in
 //! its own key rather than here.

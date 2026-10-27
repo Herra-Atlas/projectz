@@ -479,14 +479,14 @@ impl AiRuntime {
     /// A local selection fails unless its engine is actually running.
     ///
     /// Shared by the features that store a model choice the same way -- the title
-    /// chain, the sub-agent default, the vision model and the assist watcher -- so
+    /// chain, the sub-agent default, the vision model and the taste learner -- so
     /// a local selection is turned into a live endpoint in exactly one place. Two
     /// copies would be two answers to "which engine is this model on", which is
     /// the kind of second opinion that ends up disagreeing with the loader.
     ///
     /// **A caller that must not disturb a running model has to be stricter than
     /// this.** Resolving a local selection *loads* it, which evicts whatever model
-    /// is up; `assist` refuses to do that and asks [`LocalModelManager`] directly.
+    /// is up; taste refuses to do that and asks [`LocalModelManager`] directly.
     pub fn resolve_selection(
         &self,
         selection: &serde_json::Value,

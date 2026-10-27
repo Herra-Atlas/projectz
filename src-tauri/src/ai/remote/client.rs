@@ -19,7 +19,7 @@ use crate::ai::types::{ChatAttachment, ChatEvent, ChatMessage, ReasoningEffort};
 #[cfg(test)]
 mod tests {
     use super::{
-        accumulate_usage, budget_notice, finish_reason, merge_round_usage, BUDGET_FINAL_REMAINING,
+        accumulate_usage, budget_notice, merge_round_usage, BUDGET_FINAL_REMAINING,
         REQUEST_ATTEMPTS,
     };
     use crate::ai::types::ReasoningEffort;
@@ -31,23 +31,6 @@ mod tests {
     #[test]
     fn a_request_is_retried_exactly_once() {
         assert_eq!(REQUEST_ATTEMPTS, 2);
-    }
-
-    /// **A reply cut off at the ceiling is told apart from one that finished.** Neither the text
-    /// nor the usage figures carry it, and it is the difference between a bad sample worth asking
-    /// again and a request that does not fit -- which is what the caller decides on.
-    #[test]
-    fn the_stop_reason_is_read_from_whichever_field_the_provider_used() {
-        let stopped = json!({ "choices": [{ "finish_reason": "stop" }] });
-        assert_eq!(finish_reason(&stopped), Some("stop"));
-        let cut_off = json!({ "choices": [{ "finish_reason": "length" }] });
-        assert_eq!(finish_reason(&cut_off), Some("length"));
-        // A provider that reports nothing at all is `None` rather than a guess.
-        assert_eq!(
-            finish_reason(&json!({ "choices": [{ "message": {} }] })),
-            None
-        );
-        assert_eq!(finish_reason(&json!({})), None);
     }
 
     /// The budget is stated, and the last one is an instruction to answer.
@@ -1556,10 +1539,9 @@ fn prepend_environment(
 
 /// The token figures a non-streaming reply reported.
 ///
-/// Read from the response to one short internal request -- a title, an assist decision --
-/// where there is no stream to count events from. Both callers of the plain
-/// [`complete_once`] ignore these; assist keeps them, because what it spends is a figure the
-/// user asked to see.
+/// Read from the response to one short internal request -- a title, a taste batch -- where
+/// there is no stream to count events from. The plain [`complete_once`] drops them; taste
+/// keeps them, because a learning run's spend is a figure the user can see.
 ///
 /// Every field is an `Option` because "the provider did not say" and "the provider spent
 /// nothing" are different facts, and the statistics page has to be able to tell them apart:
@@ -1571,34 +1553,13 @@ pub struct ReportedUsage {
     pub cached_tokens: Option<u64>,
 }
 
-impl ReportedUsage {
-    /// Adds one attempt's figures to another's.
-    ///
-    /// Written out rather than derived, because the arithmetic is not the obvious one: two
-    /// attempts where only one reported a prompt count must report *that* count -- not twice
-    /// it, and not nothing. Summing is what a retry needs: both attempts were really sent,
-    /// and both were really paid for.
-    pub fn plus(self, other: Self) -> Self {
-        let add = |left: Option<u64>, right: Option<u64>| match (left, right) {
-            (Some(left), Some(right)) => Some(left + right),
-            (Some(value), None) | (None, Some(value)) => Some(value),
-            (None, None) => None,
-        };
-        Self {
-            prompt_tokens: add(self.prompt_tokens, other.prompt_tokens),
-            completion_tokens: add(self.completion_tokens, other.completion_tokens),
-            cached_tokens: add(self.cached_tokens, other.cached_tokens),
-        }
-    }
-}
-
 /// Whether the model may think before it answers.
 ///
 /// **Not a preference.** Every caller wants thinking allowed -- a model that reasons is a better
-/// model, and nothing here should take that away. The single exception is the second attempt of an
-/// assist request whose first reply was cut off at the token ceiling *while the model was still
+/// model, and nothing here should take that away. The single exception is the second attempt of a
+/// short completion whose first reply was cut off at the token ceiling *while the model was still
 /// thinking*: repeating that request unchanged is repeating something that has already been shown
-/// not to fit, so the retry is made without the thinking instead. See `assist::decide`.
+/// not to fit, so the retry is made without the thinking instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Thinking {
     Allow,
@@ -1623,12 +1584,11 @@ pub async fn complete_once_with_usage(
 
 /// The same request, with the provider's own response kept.
 ///
-/// [`complete_once_with_usage`] keeps only the text a caller can act on, which is everything a
-/// caller normally wants. This keeps the payload that text was read out of, for the one caller
-/// that has to explain a reply it could not use: `reasoning_content` is a *fallback* there, so a
-/// provider that sent both loses its thinking, and `finish_reason` -- cut off by `max_tokens`,
-/// stopped by a filter -- is not in the text at all. The request itself is identical, and there
-/// is one implementation of it.
+/// [`complete_once_with_usage`] keeps only the text and the figures, which is everything a
+/// caller normally wants. This keeps the payload that text was read out of, for a caller
+/// that has to explain a reply it could not use: `reasoning_content` is a *fallback* there,
+/// so a provider that sent both loses its thinking. The request itself is identical, and
+/// there is one implementation of it.
 pub async fn complete_once_raw(
     endpoint: &Endpoint,
     model: &str,
@@ -1688,24 +1648,6 @@ pub async fn complete_once_raw(
         cached_tokens: crate::ai::remote::stream_event::cached_tokens(&payload),
     };
     Ok((content, usage, payload))
-}
-
-/// Why the model stopped, in the provider's own word.
-///
-/// One word matters to a caller: `length` means the reply was cut off at `max_tokens` rather than
-/// finished, which is a fact neither the text nor the usage figures carry -- a reply that stopped
-/// mid-sentence and one that was never generated read the same way without it. Providers that
-/// report nothing at all give `None`.
-pub fn finish_reason(payload: &Value) -> Option<&str> {
-    payload
-        .pointer("/choices/0/finish_reason")
-        .and_then(Value::as_str)
-        // The Responses-style spelling, which some compatible servers emit beside it.
-        .or_else(|| {
-            payload
-                .pointer("/choices/0/stop_reason")
-                .and_then(Value::as_str)
-        })
 }
 
 /// Runs one non-streaming completion and returns only its text.

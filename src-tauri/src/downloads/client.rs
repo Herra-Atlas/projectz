@@ -95,6 +95,58 @@ impl Client {
     }
 }
 
+/// A GitHub repository's file tree.
+///
+/// The wake-word collection is a GitHub repository, not a Hub one, so the Hub
+/// tree call above answers 404 for it. Entries are mapped into the same shape so
+/// the catalogue code does not care where a row came from.
+pub async fn github_tree(http: &reqwest::Client, repo: &str) -> Result<Vec<TreeEntry>, String> {
+    #[derive(serde::Deserialize)]
+    struct Tree {
+        tree: Vec<Entry>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        path: String,
+        #[serde(rename = "type")]
+        kind: String,
+        #[serde(default)]
+        size: u64,
+    }
+
+    let response = http
+        .get(format!(
+            "https://api.github.com/repos/{repo}/git/trees/main?recursive=1"
+        ))
+        // GitHub refuses a request without one.
+        .header("User-Agent", "projectz")
+        .header("Accept", "application/vnd.github+json")
+        .timeout(Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|error| format!("{repo} could not be listed: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "{repo} could not be listed ({}).",
+            response.status()
+        ));
+    }
+    let parsed: Tree = response
+        .json()
+        .await
+        .map_err(|error| format!("{repo}'s listing could not be read: {error}"))?;
+    Ok(parsed
+        .tree
+        .into_iter()
+        .filter(|entry| entry.kind == "blob")
+        .map(|entry| TreeEntry {
+            entry_type: "file".to_string(),
+            path: entry.path,
+            size: entry.size,
+        })
+        .collect())
+}
+
 /// A repository's file tree, as a free function so a caller can run several at
 /// once with an owned `reqwest::Client` in each future.
 pub async fn tree(http: &reqwest::Client, repo: &str) -> Result<Vec<TreeEntry>, String> {

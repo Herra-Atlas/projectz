@@ -33,6 +33,13 @@ pub const WHISPER_EXE: &str = "whisper-cli.exe";
 /// Parakeet models are read by their own executable, shipped in the same archive.
 pub const PARAKEET_EXE: &str = "parakeet-cli.exe";
 
+/// The same engine, running as a server instead of one file per press.
+///
+/// A different executable, not a flag: passing server arguments to `whisper-cli`
+/// makes it print its help and exit successfully, which looks exactly like a
+/// server that never opened its port.
+pub const SERVER_EXE: &str = "whisper-server.exe";
+
 const ASSET: &str = "whisper-vulkan-b5454.zip";
 const ASSET_URL: &str = "https://github.com/Herra-Atlas/vulkan-builds/releases/download/whisper-vulkan-b5454/whisper-vulkan-b5454.zip";
 const ASSET_SHA256: &str = "ee21a1617bbc54a325c0b3978f9abeadf9c521f88c7325c86ee56ea32cfe4f41";

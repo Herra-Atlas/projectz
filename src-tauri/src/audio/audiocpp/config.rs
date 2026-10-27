@@ -20,18 +20,20 @@ use crate::app_paths::tmp_root;
 use crate::database::Database;
 
 use super::families::{Model, Task};
-use super::{settings, specs};
-
-/// The address and shape the server is started with.
-const PORT: u32 = 43126;
+use super::{settings, specs, Purpose};
 
 /// The server's backend. Vulkan, matching the whisper build this app installs
 /// already: the AMD story is the whole reason the Vulkan build exists.
 const BACKEND: &str = "vulkan";
 
-/// Where the config is written: the app's own scratch space.
-pub fn config_path() -> PathBuf {
-    tmp_root().join("audio").join("server.json")
+/// Where one purpose's config is written: the app's own scratch space.
+///
+/// One file per purpose, because each purpose is its own process with its own
+/// models. Sharing a file would mean two servers rewriting each other's list.
+pub fn config_path(purpose: Purpose) -> PathBuf {
+    tmp_root()
+        .join("audio")
+        .join(format!("{}.json", purpose.key()))
 }
 
 /// The JSON one launch is handed.
@@ -39,7 +41,7 @@ pub fn config_path() -> PathBuf {
 /// Each known model is one entry; the `load` options the user stored for a
 /// model (from its family's spec) ride on the entry, because load options are
 /// model-level rather than per message.
-pub fn build(models: &[Model], database: &Database) -> Value {
+pub fn build(models: &[Model], database: &Database, purpose: Purpose) -> Value {
     let session_only = |family: &str| {
         settings::espeak_trait(database, family) == Some(settings::EspeakTrait::Session)
     };
@@ -47,6 +49,7 @@ pub fn build(models: &[Model], database: &Database) -> Value {
         models,
         &|path| settings::stored(database, path),
         &|family| Some(session_only(family)),
+        purpose.port(),
     )
 }
 
@@ -57,6 +60,7 @@ fn build_from(
     models: &[Model],
     stored_for: &dyn Fn(&str) -> Option<Value>,
     espeak_for: &dyn Fn(&str) -> Option<bool>,
+    port: u16,
 ) -> Value {
     let mut entries: Vec<Value> = Vec::new();
     let mut used: Vec<String> = Vec::new();
@@ -115,7 +119,7 @@ fn build_from(
             "family": model.family,
             "path": path,
             "task": task_name(task),
-            "mode": "offline",
+            "mode": mode_name(task),
         });
         if load.as_object().is_some_and(|options| !options.is_empty()) {
             entry["load_options"] = load;
@@ -128,22 +132,25 @@ fn build_from(
 
     json!({
         "host": "127.0.0.1",
-        "port": PORT,
+        "port": port,
         "backend": BACKEND,
         "lazy_load": true,
+        // One resident model per process. The rule used to bend the other way:
+        // a single server holding both a voice and the wake model meant every
+        // Read evicted the wake word and every wake window evicted the voice.
         "max_loaded_models": 1,
         "models": entries,
     })
 }
 
 /// The config as text, with the folder it lives in made first.
-pub fn write(models: &[Model], database: &Database) -> Result<(), String> {
-    let path = config_path();
+pub fn write(models: &[Model], database: &Database, purpose: Purpose) -> Result<(), String> {
+    let path = config_path(purpose);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
     }
-    let text = serde_json::to_string_pretty(&build(models, database))
+    let text = serde_json::to_string_pretty(&build(models, database, purpose))
         .map_err(|error| format!("The server configuration could not be written: {error}"))?;
     std::fs::write(&path, text)
         .map_err(|error| format!("Could not write {}: {error}", path.display()))
@@ -164,10 +171,14 @@ pub fn write(models: &[Model], database: &Database) -> Result<(), String> {
 /// server started without it prints nothing -- which is precisely what made
 /// the panel read "Waiting for the audio engine…" forever while the first
 /// request died somewhere this app could not see.
-pub fn args() -> Vec<String> {
+pub fn args(purpose: Purpose) -> Vec<String> {
     vec![
         "--config".to_string(),
-        config_path().display().to_string(),
+        config_path(purpose).display().to_string(),
+        // The port is on the config too; passing it here keeps a stale file from
+        // moving a live server out from under the client that is calling it.
+        "--port".to_string(),
+        purpose.port().to_string(),
         "--log".to_string(),
     ]
 }
@@ -226,6 +237,19 @@ fn task_name(task: Task) -> &'static str {
     match task {
         Task::Tts => "tts",
         Task::Asr => "asr",
+        Task::Wake => "wake",
+    }
+}
+
+/// Which mode the engine configures a model in.
+///
+/// A wake model is asked about windows of live audio rather than handed a file
+/// once, so it is configured the way its own spec lists it for streaming. Every
+/// other model is the offline shape the speech and transcription calls use.
+fn mode_name(task: Task) -> &'static str {
+    match task {
+        Task::Wake => "streaming",
+        Task::Tts | Task::Asr => "offline",
     }
 }
 
@@ -252,7 +276,7 @@ mod tests {
             model("Kokoro-82M", "kokoro_tts", Task::Tts),
             model("qwen3-asr-0.6b", "qwen3_asr", Task::Asr),
         ];
-        let config = build_from(&models, &|_| None, &|_| None);
+        let config = build_from(&models, &|_| None, &|_| None, 43126);
         let entries = config["models"].as_array().unwrap();
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0]["id"], "kokoro-82m");
@@ -265,7 +289,7 @@ mod tests {
     fn an_unknown_family_is_left_out() {
         let mut unknown = model("some-future-model", "unknown", Task::Tts);
         unknown.task = None;
-        let config = build_from(&[unknown], &|_| None, &|_| None);
+        let config = build_from(&[unknown], &|_| None, &|_| None, 43126);
         let entries = config["models"].as_array().unwrap();
         assert_eq!(entries.len(), 0);
     }
@@ -281,6 +305,7 @@ mod tests {
             &models,
             &|_| Some(serde_json::json!({ "Any": "value" })),
             &|_| None,
+            43126,
         );
         let entry = &config["models"].as_array().unwrap()[0];
         assert!(entry.get("load_options").is_none());

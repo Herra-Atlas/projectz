@@ -88,27 +88,11 @@ pub struct UsageReport {
     /// and the tail contributes a share small enough that the aggregate view it
     /// is compared against is unchanged by dropping it.
     pub model_timeline: Vec<ModelBucket>,
-    /// What assist spent over the period, summed over its own table.
-    ///
-    /// Kept apart from the conversation figures rather than folded into them: an assist
-    /// answer is not a conversation, and a "total tokens" that quietly included a feature the
-    /// user asked about separately would answer a question they did not ask.
-    pub assist_prompt_tokens: i64,
-    pub assist_completion_tokens: i64,
-    pub assist_total_tokens: i64,
-    /// How many requests assist sent. Counted rather than derived, because a request that
-    /// reported no figures still happened -- which is why the count and the tokens are not
-    /// the same kind of number.
-    pub assist_requests: i64,
-    /// Assist's models with their own figures, busiest first.
-    pub assist_models: Vec<ModelUsage>,
-    /// Assist's per-model, per-bucket tokens, for the assist series view.
-    pub assist_timeline: Vec<ModelBucket>,
     /// What taste spent over the period, from its own run table.
     ///
-    /// Kept apart from both the conversation and assist figures for the same
-    /// reason: a learning run is neither a conversation nor an assist answer, and
-    /// a total that quietly included it would answer a different question.
+    /// Kept apart from the conversation figures: a learning run is not a
+    /// conversation, and a total that quietly included it would answer a
+    /// different question.
     pub taste_prompt_tokens: i64,
     pub taste_completion_tokens: i64,
     pub taste_total_tokens: i64,
@@ -134,55 +118,6 @@ const MODEL_SERIES_LIMIT: usize = 6;
 fn sum_or_zero(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<i64> {
     row.get::<_, Option<i64>>(index)
         .map(|value| value.unwrap_or(0))
-}
-
-/// One assist request's figures, as they are written.
-#[derive(Serialize, Clone, Debug)]
-pub struct AssistUsage {
-    /// UTC ISO-8601, like every other timestamp in the database.
-    ///
-    /// Named `created_at` rather than `at` because the timeline's bucket expression is shared
-    /// with every other query on this page, and it names that column.
-    pub created_at: String,
-    pub model_id: String,
-    pub provider_id: String,
-    /// `None` when the provider reported nothing, never zero.
-    pub prompt_tokens: Option<u64>,
-    pub completion_tokens: Option<u64>,
-    pub cached_tokens: Option<u64>,
-    /// How many blocks the page offered, and how many answers came back.
-    pub blocks: i64,
-    pub cards: i64,
-}
-
-/// Records one assist request.
-///
-/// Written even when the provider reported no figures at all: the request still happened,
-/// and "assist was used and nobody said what it cost" is a fact worth keeping rather than a
-/// row to omit. The block and card counts are written either way, so a request that produced
-/// nothing is still visible in the numbers.
-pub fn record_assist_usage(connection: &Connection, usage: &AssistUsage) -> Result<(), String> {
-    // rusqlite has no `ToSql` for `u64`, and a token count cannot be negative -- so the
-    // conversion happens here, once, rather than at every call site.
-    let tokens = |value: Option<u64>| value.map(|value| value as i64);
-    connection
-        .execute(
-            "INSERT INTO assist_usage
-                 (created_at,model_id,provider_id,prompt_tokens,completion_tokens,cached_tokens,blocks,cards)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
-            params![
-                usage.created_at,
-                usage.model_id,
-                usage.provider_id,
-                tokens(usage.prompt_tokens),
-                tokens(usage.completion_tokens),
-                tokens(usage.cached_tokens),
-                usage.blocks,
-                usage.cards
-            ],
-        )
-        .map(|_| ())
-        .map_err(|error| error.to_string())
 }
 
 /// Builds a report for activity on or after `since`.
@@ -392,78 +327,6 @@ pub fn build_report(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
 
-    // Assist's own figures, from its own table. No model limit here: assist is answered by
-    // one or two models in practice, and the limit the conversation chart needs exists for a
-    // gateway with hundreds of them.
-    let (assist_prompt_tokens, assist_completion_tokens, assist_requests) = connection
-        .query_row(
-            "SELECT COALESCE(SUM(prompt_tokens), 0),
-                    COALESCE(SUM(completion_tokens), 0),
-                    COUNT(*)
-             FROM assist_usage WHERE substr(created_at,1,10) >= ?1",
-            params![since],
-            |row| {
-                Ok((
-                    sum_or_zero(row, 0)?,
-                    sum_or_zero(row, 1)?,
-                    sum_or_zero(row, 2)?,
-                ))
-            },
-        )
-        .map_err(|error| error.to_string())?;
-
-    let mut assist_model_statement = connection
-        .prepare(
-            "SELECT model_id, COALESCE(provider_id, ''), COUNT(*),
-                    COALESCE(SUM(prompt_tokens), 0),
-                    COALESCE(SUM(completion_tokens), 0)
-             FROM assist_usage
-             WHERE substr(created_at,1,10) >= ?1
-             GROUP BY model_id, provider_id
-             ORDER BY COUNT(*) DESC",
-        )
-        .map_err(|error| error.to_string())?;
-    let assist_models = assist_model_statement
-        .query_map(params![since], |row| {
-            Ok(ModelUsage {
-                model_id: row.get(0)?,
-                provider_id: row.get(1)?,
-                // "Replies" is the column name the conversation figures use; for assist the
-                // same number is requests, which is the same fact counted the same way.
-                replies: sum_or_zero(row, 2)?,
-                prompt_tokens: sum_or_zero(row, 3)?,
-                completion_tokens: sum_or_zero(row, 4)?,
-            })
-        })
-        .map_err(|error| error.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())?;
-
-    let mut assist_timeline_statement = connection
-        .prepare(&format!(
-            "SELECT {bucket_sql} AS bucket, model_id, COALESCE(provider_id, ''),
-                    COALESCE(SUM(prompt_tokens), 0),
-                    COALESCE(SUM(completion_tokens), 0)
-             FROM assist_usage
-             WHERE substr(created_at,1,10) >= ?1
-             GROUP BY bucket, model_id, provider_id
-             ORDER BY bucket ASC"
-        ))
-        .map_err(|error| error.to_string())?;
-    let assist_timeline = assist_timeline_statement
-        .query_map(params![since], |row| {
-            Ok(ModelBucket {
-                bucket: row.get(0)?,
-                model_id: row.get(1)?,
-                provider_id: row.get(2)?,
-                prompt_tokens: sum_or_zero(row, 3)?,
-                completion_tokens: sum_or_zero(row, 4)?,
-            })
-        })
-        .map_err(|error| error.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())?;
-
     // Taste's own figures, from its run history. A run that was skipped or failed
     // before reaching a model still counts as a run, but contributes no model row
     // and no tokens; filtering on `model_id IS NOT NULL` keeps the model
@@ -560,12 +423,6 @@ pub fn build_report(
         session_usage,
         models,
         model_timeline,
-        assist_prompt_tokens,
-        assist_completion_tokens,
-        assist_total_tokens: assist_prompt_tokens + assist_completion_tokens,
-        assist_requests,
-        assist_models,
-        assist_timeline,
         taste_prompt_tokens,
         taste_completion_tokens,
         taste_total_tokens: taste_prompt_tokens + taste_completion_tokens,
@@ -609,17 +466,6 @@ mod tests {
                      -- `cache_hits_ignore_replies_that_reported_no_figure`.
                      cached_tokens INTEGER
                  );
-                 CREATE TABLE assist_usage (
-                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     created_at TEXT NOT NULL,
-                     model_id TEXT NOT NULL,
-                     provider_id TEXT NOT NULL DEFAULT '',
-                     prompt_tokens INTEGER,
-                     completion_tokens INTEGER,
-                     cached_tokens INTEGER,
-                     blocks INTEGER NOT NULL DEFAULT 0,
-                     cards INTEGER NOT NULL DEFAULT 0
-                 );
                  CREATE TABLE taste_runs (
                      id INTEGER PRIMARY KEY AUTOINCREMENT,
                      started_at TEXT NOT NULL,
@@ -633,24 +479,6 @@ mod tests {
             )
             .unwrap();
         connection
-    }
-
-    /// Adds one assist request, the way the watcher writes one.
-    fn insert_assist(
-        connection: &Connection,
-        date: &str,
-        model: &str,
-        provider: &str,
-        prompt: Option<i64>,
-        completion: Option<i64>,
-    ) {
-        connection
-            .execute(
-                "INSERT INTO assist_usage (created_at,model_id,provider_id,prompt_tokens,completion_tokens,blocks,cards)
-                 VALUES (?1,?2,?3,?4,?5,2,1)",
-                params![date, model, provider, prompt, completion],
-            )
-            .unwrap();
     }
 
     /// Adds one taste run, the way the learner records one.
@@ -735,154 +563,6 @@ mod tests {
         assert_eq!(report.taste_timeline[0].bucket, "2026-10-01");
         assert_eq!(report.taste_timeline[0].model_id, "gpt-4o-mini");
         assert_eq!(report.taste_timeline[0].completion_tokens, 270);
-    }
-
-    /// **Assist's figures are its own.** They appear in assist's totals and in assist's
-    /// per-model breakdown, and never in the conversation totals -- the page reports them
-    /// side by side, so a leak in either direction would show the user a number that is
-    /// wrong in a way they cannot see.
-    #[test]
-    fn assist_usage_is_reported_apart_from_conversations() {
-        let connection = fixture();
-        insert_session(&connection, "s1", "First", "2026-10-01T10:00:00.000Z");
-        insert_message(
-            &connection,
-            "m1",
-            "s1",
-            "assistant",
-            "2026-10-01T10:00:05.000Z",
-            Some("gpt"),
-            Some("openai"),
-            Some(100),
-            Some(40),
-        );
-        insert_assist(
-            &connection,
-            "2026-10-01T11:00:00.000Z",
-            "gpt-4o-mini",
-            "openai",
-            Some(900),
-            Some(20),
-        );
-        insert_assist(
-            &connection,
-            "2026-10-01T12:00:00.000Z",
-            "gpt-4o-mini",
-            "openai",
-            Some(800),
-            Some(15),
-        );
-
-        let report =
-            build_report(&connection, "2026-10-01", "7d", "substr(created_at,1,10)").unwrap();
-
-        // The conversation totals are untouched by assist's requests.
-        assert_eq!(report.prompt_tokens, 100);
-        assert_eq!(report.completion_tokens, 40);
-        assert_eq!(report.total_tokens, 140);
-        // And assist has its own.
-        assert_eq!(report.assist_prompt_tokens, 1700);
-        assert_eq!(report.assist_completion_tokens, 35);
-        assert_eq!(report.assist_total_tokens, 1735);
-        assert_eq!(report.assist_requests, 2);
-        assert_eq!(report.assist_models.len(), 1);
-        assert_eq!(report.assist_models[0].model_id, "gpt-4o-mini");
-        assert_eq!(report.assist_models[0].replies, 2);
-        // The series is keyed the same way as the conversation one, so the same chart draws it.
-        assert_eq!(report.assist_timeline.len(), 1);
-        assert_eq!(report.assist_timeline[0].bucket, "2026-10-01");
-        assert_eq!(report.assist_timeline[0].model_id, "gpt-4o-mini");
-        assert_eq!(report.assist_timeline[0].prompt_tokens, 1700);
-    }
-
-    /// A request whose provider reported no figures is still a request.
-    ///
-    /// The distinction the assist card depends on: "assist ran twelve times and nobody said
-    /// what it cost" is a useful thing to see, and a count derived from the token columns
-    /// would report zero uses for a feature that was working.
-    #[test]
-    fn an_assist_request_that_reported_nothing_still_counts() {
-        let connection = fixture();
-        insert_assist(
-            &connection,
-            "2026-10-01T11:00:00.000Z",
-            "local",
-            "local-model",
-            None,
-            None,
-        );
-
-        let report =
-            build_report(&connection, "2026-10-01", "7d", "substr(created_at,1,10)").unwrap();
-
-        assert_eq!(report.assist_requests, 1);
-        assert_eq!(report.assist_total_tokens, 0);
-        assert_eq!(report.assist_models.len(), 1);
-        assert_eq!(report.assist_models[0].model_id, "local");
-    }
-
-    /// Assist usage outside the range is excluded, the same way conversation usage is.
-    #[test]
-    fn assist_usage_outside_the_range_is_excluded() {
-        let connection = fixture();
-        insert_assist(
-            &connection,
-            "2026-09-01T11:00:00.000Z",
-            "gpt",
-            "openai",
-            Some(999),
-            Some(999),
-        );
-        insert_assist(
-            &connection,
-            "2026-10-05T11:00:00.000Z",
-            "gpt",
-            "openai",
-            Some(10),
-            Some(5),
-        );
-
-        let report =
-            build_report(&connection, "2026-10-01", "7d", "substr(created_at,1,10)").unwrap();
-
-        assert_eq!(report.assist_requests, 1);
-        assert_eq!(report.assist_total_tokens, 15);
-    }
-
-    /// The insert the watcher uses writes exactly what the report reads.
-    ///
-    /// The other tests write rows directly so they can control every column; this one goes
-    /// through `record_assist_usage`, which is the function the watcher actually calls -- so a
-    /// column swapped in the INSERT, or a `u64` that never made it into the row, is caught here
-    /// rather than only in a live session.
-    #[test]
-    fn the_watcher_insert_is_what_the_report_reads() {
-        let connection = fixture();
-        record_assist_usage(
-            &connection,
-            &AssistUsage {
-                created_at: "2026-10-01T09:00:00.000Z".to_string(),
-                model_id: "gpt-4o-mini".to_string(),
-                provider_id: "openai".to_string(),
-                prompt_tokens: Some(1234),
-                completion_tokens: Some(56),
-                cached_tokens: Some(100),
-                blocks: 24,
-                cards: 3,
-            },
-        )
-        .expect("record");
-
-        let report =
-            build_report(&connection, "2026-10-01", "7d", "substr(created_at,1,10)").unwrap();
-
-        assert_eq!(report.assist_requests, 1);
-        assert_eq!(report.assist_prompt_tokens, 1234);
-        assert_eq!(report.assist_completion_tokens, 56);
-        assert_eq!(report.assist_total_tokens, 1290);
-        assert_eq!(report.assist_models.len(), 1);
-        assert_eq!(report.assist_models[0].model_id, "gpt-4o-mini");
-        assert_eq!(report.assist_models[0].provider_id, "openai");
     }
 
     fn insert_session(connection: &Connection, id: &str, title: &str, date: &str) {

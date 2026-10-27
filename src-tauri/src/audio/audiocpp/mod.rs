@@ -29,52 +29,106 @@ pub mod settings;
 pub mod specs;
 
 use tauri::Emitter;
-use tokio::sync::Mutex;
 
 use super::engines::audiocpp;
 use crate::database::Database;
 
-/// The held server process, or nothing while it is down.
+/// The held server processes, one per purpose.
 ///
 /// A `static` rather than Tauri state, because the callers are the `tts` and
 /// `stt` dispatch layers deep in their own call chains and no command ever
 /// needs to see the handle: the surface is `running`, `stop` and
-/// `ensure_started`.
-static SERVER: Mutex<Option<tokio::process::Child>> = Mutex::const_new(None);
+/// `ensure_started_for`.
+///
+/// **One process per purpose, not one process for both.** With a single server
+/// and `max_loaded_models: 1`, a Read pressed while the wake word listened
+/// evicted the wake model, and the next wake window evicted the voice: two
+/// features taking turns loading the same slot. Two processes also give each
+/// one its own terminal and its own resident model, which is what a reader
+/// expects to see when both are working.
+static SERVERS: std::sync::LazyLock<
+    tokio::sync::Mutex<std::collections::HashMap<Purpose, tokio::process::Child>>,
+> = std::sync::LazyLock::new(Default::default);
 
-/// The server's output, as the Logs view draws it.
+/// The servers' output, per purpose, as the Logs view draws it.
 ///
 /// The same message stream the local model's panel shows: the frontend listens
 /// to `local-model-log` for new lines and reads a full buffer on open, so the
-/// two panels work exactly one way. `modelId` is `audiocpp` for every line
-/// this server owns.
-static LOG_BUFFER: std::sync::LazyLock<std::sync::Mutex<Vec<String>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+/// panels work exactly one way. Each line carries the purpose's own model id.
+static LOG_BUFFER: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<Purpose, Vec<String>>>,
+> = std::sync::LazyLock::new(Default::default);
 
 /// How many log lines are kept. `llama-server`'s buffer holds the same shape of
 /// tail: a server that prints a wall of startup traces must not push out the
 /// error the user is looking for, which is what a cap exists for.
 const MAX_LOG_LINES: usize = 500;
 
-/// Whether the server is answering right now.
-pub async fn running() -> bool {
-    client::health().await
+/// Whether one purpose's server is answering right now.
+pub async fn running(purpose: Purpose) -> bool {
+    client::health(purpose).await
 }
 
-/// The server's output so far, oldest first.
-pub fn logs() -> Vec<String> {
-    LOG_BUFFER.lock().map(|log| log.clone()).unwrap_or_default()
+/// One server's output so far, oldest first.
+pub fn logs(purpose: Purpose) -> Vec<String> {
+    LOG_BUFFER
+        .lock()
+        .ok()
+        .and_then(|buffers| buffers.get(&purpose).cloned())
+        .unwrap_or_default()
 }
 
 /// The current status, for the settings page and any caller that must not
 /// start anything.
-pub async fn status() -> Status {
+///
+/// One request answers both questions: a server that lists its models is
+/// running, and the entry marked loaded is the one a panel should name. Asking
+/// health and then the list would be two round trips for one fact.
+pub async fn status(purpose: Purpose) -> Status {
+    let known = client::models(purpose).await.ok();
+    let loaded = known
+        .as_deref()
+        .and_then(|list| list.iter().find(|model| model.loaded))
+        .map(label);
     Status {
         engine_installed: audiocpp::is_installed(),
         engine_version: audiocpp::installed_version(),
-        models: families::installed().len(),
-        running: running().await,
-        started_at: SPAWNED_AT.lock().ok().and_then(|slot| *slot),
+        models: families::installed()
+            .into_iter()
+            .filter(|model| serves(purpose, model.task))
+            .count(),
+        running: known.is_some(),
+        started_at: SPAWNED_AT
+            .lock()
+            .ok()
+            .and_then(|slots| slots.get(&purpose).copied()),
+        loaded,
+    }
+}
+
+/// Whether a model belongs to one purpose's server.
+///
+/// The split is the reason there are two processes: a wake model in the speech
+/// server would be loaded by the same slot a voice needs.
+fn serves(purpose: Purpose, task: Option<families::Task>) -> bool {
+    match (purpose, task) {
+        (Purpose::Speech, Some(families::Task::Tts | families::Task::Asr)) => true,
+        (Purpose::Wake, Some(families::Task::Wake)) => true,
+        _ => false,
+    }
+}
+
+/// What a panel should call the model the server is holding.
+///
+/// The family, because it is the name a person recognises -- `open wake word`
+/// rather than `wake` (the config id) or a path. A family the table does not
+/// know falls back to the id, which is still better than repeating "audio.cpp".
+fn label(model: &client::KnownModel) -> String {
+    let family = model.family.replace('_', " ");
+    if family.trim().is_empty() {
+        model.id.clone()
+    } else {
+        family
     }
 }
 
@@ -82,12 +136,13 @@ pub async fn status() -> Status {
 /// header's "running for X" reads, cleared whenever the server stops. An
 /// answering server this app did not spawn reads `None` -- an unknown start
 /// time is exactly that, not a guess.
-static SPAWNED_AT: std::sync::LazyLock<std::sync::Mutex<Option<i64>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+static SPAWNED_AT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<Purpose, i64>>> =
+    std::sync::LazyLock::new(Default::default);
 
-fn stamp_spawned() {
-    if let Ok(mut slot) = SPAWNED_AT.lock() {
-        *slot = Some(
+fn stamp_spawned(purpose: Purpose) {
+    if let Ok(mut slots) = SPAWNED_AT.lock() {
+        slots.insert(
+            purpose,
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|duration| duration.as_secs() as i64)
@@ -96,9 +151,9 @@ fn stamp_spawned() {
     }
 }
 
-fn stamp_stopped() {
-    if let Ok(mut slot) = SPAWNED_AT.lock() {
-        *slot = None;
+fn stamp_stopped(purpose: Purpose) {
+    if let Ok(mut slots) = SPAWNED_AT.lock() {
+        slots.remove(&purpose);
     }
 }
 
@@ -116,42 +171,93 @@ pub struct Status {
     pub running: bool,
     /// Unix seconds this app launched the server at, when it did.
     pub started_at: Option<i64>,
+    /// The model resident right now, as its family reads: `open wake word`.
+    /// A panel names this instead of the engine, because the engine is not what
+    /// the user started.
+    pub loaded: Option<String>,
 }
 
-/// Starts the server if it is not already answering, and rebuilds the config
-/// from what is installed first.
+/// Which of the two engines a call is for.
 ///
-/// Returns at once when an answering server is found -- whether it is this
-/// session's child or one started before is indistinguishable, and both are fit
-/// for the requests about to come. Only when nothing answers is a config
-/// written and a process started, so an install made while a server was
-/// already running is *not* picked up here: restart is the door for that, on
-/// purpose, so a voice never plans against a server whose shape it did not see.
-pub async fn ensure_started(app: &tauri::AppHandle, database: &Database) -> Result<(), String> {
-    if running().await {
+/// A purpose is a process: its own config, its own port, its own resident
+/// model, its own terminal. Speech covers every voice and transcription;
+/// wake is the listener, which asks every second and must not compete for the
+/// one model slot a voice needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Purpose {
+    Speech,
+    Wake,
+}
+
+impl Purpose {
+    /// The settings/command name, and the key of its config and log buffer.
+    pub fn key(self) -> &'static str {
+        match self {
+            Purpose::Speech => "speech",
+            Purpose::Wake => "wake",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "speech" => Some(Purpose::Speech),
+            "wake" => Some(Purpose::Wake),
+            _ => None,
+        }
+    }
+
+    /// The loopback port its server listens on.
+    pub fn port(self) -> u16 {
+        match self {
+            Purpose::Speech => 43_126,
+            Purpose::Wake => 43_125,
+        }
+    }
+
+    /// The id the panel's log stream and its session carry.
+    pub fn session(self) -> &'static str {
+        match self {
+            Purpose::Speech => "audiocpp",
+            Purpose::Wake => "audiocpp-wake",
+        }
+    }
+}
+
+/// Starts the server for one caller, recording why it is up.
+pub async fn ensure_started_for(
+    purpose: Purpose,
+    app: &tauri::AppHandle,
+    database: &Database,
+) -> Result<(), String> {
+    if running(purpose).await {
         return Ok(());
     }
     let engine = audiocpp::server_executable().ok_or_else(|| {
         "The audio.cpp engine is not installed. Install it from the Voice settings first."
             .to_string()
     })?;
-    let models = families::installed();
+    // Only this purpose's models are configured: a wake file in the speech
+    // server would be a second loadable model competing for its one slot.
+    let models: Vec<families::Model> = families::installed()
+        .into_iter()
+        .filter(|model| serves(purpose, model.task))
+        .collect();
     if models.is_empty() {
-        return Err(
-            "No audio.cpp model is installed. Download one from the Voice settings.".to_string(),
-        );
+        return Err(match purpose {
+            Purpose::Speech => {
+                "No audio.cpp model is installed. Download one from the Voice settings.".to_string()
+            }
+            Purpose::Wake => {
+                "No wake word model is installed. Add one from the Wake word page.".to_string()
+            }
+        });
     }
-    // An unknown-family file cannot be configured, so it is not in the config;
-    // a start whose models are all unknown has nothing to serve.
-    if !models.iter().any(|model| model.task.is_some()) {
-        return Err("None of the installed models is a family this app knows about.".to_string());
-    }
-    config::write(&models, database)?;
+    config::write(&models, database, purpose)?;
 
     let mut command = tokio::process::Command::new(&engine);
     command
         .current_dir(config::working_dir())
-        .args(config::args())
+        .args(config::args(purpose))
         // Output on a pipe, so the logs view can show what the engine says --
         // the same way `llama-server`'s output reaches it.
         .stdin(std::process::Stdio::null())
@@ -176,24 +282,27 @@ pub async fn ensure_started(app: &tauri::AppHandle, database: &Database) -> Resu
 
     // A fresh start begins with an empty panel, whatever the last one printed:
     // the log belongs to the process it came from.
-    if let Ok(mut log) = LOG_BUFFER.lock() {
-        log.clear();
+    if let Ok(mut buffers) = LOG_BUFFER.lock() {
+        buffers.remove(&purpose);
     }
     if let Some(stdout) = child.stdout.take() {
         let app = app.clone();
         // The reader exists for as long as the process does; it ends on its own
         // when the pipe closes, and it is not awaited here because nothing
         // waits for a server to start printing.
-        tauri::async_runtime::spawn(pump_logs(app, stdout));
+        tauri::async_runtime::spawn(pump_logs(app, purpose, stdout));
     }
 
-    let mut slot = SERVER.lock().await;
-    *slot = Some(child);
-    let _ = app.emit("audio-server-state", serde_json::json!({ "running": true }));
-    drop(slot);
-    stamp_spawned();
+    let mut servers = SERVERS.lock().await;
+    servers.insert(purpose, child);
+    drop(servers);
+    let _ = app.emit(
+        "audio-server-state",
+        serde_json::json!({ "running": true, "purpose": purpose.key() }),
+    );
+    stamp_spawned(purpose);
 
-    wait_ready(&app).await
+    wait_ready(purpose, &app).await
 }
 
 /// Reads the server's stdout into the log buffer, line by line.
@@ -202,25 +311,27 @@ pub async fn ensure_started(app: &tauri::AppHandle, database: &Database) -> Resu
 /// so a panel opened later reads what it missed -- the same two halves the
 /// local model's logs work in.
 ///
-/// Two in-line filters keep the panel readable. Health checks are dropped in
-/// full: the server prints two debug lines per probe, and whoever probes --
-/// this app's own wait, its WebUI, anything else on the machine -- the
-/// stream is noise a reader scrolls past, never a diagnosis. Identical
-/// consecutive lines collapse to the first one plus a `×N` marker (the
-/// contract_spec tracer prints the same file several times per request).
-async fn pump_logs(app: tauri::AppHandle, stdout: tokio::process::ChildStdout) {
+/// Two in-line filters keep the panel readable. **Request traffic is dropped in
+/// full**: the server logs two debug lines per HTTP call, and this app probes
+/// `/health` while starting and `/v1/models` on every status poll -- without
+/// the filter the panel was a wall of `http.body_ready path=/v1/models` and the
+/// one line worth reading was buried. Identical consecutive lines collapse to
+/// the first one plus a `×N` marker (the contract_spec tracer prints the same
+/// file several times per request).
+async fn pump_logs(app: tauri::AppHandle, purpose: Purpose, stdout: tokio::process::ChildStdout) {
     use tokio::io::AsyncBufReadExt;
-    async fn push(app: &tauri::AppHandle, line: &str) {
-        if let Ok(mut log) = LOG_BUFFER.lock() {
-            log.push(line.to_string());
-            let excess = log.len().saturating_sub(MAX_LOG_LINES);
-            log.drain(0..excess);
+    let push = |line: &str| {
+        if let Ok(mut buffers) = LOG_BUFFER.lock() {
+            let buffer = buffers.entry(purpose).or_default();
+            buffer.push(line.to_string());
+            let excess = buffer.len().saturating_sub(MAX_LOG_LINES);
+            buffer.drain(0..excess);
         }
         let _ = app.emit(
             "local-model-log",
-            serde_json::json!({ "modelId": "audiocpp", "line": line }),
+            serde_json::json!({ "modelId": purpose.session(), "line": line }),
         );
-    }
+    };
     let mut reader = tokio::io::BufReader::new(stdout);
     let mut line = String::new();
     let mut run: Option<String> = None;
@@ -234,7 +345,7 @@ async fn pump_logs(app: tauri::AppHandle, stdout: tokio::process::ChildStdout) {
                 if shown.is_empty() {
                     continue;
                 }
-                if shown.contains("path=/health") {
+                if shown.contains("path=/health") || shown.contains("path=/v1/models") {
                     continue;
                 }
                 if run.as_ref() == Some(&shown) {
@@ -242,9 +353,9 @@ async fn pump_logs(app: tauri::AppHandle, stdout: tokio::process::ChildStdout) {
                     continue;
                 }
                 if let (Some(previous), true) = (run.as_ref(), repeats > 0) {
-                    push(&app, &format!("{previous}  ⟨same line ×{}⟩", repeats + 1)).await;
+                    push(&format!("{previous}  ⟨same line ×{}⟩", repeats + 1));
                 }
-                push(&app, &shown).await;
+                push(&shown);
                 run = Some(shown);
                 repeats = 0;
             }
@@ -257,34 +368,44 @@ async fn pump_logs(app: tauri::AppHandle, stdout: tokio::process::ChildStdout) {
 /// A model-free start is quick, but a start that has to reserve GPU memory can
 /// take a while; the budget is generous compared with any user-visible wait
 /// before it, and the failure is a plain message rather than an eternal poll.
-async fn wait_ready(app: &tauri::AppHandle) -> Result<(), String> {
+async fn wait_ready(purpose: Purpose, app: &tauri::AppHandle) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
     while tokio::time::Instant::now() < deadline {
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        if running().await {
+        if running(purpose).await {
             return Ok(());
         }
     }
-    stop(app).await;
+    stop(purpose, app).await;
     Err("The audio engine did not come up in time. Check the logs on the right.".to_string())
 }
 
-/// Stops the held server, if one is held.
+/// Stops both engines.
+///
+/// Uninstalling the engine, or replacing the eSpeak library it may hold open,
+/// is about the files on disk rather than one feature, so nothing may survive
+/// it.
+pub async fn stop_all(app: &tauri::AppHandle) {
+    stop(Purpose::Speech, app).await;
+    stop(Purpose::Wake, app).await;
+}
+
+/// Stops one engine, if one is held for it.
 ///
 /// Restarting is a start: the config is rebuilt before every start, so a change
 /// to what is installed is the next start sees it, and nothing here needs to
 /// know whether the config has changed. The event tells the panel to let its
 /// session close, which is the same guard the uninstall applies first.
-pub async fn stop(app: &tauri::AppHandle) {
-    let mut slot = SERVER.lock().await;
-    if let Some(mut child) = slot.take() {
+pub async fn stop(purpose: Purpose, app: &tauri::AppHandle) {
+    let mut servers = SERVERS.lock().await;
+    if let Some(mut child) = servers.remove(&purpose) {
         let _ = child.kill().await;
     }
-    drop(slot);
-    stamp_stopped();
+    drop(servers);
+    stamp_stopped(purpose);
     let _ = app.emit(
         "audio-server-state",
-        serde_json::json!({ "running": false }),
+        serde_json::json!({ "running": false, "purpose": purpose.key() }),
     );
 }
 
@@ -305,11 +426,11 @@ pub async fn synthesize(
     database: &Database,
 ) -> Result<(Vec<u8>, u32), String> {
     let path = selected.path.display().to_string();
-    ensure_started(app, database).await?;
+    ensure_started_for(Purpose::Speech, app, database).await?;
     // The slug the config gave this file is what the server listens for.
-    let id = model_for_request(&selected.slug());
+    let id = model_for_request(&selected.slug(), Purpose::Speech);
     let request = settings::request_options(database, &path, &selected.family);
-    match client::speech(&id, text, speed, request).await {
+    match client::speech(Purpose::Speech, &id, text, speed, request).await {
         Ok((pcm, rate)) => {
             remember_rate(path, rate).await;
             Ok((pcm, rate))
@@ -319,7 +440,7 @@ pub async fn synthesize(
             // One negotiation is the whole second chance: the server restarted
             // with the corrected shape, and the identical call goes out again.
             let request = settings::request_options(database, &path, &selected.family);
-            let (pcm, rate) = client::speech(&id, text, speed, request).await?;
+            let (pcm, rate) = client::speech(Purpose::Speech, &id, text, speed, request).await?;
             remember_rate(path, rate).await;
             Ok((pcm, rate))
         }
@@ -357,8 +478,8 @@ async fn negotiate(
             ));
         }
         settings::learn_session(database, family)?;
-        stop(app).await;
-        ensure_started(app, database).await?;
+        stop(Purpose::Speech, app).await;
+        ensure_started_for(Purpose::Speech, app, database).await?;
         return Ok(());
     }
     let unknown_session = message.contains("session option") && message.contains("unknown");
@@ -369,8 +490,8 @@ async fn negotiate(
         // other way. One step down the ladder is the environment -- the shape
         // Kokoro's own G2P reads.
         settings::learn_env(database, family)?;
-        stop(app).await;
-        ensure_started(app, database).await?;
+        stop(Purpose::Speech, app).await;
+        ensure_started_for(Purpose::Speech, app, database).await?;
         return Ok(());
     }
     if unknown_session
@@ -379,8 +500,8 @@ async fn negotiate(
         // Even an env family should not be receiving keys; if the spec gave
         // them names the engine does not take, that wiring goes too.
         settings::learn_env_clear(database, family);
-        stop(app).await;
-        ensure_started(app, database).await?;
+        stop(Purpose::Speech, app).await;
+        ensure_started_for(Purpose::Speech, app, database).await?;
         return Ok(());
     }
     Err(message)
@@ -392,13 +513,16 @@ async fn negotiate(
 /// `config::build` applied -- slug of the stem, with a `-N` suffix for a
 /// collision. Recomputed against the same list rather than cached, because the
 /// config and the list cannot disagree while both are derived from one walk.
-fn model_for_request(slug: &str) -> String {
+fn model_for_request(slug: &str, purpose: Purpose) -> String {
     let models = families::installed();
     let mut used: Vec<String> = Vec::new();
-    for model in models {
-        if model.task.is_none() {
-            continue;
-        }
+    // The same purpose filter the config applied: two servers number their own
+    // models from their own list, so a collision suffix must be counted per
+    // server or the id sent would name a different file.
+    for model in models
+        .into_iter()
+        .filter(|model| serves(purpose, model.task))
+    {
         let mut id = model.slug();
         if id.is_empty() {
             id = "model".to_string();
@@ -459,7 +583,110 @@ pub async fn transcribe(
     database: &Database,
 ) -> Result<String, String> {
     let path = selected.path.display().to_string();
-    ensure_started(app, database).await?;
+    ensure_started_for(Purpose::Speech, app, database).await?;
     let request = settings::request_options(database, &path, &selected.family);
-    client::transcribe(&model_for_request(&selected.slug()), wav, request).await
+    client::transcribe(
+        Purpose::Speech,
+        &model_for_request(&selected.slug(), Purpose::Speech),
+        wav,
+        request,
+    )
+    .await
+}
+
+/// Asks one wake model whether a window of audio holds its phrase.
+///
+/// The same three steps the two speech calls take -- start the server if it is
+/// not up, name the model the way the config names it, ask -- because a wake
+/// model is configured and addressed exactly like a voice. The model's stored
+/// options ride the request, so a `sherpa_kws` model's keyword rows and score
+/// names reach the engine from its settings page.
+pub async fn wake(
+    selected: &families::Model,
+    wav: &std::path::Path,
+    threshold: f32,
+    app: &tauri::AppHandle,
+    database: &Database,
+) -> Result<Vec<client::Detection>, String> {
+    ensure_started_for(Purpose::Wake, app, database).await?;
+    let path = selected.path.display().to_string();
+    let options = options_with_threshold(
+        settings::request_options(database, &path, &selected.family)
+            .and_then(|value| value.as_object().cloned()),
+        declares_threshold(&selected.family),
+        threshold,
+    );
+    client::wake(
+        Purpose::Wake,
+        &model_for_request(&selected.slug(), Purpose::Wake),
+        wav,
+        options,
+    )
+    .await
+}
+
+/// Whether a family's spec takes a plain `threshold` at request time.
+///
+/// `sherpa_kws` does not: its scores are `keywords_threshold` and
+/// `keywords_score`, set per model on its settings page. A name the family does
+/// not declare is a request the server is entitled to refuse, so the page's
+/// slider is only sent to the families that name it. No spec -- an engine that
+/// is not installed -- keeps the old behaviour rather than silently dropping
+/// the one option every shipped family understands.
+fn declares_threshold(family: &str) -> bool {
+    specs::for_family(family)
+        .map(|spec| spec.request.iter().any(|option| option.name == "threshold"))
+        .unwrap_or(true)
+}
+
+/// The request options one wake call carries.
+///
+/// Pure so the rule above is testable without a database or an installed
+/// engine: a family that names `threshold` gets the page's value, one that
+/// does not gets only what its settings page stored, and nothing at all is
+/// `None` rather than an empty object.
+fn options_with_threshold(
+    stored: Option<serde_json::Map<String, serde_json::Value>>,
+    takes_threshold: bool,
+    threshold: f32,
+) -> Option<serde_json::Value> {
+    let mut options = stored.unwrap_or_default();
+    if takes_threshold {
+        options.insert(
+            "threshold".to_string(),
+            serde_json::Value::from(threshold),
+        );
+    }
+    (!options.is_empty()).then(|| serde_json::Value::Object(options))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::options_with_threshold;
+
+    /// `sherpa_kws` names no `threshold`; its settings page carries the score
+    /// names instead. Sending one it does not declare is the request the
+    /// server would refuse.
+    #[test]
+    fn a_family_without_a_threshold_keeps_only_its_own_options() {
+        let stored = serde_json::json!({ "keywords": "▁HE Y ▁J A R V I S" });
+        let options = options_with_threshold(stored.as_object().cloned(), false, 0.5).unwrap();
+        assert_eq!(options["keywords"], stored["keywords"]);
+        assert!(options.get("threshold").is_none());
+    }
+
+    #[test]
+    fn a_family_that_names_a_threshold_gets_the_page_value() {
+        // The slider is an f32, so compare in the float it widens to rather
+        // than against a literal that has a different binary spelling.
+        let options = options_with_threshold(None, true, 0.4).unwrap();
+        assert_eq!(options["threshold"].as_f64(), Some(0.4f32 as f64));
+    }
+
+    /// An empty object is not the same request as no options at all: the
+    /// engine's own defaults answer when nothing is sent.
+    #[test]
+    fn nothing_stored_and_no_threshold_sends_nothing() {
+        assert!(options_with_threshold(None, false, 0.4).is_none());
+    }
 }

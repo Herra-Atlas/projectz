@@ -222,6 +222,24 @@ export default function RightPanel({ open, width, workspace, skill = null, onClo
   // every render while a local server is running.
   const lastServerModelIdRef = useRef<string | null>(null);
 
+  /**
+   * The llama session's title, from the model's own name.
+   *
+   * A short id (`3f9a1c2b`) names nothing a reader recognises; the file's name
+   * is what the Local models page showed them, so the terminal says the same
+   * thing. The id is the fallback for a model deleted while its server runs.
+   */
+  const titleForModel = useCallback(
+    (id: string): Promise<string> =>
+      invoke<{ id: string; name: string }[]>("local_models_list")
+        .then((models) => {
+          const name = models.find((model) => model.id === id)?.name;
+          return `llama-server · ${name ?? id.slice(0, 8)}`;
+        })
+        .catch(() => `llama-server · ${id.slice(0, 8)}`),
+    [],
+  );
+
   useEffect(() => {
     if (!serverModelId) {
       lastServerModelIdRef.current = null;
@@ -232,10 +250,12 @@ export default function RightPanel({ open, width, workspace, skill = null, onClo
     // opened in the meantime.
     if (lastServerModelIdRef.current === serverModelId) return;
     lastServerModelIdRef.current = serverModelId;
-    ensureServerSession(serverModelId, `llama-server · ${serverModelId.slice(0, 8)}`);
+    void titleForModel(serverModelId).then((title) =>
+      ensureServerSession(serverModelId, title),
+    );
     openView("terminal");
     onOpen();
-  }, [serverModelId, ensureServerSession, openView, onOpen]);
+  }, [serverModelId, ensureServerSession, titleForModel, openView, onOpen]);
 
   // Every attempt, including one whose start is refused at once. The request
   // carries its own key so two attempts at the same model both act, and a
@@ -245,53 +265,107 @@ export default function RightPanel({ open, width, workspace, skill = null, onClo
     if (!terminalRequest) return;
     if (handledTerminalKeyRef.current === terminalRequest.key) return;
     handledTerminalKeyRef.current = terminalRequest.key;
-    ensureServerSession(terminalRequest.id, `llama-server · ${terminalRequest.id.slice(0, 8)}`);
+    void titleForModel(terminalRequest.id).then((title) =>
+      ensureServerSession(terminalRequest.id, title),
+    );
     openView("terminal");
     onOpen();
-  }, [terminalRequest, ensureServerSession, openView, onOpen]);
+  }, [terminalRequest, ensureServerSession, titleForModel, openView, onOpen]);
 
-  // The audio.cpp server, learned the same way the llama server is -- from a
+  // The audio servers, learned the same way the llama server is -- from a
   // prop-like source that answers on mount. Only a ref is kept: what the panel
-  // needs is "did it change since the last event" so the terminal is not
-  // reopened on every heartbeat, not a value anything draws.
-  const audioRunningRef = useRef(false);
+  // needs is "did this purpose change since the last event" so the terminal is
+  // not reopened on every heartbeat, not a value anything draws. Two purposes,
+  // so one entry each.
+  const audioRunningRef = useRef<Record<string, boolean>>({});
+
+  type AudioPurpose = "speech" | "wake";
+
+  /** The audio session ids, and the purpose each one's process serves. */
+  const isAudioSession = (id: string) => id === "audiocpp" || id === "audiocpp-wake";
+  const audioPurpose = (id: string): AudioPurpose =>
+    id === "audiocpp-wake" ? "wake" : "speech";
+
+  /**
+   * One audio engine's session, named after the model it is holding.
+   *
+   * There are two engines -- speech and wake -- and each is its own process
+   * with its own resident model, so each gets its own row. Calling either one
+   * `audiocpp_server` said nothing a reader wants: the resident model --
+   * `open wake word`, `kokoro tts` -- is what they actually started.
+   * `ensureServerSession` updates an existing row's title, so this also renames
+   * the row a later load made.
+   */
+  const ensureAudioSession = useCallback(
+    async (purpose: AudioPurpose) => {
+      try {
+        const status = await invoke<{ running: boolean; loaded: string | null }>("audio_status", {
+          purpose,
+        });
+        if (status.running) {
+          ensureServerSession(
+            purpose === "wake" ? "audiocpp-wake" : "audiocpp",
+            `audio.cpp · ${status.loaded ?? "loading"}`,
+          );
+        }
+      } catch {
+        // A status that cannot be read is not worth a row nobody asked for.
+      }
+    },
+    [ensureServerSession],
+  );
 
   // The mount probe is what makes a session survive a closed panel: the start
   // event fired while this component was still mounted, but the *panel* was
-  // closed, and on reopen nothing would otherwise re-ensure the audiocpp
-  // session. Asking the backend once per mount covers every reopen.
+  // closed, and on reopen nothing would otherwise re-ensure the sessions.
+  // Asking the backend once per mount, per purpose, covers every reopen.
+  useEffect(() => {
+    void Promise.all([ensureAudioSession("speech"), ensureAudioSession("wake")]).catch(
+      () => undefined,
+    );
+  }, [ensureAudioSession]);
+
   useEffect(() => {
     let live = true;
-    void invoke<{ running: boolean }>("audio_status")
-      .then((status) => {
-        if (!live) return;
-        if (status.running) {
-          audioRunningRef.current = true;
-          ensureServerSession("audiocpp", "audiocpp_server · audio.cpp");
-        }
-      })
-      .catch(() => undefined);
+    const unlisten = listen<{ running: boolean; model: string; engine?: string }>(
+      "wake-state",
+      ({ payload }) => {
+        if (!live || !payload.running) return;
+        // A pack runs in the audio.cpp wake process, whose own start event is
+        // what makes its row. Only the ONNX path has no process, so only it
+        // needs a session of its own -- otherwise one engine appeared twice.
+        if (payload.engine !== "openwakeword") return;
+        ensureServerSession("openwakeword", `wake · ${payload.model}`);
+      },
+    );
     return () => {
       live = false;
+      void unlisten.then((stop) => stop());
     };
   }, [ensureServerSession]);
 
   useEffect(() => {
     let live = true;
-    const unlisten = listen<{ running: boolean }>("audio-server-state", ({ payload }) => {
-      if (!live || payload.running === audioRunningRef.current) return;
-      audioRunningRef.current = payload.running;
-      if (payload.running) {
-        ensureServerSession("audiocpp", "audiocpp_server · audio.cpp");
-        openView("terminal");
-        onOpen();
-      }
-    });
+    const unlisten = listen<{ running: boolean; purpose?: string }>(
+      "audio-server-state",
+      ({ payload }) => {
+        if (!live) return;
+        const purpose: AudioPurpose = payload.purpose === "wake" ? "wake" : "speech";
+        if (payload.running === audioRunningRef.current[purpose]) return;
+        audioRunningRef.current[purpose] = payload.running;
+        if (!payload.running) return;
+        // The event says it started, not what it is holding; the title is
+        // filled in from the status a moment later. The row is made here but
+        // the terminal is not opened: a server starting is not a request to
+        // read its log, and two purposes meant two tabs opened unasked.
+        void ensureAudioSession(purpose);
+      },
+    );
     return () => {
       live = false;
       void unlisten.then((stop) => stop());
     };
-  }, [ensureServerSession, openView, onOpen]);
+  }, [ensureAudioSession]);
 
   // A server terminal stays open for as long as its process answers so its
   // output is not lost behind a closed tab -- but closing the Terminal view is a
@@ -315,10 +389,9 @@ export default function RightPanel({ open, width, workspace, skill = null, onClo
       closeTerminalSession(id);
       return;
     }
-    const stopAndClose =
-      session.id === "audiocpp"
-        ? invoke("audio_stop")
-        : invoke("local_model_unload");
+    const stopAndClose = isAudioSession(session.id)
+      ? invoke("audio_stop", { purpose: audioPurpose(session.id) })
+      : invoke("local_model_unload");
     void Promise.resolve(stopAndClose)
       .then(() => closeTerminalSession(id))
       .catch((reason: unknown) =>
@@ -357,7 +430,9 @@ export default function RightPanel({ open, width, workspace, skill = null, onClo
       return;
     }
     void Promise.allSettled(servers.map((session) =>
-      session.id === "audiocpp" ? invoke("audio_stop") : invoke("local_model_unload"),
+      isAudioSession(session.id)
+        ? invoke("audio_stop", { purpose: audioPurpose(session.id) })
+        : invoke("local_model_unload"),
     )).then((results) => {
       const failed = results.find((result) => result.status === "rejected");
       if (failed && failed.status === "rejected") {

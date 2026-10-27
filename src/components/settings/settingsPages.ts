@@ -21,6 +21,10 @@ export type SettingsPage =
      and its own installs. */
   | { view: "stt" }
   | { view: "tts" }
+  /* Creating one voice: prompted takes, then a name. A sub page of the wake and
+     voice-recognition stage inside Speech to text, with its own back, because it
+     is a sequence rather than a setting. */
+  | { view: "voiceEnroll" }
   /* The audio.cpp engine, beside the two native ones: a second voice set and a
      second recognition set, installed the way the llama.cpp engines are. */
   | { view: "audio" }
@@ -28,11 +32,11 @@ export type SettingsPage =
      and recognition, so they belong to neither of the two lists. */
   | { view: "audioModels" }
   /* One audio.cpp model's options, carried by its model path and named by its
-     family's spec. */
-  | { view: "audioModel"; model: string }
+     family's spec. `from` says which list opened it, because the same record
+     is reached from the wake stage and from the audio models page. */
+  | { view: "audioModel"; model: string; from?: "wake" }
   | { view: "general" }
   | { view: "appearance" }
-  | { view: "assist" }
   | { view: "taste" }
   /* The Model section: what the assistant talks to, how hard it may work, and
      how context is kept inside the window. Four pages so a reader tuning them

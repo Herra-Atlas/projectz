@@ -191,7 +191,7 @@ impl LocalModelManager {
     ///
     /// The registry's list is right for the page that draws a model's size and
     /// quantisation, because that is what it has to inspect the file for. A caller
-    /// that only needs a name -- Assist naming its model, the settings page while
+    /// that only needs a name -- a feature naming its model, a settings page while
     /// the user is waiting -- must not pay for a `stat` and a header read per
     /// model, so this returns the database rows and nothing more. `inspect` is
     /// still what fills the header facts in; it is just not done here.

@@ -262,9 +262,9 @@ fn record_failure(
 
 /// Picks the first configured model that can actually answer.
 ///
-/// A local selection is held to the same rule as Assist: it must be the model
-/// that is already loaded. Loading one would evict the model the user is chatting
-/// with, which is a far worse outcome than a learning run that waits.
+/// A local selection is held to the same rule as every background task: it must
+/// be the model that is already loaded. Loading one would evict the model the user
+/// is chatting with, which is a far worse outcome than a learning run that waits.
 fn resolve_model(runtime: &AiRuntime, settings: &TasteSettings) -> Result<Resolved, String> {
     if !settings.has_model() {
         return Err("No taste model is selected.".to_string());

@@ -25,10 +25,13 @@ import { SettingsPageTitle } from "../../SettingsSection";
 export function AudioModelSettingsPage({
   modelPath,
   onBack,
+  backLabel = "Back to audio models",
   notify,
 }: {
   modelPath: string;
   onBack: () => void;
+  /** Where the bottom control says it returns to; a wake pack came from another page. */
+  backLabel?: string;
   notify: Notify;
 }) {
   const { spec, values, set, reset } = useAudioModel(
@@ -92,15 +95,20 @@ export function AudioModelSettingsPage({
         <h2 className="text-[17px] font-semibold tracking-tight">
           {spec.displayName ?? spec.name}
         </h2>
-        <button
-          type="button"
-          onClick={() => void test(modelPath)}
-          disabled={testing}
-          className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-md border border-[var(--line)] px-2.5 text-[12px] text-[var(--text)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--raised)] disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
-        >
-          <Play size={13} />
-          <span>{testing ? "Speaking…" : "Test voice"}</span>
-        </button>
+        {/* A test speaks one line through the model, so it belongs to a voice.
+            An ASR or wake family is opened here for its own options, and a
+            button that synthesised with them could only fail. */}
+        {isSpeech && (
+          <button
+            type="button"
+            onClick={() => void test(modelPath)}
+            disabled={testing}
+            className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-md border border-[var(--line)] px-2.5 text-[12px] text-[var(--text)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--raised)] disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+          >
+            <Play size={13} />
+            <span>{testing ? "Speaking…" : "Test voice"}</span>
+          </button>
+        )}
       </SettingsPageTitle>
       <article>
         {/* What the family is, before any option row: task tags first, then the
@@ -209,7 +217,7 @@ export function AudioModelSettingsPage({
           className="inline-flex min-h-9 items-center gap-2 rounded-md px-2.5 text-[13px] text-[var(--muted)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
         >
           <ArrowLeft size={14} />
-          Back to audio models
+          {backLabel}
         </button>
       </article>
     </>
@@ -391,6 +399,7 @@ function friendly(task: string): string {
   const words: Record<string, string> = {
     tts: "speech",
     asr: "recognition",
+    wake_word: "wake word",
     clone: "voice cloning",
     design: "voice design",
     edit: "editing",

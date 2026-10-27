@@ -6,8 +6,8 @@
 //! run every few days over conversations it has not read, and a rendered block
 //! that rides in the chat's leading system message. It is not a job: a job is an
 //! agent run with tools, a transcript and a sidebar row, while this is one
-//! non-streaming completion per batch with no tools at all. The title chain and
-//! Assist are the closer relatives.
+//! non-streaming completion per batch with no tools at all. The title chain is the
+//! closer relative.
 //!
 //! # Why the profile is operation-edit rather than rewritten
 //!

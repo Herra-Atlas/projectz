@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
@@ -31,7 +31,7 @@ export type AudioModelRow = {
   path: string;
   name: string;
   family: string;
-  task: "tts" | "asr" | "unknown";
+  task: "tts" | "asr" | "wake" | "unknown";
   size: number;
 };
 
@@ -99,13 +99,21 @@ export function useAudioEngine(onError: (message: string) => void): AudioEngine 
   const [installingWhisper, setInstallingWhisper] = useState(false);
   const [whisperProgress, setWhisperProgress] = useState<number | null>(null);
 
+  // Held, not depended on. A caller passing an inline arrow would otherwise give
+  // `refresh` a new identity on every render, the load effect would re-fire, and
+  // its own state writes would render again: a loop that costs an HTTP probe to
+  // the audio engine and two folder walks per frame for as long as the page is
+  // open. That was the page's constant CPU and its steady memory growth.
+  const report = useRef(onError);
+  report.current = onError;
+
   const refresh = useCallback(async () => {
     // Every engine's install state plus the server's, one round trip fired
     // together rather than three awaits, so the page paints once.
     const [rows, catalogList, status] = await Promise.allSettled([
       invoke<BuiltinEngine[]>("audio_engines_builtin"),
       invoke<CatalogEngine[]>("audio_engines", { refresh: false }),
-      invoke<AudioStatus>("audio_status"),
+      invoke<AudioStatus>("audio_status", { purpose: "speech" }),
     ]);
     const nextBuiltins = rows.status === "fulfilled" ? rows.value : null;
     const nextCatalog = catalogList.status === "fulfilled" ? catalogList.value : null;
@@ -120,12 +128,12 @@ export function useAudioEngine(onError: (message: string) => void): AudioEngine 
       snapshot = { builtins: nextBuiltins, catalog: nextCatalog, status: nextStatus };
     }
     if (rows.status === "rejected" && rows.reason != null)
-      onError(`Could not read the engines: ${String(rows.reason)}`);
+      report.current(`Could not read the engines: ${String(rows.reason)}`);
     // The catalog is remote metadata; failing there is a case rows-by-state
     // does not cover, so it is the one that reports.
     if (catalogList.status === "rejected")
-      onError(`Could not read the release catalog: ${String(catalogList.reason)}`);
-  }, [onError]);
+      report.current(`Could not read the release catalog: ${String(catalogList.reason)}`);
+  }, []);
 
   useEffect(() => {
     void refresh();
@@ -140,7 +148,7 @@ export function useAudioEngine(onError: (message: string) => void): AudioEngine 
     };
     void listen<EngineProgress>("engine-download-progress", (event) => {
       const { id, downloaded, total } = event.payload;
-      if (!id.startsWith("audiocpp-") && id !== "piper" && id !== "espeak") return;
+      if (!id.startsWith("audiocpp-") && id !== "piper" && id !== "espeak" && id !== "sherpa") return;
       setProgress(downloaded / Math.max(total, 1));
       if (downloaded >= total && total > 0) setProgress(null);
     }).then(track);
@@ -162,14 +170,14 @@ export function useAudioEngine(onError: (message: string) => void): AudioEngine 
       void invoke("audio_engines_install", { id })
         .then(() => refresh())
         .catch((reason: unknown) =>
-          onError(`The engine could not be installed: ${String(reason)}`),
+          report.current(`The engine could not be installed: ${String(reason)}`),
         )
         .finally(() => {
           setInstalling(null);
           setProgress(null);
         });
     },
-    [onError, refresh],
+    [refresh],
   );
 
   const installBuiltin = useCallback(
@@ -184,7 +192,7 @@ export function useAudioEngine(onError: (message: string) => void): AudioEngine 
       void invoke("audio_builtin_install", { id })
         .then(() => refresh())
         .catch((reason: unknown) =>
-          onError(`The engine could not be installed: ${String(reason)}`),
+          report.current(`The engine could not be installed: ${String(reason)}`),
         )
         .finally(() => {
           setInstallingWhisper(false);
@@ -193,7 +201,7 @@ export function useAudioEngine(onError: (message: string) => void): AudioEngine 
           setWhisperProgress(null);
         });
     },
-    [onError, refresh],
+    [refresh],
   );
 
   const uninstall = useCallback(
@@ -201,23 +209,23 @@ export function useAudioEngine(onError: (message: string) => void): AudioEngine 
       void invoke("audio_builtin_uninstall", { id })
         .then(() => void refresh())
         .catch((reason: unknown) =>
-          onError(`The engine could not be removed: ${String(reason)}`),
+          report.current(`The engine could not be removed: ${String(reason)}`),
         );
     },
-    [onError, refresh],
+    [refresh],
   );
 
   const start = useCallback(async () => {
-    await invoke<AudioStatus>("audio_start").then(setStatus).catch((reason: unknown) =>
-      onError(`The engine could not start: ${String(reason)}`),
+    await invoke<AudioStatus>("audio_start", { purpose: "speech" }).then(setStatus).catch((reason: unknown) =>
+      report.current(`The engine could not start: ${String(reason)}`),
     );
-  }, [onError]);
+  }, []);
 
   const stop = useCallback(async () => {
-    await invoke<AudioStatus>("audio_stop").then(setStatus).catch((reason: unknown) =>
-      onError(`The engine could not stop: ${String(reason)}`),
+    await invoke<AudioStatus>("audio_stop", { purpose: "speech" }).then(setStatus).catch((reason: unknown) =>
+      report.current(`The engine could not stop: ${String(reason)}`),
     );
-  }, [onError]);
+  }, []);
 
   return {
     builtins,

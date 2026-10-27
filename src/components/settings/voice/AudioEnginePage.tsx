@@ -5,7 +5,30 @@ import type { BuiltinEngine, CatalogEngine } from "../../../features/audio/useAu
 import { useAudioEngine } from "../../../features/audio/useAudioEngine";
 import type { Notify } from "../../../features/notifications/types";
 import { HoldToDelete } from "../../HoldToDelete";
-import { ANCHOR_ATTRIBUTE, Toggle } from "../../SettingsSection";
+import { ANCHOR_ATTRIBUTE } from "../../SettingsSection";
+import HelpMark from "../../HelpMark";
+
+/**
+ * What each engine is for, in one line.
+ *
+ * Kept here rather than on the backend rows because it is copy, not state: the
+ * engine list changes with what is installed, and a hint that travelled through
+ * the catalog would be one more thing to keep in step with nothing.
+ */
+const HINTS: Record<string, string> = {
+  audiocpp:
+    "One server for voices, speech recognition, wake words and voice activity. Voices and models install from the audio.cpp page.",
+  whisper:
+    "Transcribes with Whisper or Parakeet models, on Vulkan. Runs locally and only while a recording is being turned into text.",
+  piper:
+    "A small, fast voice set for reading replies aloud. CPU only — no GPU memory, no server.",
+  espeak:
+    "A phonemizer, not an engine: a few audio.cpp voices need it to turn text into sounds. It never speaks on its own.",
+  sherpa:
+    "Speaker embeddings for Voice recognition: turns a voice into numbers so a wake word can tell who spoke. Does not transcribe or speak.",
+  openwakeword:
+    "Runs wake-word models trained for openWakeWord, including the community collection. Installs ONNX Runtime plus the two models every word shares; each word is a small extra file.",
+};
 
 /**
  * The audio engine page: the executables, and nothing else.
@@ -26,7 +49,6 @@ export function AudioEnginePage({ notify }: { notify: Notify }) {
 
   const audiocpp = builtin("audiocpp");
   const installed = audiocpp?.installed === true;
-  const running = engine.status?.running ?? false;
 
   return (
     <article>
@@ -39,18 +61,23 @@ export function AudioEnginePage({ notify }: { notify: Notify }) {
           <Disc3 size={16} />
         </span>
         <div className="min-w-0 flex-1">
-          <h3 className="truncate text-sm font-medium">audio.cpp</h3>
+          <h3 className="flex items-center gap-1.5 truncate text-sm font-medium">
+            audio.cpp
+            {HINTS.audiocpp && <HelpMark hint={HINTS.audiocpp} />}
+          </h3>
           <p className="truncate text-xs text-[var(--quiet)]">
             {audiocpp === undefined ? (
               <span className="inline-block h-3 w-40 animate-pulse rounded bg-[var(--raised)]" />
             ) : installed ? (
-              `${audiocpp.version} · ${running ? "server running" : "server stopped"} · ${audiocpp.assets === 1 ? "1 model" : `${audiocpp.assets} models`}`
+              `${audiocpp.version} · ${audiocpp.assets === 1 ? "1 model" : `${audiocpp.assets} models`}`
             ) : (
               "Engine not installed · Vulkan"
             )}
           </p>
         </div>
-        {installed && <Toggle checked={running} onChange={(on) => void (on ? engine.start() : engine.stop())} label="audio.cpp server" />}
+        {/* No server switch: the engine starts when something needs it and
+            stops when that thing is switched off, so a switch here was a second
+            answer to a question the features already answer. */}
         {!installed && (
           <button
             type="button"
@@ -101,6 +128,8 @@ export function AudioEnginePage({ notify }: { notify: Notify }) {
           reports "0 models". */}
       <div className="mt-1 border-t border-[var(--line)]" />
       {builtin("espeak") && <EngineRow engine={builtin("espeak")!} hook={engine} />}
+      {builtin("sherpa") && <EngineRow engine={builtin("sherpa")!} hook={engine} />}
+      {builtin("openwakeword") && <EngineRow engine={builtin("openwakeword")!} hook={engine} />}
     </article>
   );
 }
@@ -145,13 +174,17 @@ function EngineRow({
   engine: BuiltinEngine;
   hook: ReturnType<typeof useAudioEngine>;
 }) {
-  const installing = hook.installingWhisper && engine.id === "whisper";
+  // Whisper runs on its own older event; every other pinned engine shares the
+  // catalog's. Keying the button on the *id* is what stops a second press
+  // landing on a row that is already downloading.
+  const installing =
+    engine.id === "whisper" ? hook.installingWhisper : hook.installing === engine.id;
   const percent =
     engine.id === "whisper"
       ? hook.whisperProgress === null
         ? null
         : Math.round(hook.whisperProgress * 100)
-      : engine.id === "piper" || engine.id === "espeak"
+      : engine.id === "piper" || engine.id === "espeak" || engine.id === "sherpa"
         ? hook.progress === null
           ? null
           : Math.round(hook.progress * 100)
@@ -166,17 +199,27 @@ function EngineRow({
         ? `${engine.version} · reads through it: Inflect, SanoTTS, Kitten voices`
         : "Optional — Inflect, SanoTTS, Kitten voices need it"
       : engine.installed
-        ? `${engine.version} · ${engine.assets === 1 ? `1 ${noun}` : `${engine.assets} ${noun}s`}`
+        ? `${engine.version} · ${
+            engine.assets === 1 ? `1 ${noun}` : `${engine.assets} ${noun}s`
+          }`
         : engine.id === "piper"
           ? "Engine not installed"
-          : "Engine not installed · Vulkan";
+          // The only engine that is optional by feature rather than by need:
+          // nothing else uses it, so its absence costs nothing until the
+          // Voice recognition page is asked for something.
+          : engine.id === "sherpa"
+            ? "Optional — only needed for voice recognition"
+            : "Engine not installed · Vulkan";
   return (
     <div className="flex min-h-[68px] items-center gap-2 px-4 py-3">
       <span className="grid size-9 shrink-0 place-items-center rounded-md text-[var(--muted)]">
         <Disc3 size={16} />
       </span>
       <div className="min-w-0 flex-1">
-        <h3 className="truncate text-sm font-medium">{engine.name}</h3>
+        <h3 className="flex items-center gap-1.5 truncate text-sm font-medium">
+          {engine.name}
+          {HINTS[engine.id] && <HelpMark hint={HINTS[engine.id]} />}
+        </h3>
         <p className="truncate text-xs text-[var(--quiet)]">{subtitle}</p>
       </div>
       {!engine.installed ? (

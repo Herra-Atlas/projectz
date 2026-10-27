@@ -26,7 +26,7 @@ type TasteSettingsPageProps = {
 /**
  * Settings for the learned profile.
  *
- * The page follows Assist's shape: the switch is the one control in the header,
+ * The page follows the settings shape: the switch is the one control in the header,
  * the main sections are the model and the schedule, the profile is the content,
  * and the run history lives behind a disclosure rather than occupying the page.
  * A fact is editable and deletable in place -- an inference about someone should

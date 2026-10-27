@@ -125,13 +125,8 @@ function withDefaults(saved: Partial<Preferences> | null | undefined): Preferenc
     const parsed = typeof value === "number" && Number.isFinite(value) ? value : fallback;
     return Math.min(max, Math.max(min, parsed));
   };
-  // The legacy "compaction" field: "off" turns the new switch off, anything
-  // else stays automatic. (The old fast/normal distinction is gone; depth is
-  // the target now.)
   const autoCompact =
-    typeof saved?.autoCompact === "boolean"
-      ? saved.autoCompact
-      : (saved as { compaction?: string } | undefined)?.compaction !== "off";
+    typeof saved?.autoCompact === "boolean" ? saved.autoCompact : DEFAULT_PREFERENCES.autoCompact;
   const cleanSelection = (value: ModelSelection | null | undefined): ModelSelection | null =>
     value && typeof value === "object" ? value : null;
   return {
@@ -172,13 +167,7 @@ export function usePreferences(enabled: boolean) {
     invoke<Partial<Preferences> | null>("database_get_setting", { key: PREFERENCES_KEY })
       .then((saved) => {
         if (!mounted) return;
-        // The original single-model shape is migrated withDefaults' legacy
-        // compaction read, so an existing choice is kept rather than discarded.
-        const legacy = (saved as { sessionTitleModel?: ModelSelection | null } | null)?.sessionTitleModel;
-        setPreferences(withDefaults({
-          ...(saved ?? {}),
-          sessionTitleModels: saved?.sessionTitleModels ?? (legacy ? [legacy] : []),
-        }));
+        setPreferences(withDefaults(saved));
       })
       .catch(() => undefined);
     return () => { mounted = false; };
