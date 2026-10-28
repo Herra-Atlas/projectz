@@ -355,9 +355,12 @@ mod tests {
 
     /// The read half of the same invariant: every observing tool runs unprompted
     /// from `auto_safe` up, so a new read tool cannot be added and then prompt.
-    /// `terminal_output` and `terminal_status` are `Read` and still excepted, for
-    /// the same reason: they belong to the process capability, not to reading the
-    /// workspace.
+    /// The `PROCESS_TOOLS` exception is checked here as well as below: those
+    /// tools only observe, but they reach the terminal capability, and asking is
+    /// what that capability means below `full`. Their `Effect` is a separate
+    /// question -- `terminal_output` and `terminal_status` are `Volatile`
+    /// because a poll's answer changes without anything being written, which says
+    /// nothing about whether polling needs permission.
     #[test]
     fn every_read_tool_is_auto_approved_at_auto_safe() {
         let registry = registry_for(ToolMode::Agent, true);

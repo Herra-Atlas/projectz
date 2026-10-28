@@ -192,6 +192,22 @@ fn run(arguments: Value, root: PathBuf) -> Result<String, String> {
         Some(positive_usize(arguments.get("limit"), "limit")?.unwrap_or(DEFAULT_READ_LINES));
 
     let resolved = resolve_within(&root, path)?;
+    // A ceiling before the read, not after it. A windowed read used to load and
+    // index the whole file even when it was going to return ten lines, so a large
+    // log cost its own size again in line offsets -- and a non-UTF-8 file was
+    // allocated in full before being refused. The refusal names the tools that can
+    // reach into a file this size, so it is a redirection rather than a dead end.
+    let meta = std::fs::metadata(&resolved)
+        .map_err(|error| format!("Could not read {}: {error}", resolved.display()))?;
+    if meta.len() > MAX_TEXT_BYTES {
+        return Err(format!(
+            "{} is {:.1} MB, over the {} MB limit for a text read. Use grep to find the lines you \
+             need, or run_terminal with Get-Content -Tail to read the end of it.",
+            resolved.display(),
+            meta.len() as f64 / (1024.0 * 1024.0),
+            MAX_TEXT_BYTES / (1024 * 1024)
+        ));
+    }
     let body = std::fs::read_to_string(&resolved).map_err(|error| {
         // Named for what it is, because the raw OS error reads as a bug in the
         // app: a UTF-16 or binary file is not text, and no amount of re-reading
@@ -219,6 +235,13 @@ fn run(arguments: Value, root: PathBuf) -> Result<String, String> {
 /// refusal.
 const DEFAULT_READ_LINES: usize = 2_000;
 
+/// Largest text file a read will load.
+///
+/// The same order as the document reader's ceiling, and far above any source file
+/// a person reads. Above it the whole-file index is the problem rather than the
+/// window: refusing names the two tools that can work inside it instead.
+const MAX_TEXT_BYTES: u64 = 32 * 1024 * 1024;
+
 /// List a directory's entries.
 pub const LIST_DIR: ToolSpec = ToolSpec {
     name: "list_dir",
@@ -240,9 +263,9 @@ pub const LIST_DIR: ToolSpec = ToolSpec {
     command_argument: None,
     execute: |arguments, context| {
         let _ = &context;
-        Box::pin(std::future::ready(
-            require_workspace().and_then(|root| list_dir(arguments, root)),
-        ))
+        super::blocking(move || {
+            require_workspace().and_then(|root| list_dir(arguments, root))
+        })
     },
 };
 

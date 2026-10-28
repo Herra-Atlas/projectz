@@ -66,7 +66,7 @@ export default function ActivityPanel({ steps, live, renderMarkdown, totalSecond
     setWasLive(live);
   }, [live, wasLive]);
 
-  const settled = useMemo(() => closeSuperseded(steps), [steps]);
+  const settled = useMemo(() => closeSuperseded(mergeRepeatedThoughts(steps)), [steps]);
   const rows = useMemo(() => buildRows(settled), [settled]);
   const totals = usePanelTotals(settled, live, totalSeconds);
 
@@ -521,6 +521,34 @@ function DiffBlock({ label, diff }: { label: string; diff: ToolDiff }) {
       </div>
     </figure>
   );
+}
+
+/**
+ * Drops a thought that is the same thought as the one before it.
+ *
+ * One thought used to be written down twice: the streamed row closed as the
+ * answer began, and the backend's whole-text segment then appended beside it
+ * because the row above was no longer `running`. The fold is fixed, but a
+ * transcript saved before that carries both copies, so the panel has to be
+ * able to read one -- and equal text in two adjacent thoughts is never two
+ * thoughts: a second stretch of thinking always follows a tool call or an
+ * answer, so it is never the next row.
+ *
+ * The row kept is the one with a duration. The duplicate is the copy that lost
+ * it, so keeping the first and its measured figure is what makes an old reply
+ * read like a new one.
+ */
+function mergeRepeatedThoughts(steps: ActivityStep[]): ActivityStep[] {
+  const merged: ActivityStep[] = [];
+  for (const step of steps) {
+    const previous = merged[merged.length - 1];
+    if (step.kind === "thought" && previous?.kind === "thought" && previous.text === step.text) {
+      if ((previous.seconds ?? 0) < (step.seconds ?? 0)) merged[merged.length - 1] = step;
+      continue;
+    }
+    merged.push(step);
+  }
+  return merged.length === steps.length ? steps : merged;
 }
 
 /**

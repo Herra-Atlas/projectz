@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import type { ChatMode } from "../../features/chat/chatMode";
 import { useWeather } from "../../features/weather/useWeather";
 import type { WeatherCondition } from "../../features/weather/weather";
@@ -84,12 +85,29 @@ export default function Welcome({ hasModel, mode, userName }: WelcomeProps) {
       ? "Ask for anything. The agent can create groundbreaking things that you won't."
       : "Ask a question. Hopefully I can answer whatever you need.";
 
+  // The hint changes while the screen is up -- switching mode, or a model being
+  // picked -- so the line re-enters with the same lift instead of swapping its
+  // words in place. The stagger belongs to the screen's own arrival: on a change
+  // this is already the second line the eye is on, and 110ms of nothing would
+  // read as a stutter.
+  //
+  // A ref rather than state, because flipping it must not re-render: a changed
+  // `animation-delay` retimes the animation that is already running.
+  const arrived = useRef(false);
+  useEffect(() => {
+    arrived.current = true;
+  }, []);
+
   return (
     <section className="mx-auto flex w-full max-w-3xl flex-1 flex-col items-center justify-center px-4 pb-20 text-center" aria-labelledby="welcome-title">
       <h2 id="welcome-title" className="pz-welcome-in text-[34px] font-medium leading-[1.15] tracking-[-0.03em] text-[var(--text)]">
         {greeting}
       </h2>
-      <p className="pz-welcome-in mt-3.5 text-[14px] leading-6 text-[var(--muted)]" style={{ animationDelay: "110ms" }}>
+      <p
+        key={hint}
+        className="pz-welcome-in mt-3.5 text-[14px] leading-6 text-[var(--muted)]"
+        style={arrived.current ? undefined : { animationDelay: "110ms" }}
+      >
         {hint}
       </p>
     </section>

@@ -44,9 +44,9 @@ pub const GLOB: ToolSpec = ToolSpec {
     command_argument: None,
     execute: |arguments, context| {
         let _ = &context;
-        Box::pin(std::future::ready(
-            super::file::require_workspace().and_then(|root| find(arguments, root)),
-        ))
+        super::blocking(move || {
+            super::file::require_workspace().and_then(|root| find(arguments, root))
+        })
     },
 };
 
@@ -55,7 +55,7 @@ pub const GLOB: ToolSpec = ToolSpec {
 /// A ceiling rather than a page size: a model that matched more than this is
 /// holding a pattern too broad to act on, and a shorter, newest-first list is more
 /// useful than the whole set. The count says how many there were.
-const MAX_RESULTS: usize = 500;
+const MAX_RESULTS: usize = 100;
 
 fn find(arguments: Value, root: PathBuf) -> Result<String, String> {
     let raw = arguments

@@ -69,17 +69,36 @@ pub const SKILL_READ: ToolSpec = ToolSpec {
 /// text it gets, so it is written as a trigger -- "when to read this" -- rather
 /// than a summary of what is inside.
 ///
-/// **Built per request from the enabled set, and constant across a conversation.**
-/// Reading a skill is a tool call, which grows the conversation rather than this
-/// prefix, so the catalogue does not move when one is applied. Only editing or
-/// disabling a skill changes it, which is the honest cost of the index being here
-/// at all.
+/// **Constant across a conversation, and cached until the folders move.** Reading
+/// a skill is a tool call, which grows the conversation rather than this prefix,
+/// so the catalogue does not move when one is applied. Editing or adding a skill
+/// does move it -- and the folder's own timestamps are what notice, so the
+/// catalogue is rebuilt then and reused byte-for-byte in between. That keeps the
+/// provider's prefix cache intact, which a per-request rebuild could not.
 ///
 /// `None` when there are no skills, or when the run has no session to read them
 /// for. Returning an empty string instead would put a paragraph about having no
 /// skills into every request, which is a claim about the world rather than an
 /// instruction.
 pub fn index() -> Option<String> {
+    // Two stats per skill, and no file contents: enough to know whether the last
+    // rendered catalogue still describes this folder. See `INDEX`.
+    let stamps = stamps();
+    let Ok(mut cache) = INDEX.lock() else {
+        return render_index();
+    };
+    if let Some((known, rendered)) = cache.as_ref() {
+        if *known == stamps {
+            return rendered.clone();
+        }
+    }
+    let rendered = render_index();
+    *cache = Some((stamps, rendered.clone()));
+    rendered
+}
+
+/// The rendered catalogue, built from the folders as they are now.
+fn render_index() -> Option<String> {
     let skills = crate::skills::list().ok()?;
     if skills.is_empty() {
         return None;
@@ -113,6 +132,55 @@ script with `skill_run` only when the skill says to. Read the closest match: one
 the right number, and each further one costs a round trip. If none apply, ignore this list and get \
 on with the task.\n\n{listed}"
     ))
+}
+
+/// One folder's identity: which folder, and the two timestamps that decide whether
+/// its catalogue line can have changed.
+#[derive(PartialEq, Eq)]
+struct Stamp {
+    folder: std::path::PathBuf,
+    /// Changes when a file is added to or removed from the folder -- a script, a
+    /// reference -- which is what moves the file count.
+    directory: Option<std::time::SystemTime>,
+    /// Changes when the trigger or the body is edited.
+    header: Option<std::time::SystemTime>,
+}
+
+/// The catalogue the last request used, and the folder state it described.
+///
+/// The index is part of the system prefix, so rebuilding it per request meant a
+/// `read_dir`, one open plus a 64 KB buffer per `SKILL.md`, and a recursive stat
+/// walk per skill -- on every round of every run and every sub-agent, and on the
+/// async path. The catalogue is a function of these timestamps and nothing else,
+/// so comparing them is the whole invalidation story: no list of call sites to
+/// keep in step, and an edit made in Explorer is seen like any other.
+static INDEX: std::sync::Mutex<Option<(Vec<Stamp>, Option<String>)>> = std::sync::Mutex::new(None);
+
+fn stamps() -> Vec<Stamp> {
+    let root = crate::skills::root();
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut stamps = entries
+        .flatten()
+        .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+        .map(|entry| {
+            let folder = entry.path();
+            let directory = entry.metadata().ok().and_then(|meta| meta.modified().ok());
+            let header = std::fs::metadata(folder.join(crate::skills::SKILL_FILE))
+                .ok()
+                .and_then(|meta| meta.modified().ok());
+            Stamp {
+                folder,
+                directory,
+                header,
+            }
+        })
+        .collect::<Vec<_>>();
+    // Sorted so the comparison is about the folders, not the order the filesystem
+    // happened to hand them back.
+    stamps.sort_by(|left, right| left.folder.cmp(&right.folder));
+    stamps
 }
 
 /// A trimmed, non-empty optional field as a slice, or nothing.

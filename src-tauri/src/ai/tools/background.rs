@@ -31,8 +31,10 @@ use tokio::process::Child;
 /// Most output kept per process.
 ///
 /// A cap because a runaway command can print without limit, and the reader task
-/// has no natural end. Past this the buffer stops growing and says so, rather than
-/// holding gigabytes for a command the user has forgotten about.
+/// has no natural end. Past this the oldest bytes are dropped rather than the
+/// newest: a dev server's most recent lines are what a reader (and the model) is
+/// asking about, and a buffer that froze at the cap answered "No new output" for
+/// the rest of the process's life. See [`Buffer::push`].
 const MAX_BUFFER_BYTES: usize = 256 * 1024;
 
 /// Most finished commands kept in the table before the oldest are dropped.
@@ -50,18 +52,59 @@ fn registry() -> &'static Mutex<HashMap<String, Process>> {
 }
 
 /// Accumulated output, shared with the reader tasks.
+///
+/// A rolling window, not a prefix: once the cap is reached the oldest bytes are
+/// discarded and `dropped` records how many, so a reader's position stays an
+/// absolute offset into the stream rather than an index into a buffer that moves.
 #[derive(Default)]
 struct Buffer {
     bytes: Vec<u8>,
-    /// The cap was reached and later output was dropped.
+    /// Bytes discarded from the front to stay under the cap.
+    dropped: u64,
+    /// Something was discarded, so a read can say the beginning is gone.
     truncated: bool,
+}
+
+impl Buffer {
+    /// Appends, then trims the front back to the cap.
+    fn push(&mut self, chunk: &[u8]) {
+        if chunk.is_empty() {
+            return;
+        }
+        self.bytes.extend_from_slice(chunk);
+        if self.bytes.len() > MAX_BUFFER_BYTES {
+            let excess = self.bytes.len() - MAX_BUFFER_BYTES;
+            self.bytes.drain(..excess);
+            self.dropped += excess as u64;
+            self.truncated = true;
+        }
+    }
+
+    /// Where a read starting at absolute offset `cursor` begins in `bytes`.
+    ///
+    /// A cursor older than the window is clamped to the first byte still held:
+    /// the bytes it pointed at are gone, and the honest answer is the oldest
+    /// output there is rather than a gap.
+    fn start_for(&self, cursor: usize) -> usize {
+        cursor
+            .saturating_sub(self.dropped as usize)
+            .min(self.bytes.len())
+    }
+
+    /// The absolute offset just past the last byte held.
+    fn end(&self) -> usize {
+        self.dropped as usize + self.bytes.len()
+    }
 }
 
 /// One running or finished background command.
 struct Process {
     command: String,
     buffer: Arc<Mutex<Buffer>>,
-    /// How much of `buffer` has already been handed to the model.
+    /// Absolute offset of the first byte not yet handed to the model.
+    ///
+    /// Absolute rather than an index into `buffer`, because the front of that
+    /// buffer moves once the cap is reached. See [`Buffer`].
     cursor: usize,
     /// Set once `try_wait` reports the child has exited.
     status: Option<String>,
@@ -132,25 +175,30 @@ pub fn read_output(id: &str, tail: Option<usize>) -> Result<String, String> {
     let process = processes.get_mut(id).ok_or_else(|| unknown(id))?;
     refresh_status(process);
 
-    let (chunk, truncated, advanced) = {
+    let (chunk, truncated, next_cursor) = {
         let buffer = process.buffer.lock().map_err(|error| error.to_string())?;
         match tail {
             Some(count) => {
                 let start = buffer.bytes.len().saturating_sub(count);
-                (buffer.bytes[start..].to_vec(), buffer.truncated, 0)
+                (buffer.bytes[start..].to_vec(), buffer.truncated, None)
             }
             None => {
-                let cursor = process.cursor.min(buffer.bytes.len());
-                let chunk = buffer.bytes[cursor..].to_vec();
-                let advanced = chunk.len();
-                (chunk, buffer.truncated, advanced)
+                let start = buffer.start_for(process.cursor);
+                (
+                    buffer.bytes[start..].to_vec(),
+                    buffer.truncated,
+                    Some(buffer.end()),
+                )
             }
         }
     };
-    // Advanced after the buffer lock is dropped: the cursor and the bytes live in
-    // different locks, so moving one while the other is held would borrow `process`
-    // twice.
-    process.cursor += advanced;
+    // The next read resumes at the absolute end of the stream, not at "cursor plus
+    // what was copied": a window that discarded its front would otherwise leave the
+    // cursor short by exactly what was dropped, and the same bytes would arrive
+    // again.
+    if let Some(next) = next_cursor {
+        process.cursor = next;
+    }
 
     let header = match (&process.status, tail) {
         (Some(status), _) => format!("`{id}` ({}) has finished: {status}.", process.command),
@@ -169,9 +217,10 @@ pub fn read_output(id: &str, tail: Option<usize>) -> Result<String, String> {
         out.push_str(&body);
     }
     if truncated {
-        out.push_str(&format!(
-            "\n\n[output was cut at {MAX_BUFFER_BYTES} bytes; this command prints too much to keep]"
-        ));
+        out.push_str(
+            "\n\n[older output was dropped to keep this command's buffer at 256 KB; what is shown \
+             is the most recent output]",
+        );
     }
     Ok(out)
 }
@@ -185,12 +234,13 @@ pub fn status(id: &str) -> Result<String, String> {
     let process = processes.get_mut(id).ok_or_else(|| unknown(id))?;
     refresh_status(process);
 
-    let buffered = process
+    // Absolute figures: the buffer's front moves once the cap is reached, so its
+    // length alone would undercount everything the command has printed.
+    let (buffered, unread) = process
         .buffer
         .lock()
-        .map(|buffer| buffer.bytes.len())
-        .unwrap_or(0);
-    let unread = buffered.saturating_sub(process.cursor);
+        .map(|buffer| (buffer.end(), buffer.end().saturating_sub(process.cursor)))
+        .unwrap_or((0, 0));
     let pid = process
         .child
         .id()
@@ -201,7 +251,7 @@ pub fn status(id: &str) -> Result<String, String> {
         None => "is running".to_string(),
     };
     Ok(format!(
-        "`{id}` ({}) {state}.{pid}\n{buffered} bytes of output buffered, {unread} unread.",
+        "`{id}` ({}) {state}.{pid}\n{buffered} bytes of output so far, {unread} unread.",
         process.command
     ))
 }
@@ -283,7 +333,7 @@ fn reap_finished(processes: &mut HashMap<String, Process>) {
         let fully_read = process
             .buffer
             .lock()
-            .map(|buffer| process.cursor >= buffer.bytes.len())
+            .map(|buffer| process.cursor >= buffer.end())
             .unwrap_or(false);
         !fully_read
     });
@@ -330,11 +380,7 @@ where
                     let Ok(mut buffer) = buffer.lock() else {
                         break;
                     };
-                    if buffer.bytes.len() < MAX_BUFFER_BYTES {
-                        buffer.bytes.extend_from_slice(&chunk[..read]);
-                    } else {
-                        buffer.truncated = true;
-                    }
+                    buffer.push(&chunk[..read]);
                 }
             }
         }
@@ -428,5 +474,34 @@ mod tests {
         assert!(status("term-nope")
             .expect_err("unknown")
             .contains("restart"));
+    }
+
+    /// The window keeps the newest bytes, and a cursor still means one place.
+    ///
+    /// Past the cap the buffer used to freeze, so every later read reported "No
+    /// new output" while the process was still printing exactly what the model was
+    /// waiting for. Dropping from the front is what keeps the tool useful for a
+    /// long-running server; the absolute cursor is what stops the kept bytes being
+    /// handed over twice.
+    #[test]
+    fn the_buffer_rolls_and_keeps_the_cursor_absolute() {
+        let mut buffer = Buffer::default();
+        buffer.push(b"first");
+        assert_eq!(buffer.end(), 5);
+        assert_eq!(buffer.start_for(0), 0);
+
+        buffer.push(&vec![b'x'; MAX_BUFFER_BYTES]);
+        let dropped = buffer.dropped as usize;
+        assert!(buffer.truncated, "the beginning went, and it is reported");
+        assert_eq!(dropped, 5, "exactly what was older than the window");
+        assert_eq!(buffer.bytes.len(), MAX_BUFFER_BYTES);
+        assert_eq!(buffer.end(), 5 + MAX_BUFFER_BYTES);
+
+        // A cursor that pointed at bytes now gone reads from the oldest held byte
+        // rather than panicking or claiming a gap.
+        assert_eq!(buffer.start_for(0), 0);
+        // A cursor at the end has nothing new, which is what `terminal_status`
+        // and the reaper both ask.
+        assert_eq!(buffer.start_for(buffer.end()), buffer.bytes.len());
     }
 }

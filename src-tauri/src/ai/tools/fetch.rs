@@ -80,7 +80,7 @@ async fn fetch(arguments: Value, context: ToolContext) -> Result<String, String>
 
     let client = KestrelClient::new().map_err(|error| error.to_string())?;
     let pages = client
-        .fetch_all(&[url.clone()], &super::websearch::fetch_options())
+        .fetch_all(&[url.clone()], &super::websearch::page_options())
         .await
         .map_err(|error| format!("Could not fetch {url}: {error}"))?;
 
@@ -102,8 +102,8 @@ async fn fetch(arguments: Value, context: ToolContext) -> Result<String, String>
         return Err(format!("{url} loaded but contained no text."));
     }
     // Cancellation is only checked after the fetch: the fetch itself takes up to
-    // the timeout in `fetch_options`, and a tool that abandons that would
-    // cancel the request for no benefit to the user.
+    // the timeout in `page_options`, and a tool that abandons that would cancel
+    // the request for no benefit to the user.
     if context.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
         return Err("Cancelled".into());
     }

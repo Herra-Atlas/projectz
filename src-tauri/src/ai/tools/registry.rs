@@ -187,6 +187,30 @@ impl std::fmt::Debug for ToolContext {
 pub type ToolFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'static>>;
 
+/// Runs a synchronous tool body away from the async workers.
+///
+/// Most file tools are plain `std::fs` work wearing an async signature. Building
+/// their future with `std::future::ready` evaluates the work immediately, on
+/// whichever runtime worker happens to poll the call -- so a directory walk holds
+/// that worker for its whole duration and everything else it carries (streaming
+/// deltas, database writes, another tool) waits behind it. `spawn_blocking` is the
+/// pool that exists for exactly this, and it keeps every tool body unchanged.
+pub fn blocking<F>(work: F) -> ToolFuture
+where
+    F: FnOnce() -> Result<String, String> + Send + 'static,
+{
+    Box::pin(async move {
+        match tokio::task::spawn_blocking(work).await {
+            Ok(result) => result,
+            // The worker panicked. Reported as this tool's failure rather than
+            // taken as a run-ending error, for the same reason every other tool
+            // error is: the model can act on it, and the conversation should not
+            // die for one call.
+            Err(error) => Err(format!("The tool stopped unexpectedly: {error}")),
+        }
+    })
+}
+
 impl ToolSpec {
     /// The parsed argument schema.
     ///

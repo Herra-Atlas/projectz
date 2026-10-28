@@ -245,10 +245,8 @@ pub async fn stream_chat(
     on_event: Arc<dyn Fn(ChatEvent) + Send + Sync>,
     on_search: Arc<dyn Fn(crate::websearch::WebSearchOutput) + Send + Sync>,
 ) -> Result<(String, Value), String> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|error| error.to_string())?;
+    // Shared across every run and every internal completion: see `http_client`.
+    let client = http_client();
     let payload = prepare_messages(messages, attachments)?;
     // Filtered by the run's access set before anything else sees it, so a
     // capability this run does not hold is never advertised and cannot be asked
@@ -394,7 +392,7 @@ pub async fn stream_chat(
         }
         emit_status(run_id, "thinking", &on_event);
         let (tool_calls, content, round_usage, reasoning_text) = stream_completion(
-            &client,
+            client,
             endpoint,
             model,
             &conversation,
@@ -535,7 +533,7 @@ pub async fn stream_chat(
     emit_status(run_id, "thinking", &on_event);
     conversation.push(budget_notice(0));
     let (_, content, round_usage, reasoning_text) = stream_completion(
-        &client,
+        client,
         endpoint,
         model,
         &conversation,
@@ -675,10 +673,7 @@ async fn summarise_dropped(
         return None;
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(timeout_secs.max(1)))
-        .build()
-        .ok()?;
+    let client = http_client();
     // A bearer header when the endpoint has a key, nothing when it does not --
     // the same shape the streaming call uses for the same endpoint.
     let mut request = client
@@ -686,6 +681,8 @@ async fn summarise_dropped(
             "{}/chat/completions",
             endpoint.base_url.trim_end_matches('/')
         ))
+        // Per request, since the pool is shared: a summary has its own budget.
+        .timeout(std::time::Duration::from_secs(timeout_secs.max(1)))
         .json(&serde_json::json!({
             "model": model,
             "messages": [
@@ -1226,6 +1223,24 @@ const REQUEST_ATTEMPTS: u32 = 2;
 /// How long to wait before the retry, so a moment's fault has a chance to clear.
 const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// One connection pool for every provider request in the app.
+///
+/// A `reqwest::Client` owns its connection pool, TLS state and DNS cache. Building
+/// one per run -- and one more per internal completion -- meant opening a fresh
+/// connection (and, for a remote provider, paying a full TLS handshake) before
+/// every reply. The only per-call thing about the old clients was a timeout, and
+/// that now rides the request. `connect_timeout` stays here because it is about the
+/// pool, not about one call.
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .build()
+            .expect("a client with only a connect timeout cannot fail to build")
+    })
+}
+
 /// Sends one chat request, retrying once before a failure is final.
 ///
 /// **Only the request is retried, never a stream that has already begun.** This
@@ -1242,12 +1257,19 @@ const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 async fn send_request(
     client: &reqwest::Client,
     endpoint: &Endpoint,
-    body: &Value,
+    body: &impl serde::Serialize,
+    timeout: Option<std::time::Duration>,
 ) -> Result<reqwest::Response, String> {
     let url = crate::ai::remote::types::chat_url(&endpoint.base_url);
     let mut last_error = String::new();
     for attempt in 1..=REQUEST_ATTEMPTS {
-        let mut request = client.post(&url).json(body);
+        let mut request = client.post(&url);
+        // Per request rather than on the client: the pool is shared, and a title
+        // completion and a reply have no business sharing one budget.
+        if let Some(timeout) = timeout {
+            request = request.timeout(timeout);
+        }
+        let mut request = request.json(body);
         if !endpoint.api_key.trim().is_empty() {
             request = request.bearer_auth(&endpoint.api_key);
         }
@@ -1271,6 +1293,34 @@ async fn send_request(
     Err(last_error)
 }
 
+/// The streaming request, borrowed rather than copied.
+///
+/// The `json!` macro this replaced built an owned `Value` from `messages` and
+/// `tools`, which meant a deep copy of the whole conversation and of the ~40 KB
+/// tool array on **every round** of every run, then serialized the copy. A
+/// borrowed struct is serialized straight to the wire, so a request costs one
+/// serialize and no allocation proportional to the context.
+#[derive(serde::Serialize)]
+struct StreamBody<'a> {
+    model: &'a str,
+    messages: &'a [Value],
+    stream: bool,
+    stream_options: StreamOptions,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_control: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<&'a Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<&'static str>,
+}
+
+#[derive(serde::Serialize)]
+struct StreamOptions {
+    include_usage: bool,
+}
+
 async fn stream_completion(
     client: &reqwest::Client,
     endpoint: &Endpoint,
@@ -1283,25 +1333,24 @@ async fn stream_completion(
     enable_reasoning_control: bool,
     on_event: &Arc<dyn Fn(ChatEvent) + Send + Sync>,
 ) -> Result<(Vec<ToolCall>, String, Value, String), String> {
-    let mut body = json!({"model": model, "messages": messages, "stream": true, "stream_options": {"include_usage": true}});
     // Passed through exactly as the provider spelled it. The field is only added
     // when there is a level to send, because a model that takes no reasoning
     // control rejects the field as firmly as it rejects a wrong value.
-    if let Some(value) = reasoning.wire_value() {
-        body["reasoning_effort"] = Value::String(value.to_string());
-    }
-    if enable_reasoning_control {
-        body["reasoning_control"] = Value::Bool(true);
-    }
-    if let Some(tools) = tools {
-        body["tools"] = tools.clone();
-        body["tool_choice"] = Value::String("auto".into());
-    }
+    let body = StreamBody {
+        model,
+        messages,
+        stream: true,
+        stream_options: StreamOptions { include_usage: true },
+        reasoning_effort: reasoning.wire_value(),
+        reasoning_control: enable_reasoning_control.then_some(true),
+        tools,
+        tool_choice: tools.map(|_| "auto"),
+    };
     info!(run_id, endpoint = %endpoint.name, model, messages = messages.len(), "remote stream start");
     // The one retry lives in here, so a transient provider fault on any round of
     // any run -- a reply, a job, a sub-agent -- is absorbed before it becomes a
     // failure someone has to hear about.
-    let response = send_request(client, endpoint, &body).await?;
+    let response = send_request(client, endpoint, &body, None).await?;
 
     let mut bytes = response.bytes_stream();
     let mut byte_buffer = Vec::new();
@@ -1627,10 +1676,7 @@ pub async fn complete_once_raw(
     max_tokens: Option<u32>,
     thinking: Thinking,
 ) -> Result<(String, ReportedUsage, Value), String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .map_err(|error| error.to_string())?;
+    let client = http_client();
     // No `reasoning_effort` here on purpose. The field is not portable: one
     // provider expects `none` under a different key, another accepts `off` only
     // for models that can disable thinking, and a third rejects it outright.
@@ -1653,7 +1699,15 @@ pub async fn complete_once_raw(
     }
     // Same single retry as the streaming path: a short internal completion can
     // meet a transient provider fault just as a reply can.
-    let response = send_request(&client, endpoint, &body).await?;
+    let response = send_request(
+        client,
+        endpoint,
+        &body,
+        // The old per-call client carried this; the shared pool does not, so it
+        // rides the request instead.
+        Some(std::time::Duration::from_secs(60)),
+    )
+    .await?;
     let payload: Value = response
         .json()
         .await

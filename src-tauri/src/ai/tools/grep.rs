@@ -78,9 +78,9 @@ pub const GREP: ToolSpec = ToolSpec {
     command_argument: None,
     execute: |arguments, context| {
         let _ = &context;
-        Box::pin(std::future::ready(
-            super::file::require_workspace().and_then(|root| grep(arguments, root)),
-        ))
+        super::blocking(move || {
+            super::file::require_workspace().and_then(|root| grep(arguments, root))
+        })
     },
 };
 
@@ -111,12 +111,12 @@ enum OutputMode {
     Count,
 }
 
-/// A compiled pattern: a regex, or the literal it fell back to.
+/// A compiled pattern: a regex, or the escaped literal it fell back to.
 enum Matcher {
     Regex(regex::Regex),
-    /// Lowercased when the search is case-insensitive, so the comparison is on
-    /// lowercased text either way.
-    Literal(String),
+    /// The pattern escaped and compiled, so the fallback obeys exactly the same
+    /// case rule as the real pattern and needs no per-line allocation.
+    Literal(regex::Regex),
 }
 
 impl Matcher {
@@ -124,7 +124,7 @@ impl Matcher {
     fn matches(&self, line: &str) -> bool {
         match self {
             Matcher::Regex(pattern) => pattern.is_match(line),
-            Matcher::Literal(needle) => line.to_lowercase().contains(needle),
+            Matcher::Literal(pattern) => pattern.is_match(line),
         }
     }
 
@@ -217,11 +217,21 @@ fn build_matcher(pattern: &str, case_insensitive: bool) -> Matcher {
     builder.case_insensitive(case_insensitive);
     match builder.build() {
         Ok(compiled) => Matcher::Regex(compiled),
-        Err(_) => Matcher::Literal(if case_insensitive {
-            pattern.to_lowercase()
-        } else {
-            pattern.to_string()
-        }),
+        Err(_) => {
+            // Escaped, then compiled with the same case setting: the fallback is a
+            // regex that can only match the text literally, so a case-sensitive
+            // search stays case-sensitive on this path too. The previous shape
+            // lowercased the line but not the needle, so `fn Main(` matched
+            // nothing in a file that contained it -- the one result a fallback
+            // must never get wrong.
+            let mut literal = regex::RegexBuilder::new(&regex::escape(pattern));
+            literal.case_insensitive(case_insensitive);
+            Matcher::Literal(
+                literal
+                    .build()
+                    .expect("an escaped literal is always a valid pattern"),
+            )
+        }
     }
 }
 
@@ -277,11 +287,21 @@ impl Pattern {
     }
 
     pub(crate) fn allows(&self, relative: &str) -> bool {
+        // `require_literal_separator` is the difference between a filter and a
+        // suggestion. With the crate's default, `*` matches `/` as well, so
+        // `src/*.ts` also matched `src/a/b/c.ts`: a glob meant to narrow a search
+        // widened it instead. A leading dot is still allowed, because the walk
+        // visits dotfiles and `*` has always meant them.
+        let options = glob::MatchOptions {
+            case_sensitive: true,
+            require_literal_separator: true,
+            require_literal_leading_dot: false,
+        };
         if self.on_path {
-            self.compiled.matches(relative)
+            self.compiled.matches_with(relative, options)
         } else {
             let name = relative.rsplit('/').next().unwrap_or(relative);
-            self.compiled.matches(name)
+            self.compiled.matches_with(name, options)
         }
     }
 }
@@ -580,6 +600,26 @@ mod tests {
     }
 
     #[test]
+    fn a_literal_fallback_keeps_the_case_rule() {
+        let root = root_with(&[("a.rs", "fn Main() {\n}")]);
+        // The unclosed group cannot compile, so this is the literal path -- and it
+        // contains a capital, which the old fold made impossible to match.
+        let exact = grep(json!({ "pattern": "fn Main(" }), root.clone()).expect("grep");
+        assert!(exact.contains("a.rs:1:"), "{exact}");
+
+        let folded = grep(
+            json!({ "pattern": "fn MAIN(", "case_insensitive": true }),
+            root.clone(),
+        )
+        .expect("grep");
+        assert!(folded.contains("a.rs:1:"), "{folded}");
+
+        let miss = grep(json!({ "pattern": "fn Other(" }), root.clone()).expect("grep");
+        assert!(miss.contains("No matches"), "{miss}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn case_insensitive_search_ignores_case_only_when_asked() {
         let root = root_with(&[("a.rs", "const NAME: &str = \"x\";")]);
         assert!(grep(json!({ "pattern": "name" }), root.clone())
@@ -645,6 +685,21 @@ mod tests {
         .expect("grep");
         assert!(subtree.contains("src/b.txt"), "{subtree}");
         assert!(!subtree.contains("a.rs"), "{subtree}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A `*` that crosses a separator is not a filter.
+    ///
+    /// The crate default lets `*` match `/`, which made `src/*.ts` behave like
+    /// `src/**/*.ts` -- a caller narrowing a search silently got hits from
+    /// folders it had excluded.
+    #[test]
+    fn a_star_does_not_cross_a_path_separator() {
+        let root = root_with(&[("src/a.rs", "needle"), ("src/deep/b.rs", "needle")]);
+        let out = grep(json!({ "pattern": "needle", "glob": "src/*.rs" }), root.clone())
+            .expect("grep");
+        assert!(out.contains("src/a.rs"), "{out}");
+        assert!(!out.contains("src/deep/b.rs"), "{out}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

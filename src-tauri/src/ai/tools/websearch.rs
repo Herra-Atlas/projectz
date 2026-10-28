@@ -55,7 +55,12 @@ pub fn spec() -> ToolSpec {
             "required": ["query"],
             "additionalProperties": false
         }"#,
-        effect: super::Effect::Read,
+        // Volatile, not Read: the cache key is the query, so a repeat an hour
+        // later in the same conversation was answered with the first snapshot --
+        // handing the model a stale page as though it were current, which is the
+        // one thing this tool promises not to do. `web_fetch` stays a Read,
+        // because one URL fetched twice inside a reply is the same page.
+        effect: super::Effect::Volatile,
         // A search query is not a command line. The tool only fetches URLs the
         // engine returned, so there is nothing for the policy to classify.
         command_argument: None,
@@ -68,15 +73,13 @@ pub fn spec() -> ToolSpec {
     }
 }
 
-/// Page extraction options, shared with the fetch tool.
+/// Options for the one page `web_fetch` was asked to read.
 ///
-/// One definition because a page that reads one way through `search_web` and
-/// another through `web_fetch` would make a model's output depend on which tool
-/// it happened to use.
-pub(crate) fn fetch_options() -> kestrelsearch::FetchOptions {
-    // Fully qualified because this module is also named `websearch`: a relative
-    // `super::super` would resolve to this module rather than the crate's.
-    crate::websearch::context::fetch_options()
+/// Not the search excerpt settings: those cap a page so ten of them fit in one
+/// answer, and applying them here truncated the page the model explicitly asked
+/// for.
+pub(crate) fn page_options() -> kestrelsearch::FetchOptions {
+    crate::websearch::context::page_options()
 }
 
 /// The query the model asked for.

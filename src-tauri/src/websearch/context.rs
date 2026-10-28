@@ -58,6 +58,29 @@ pub fn fetch_options() -> FetchOptions {
     }
 }
 
+/// Options for one page the caller named, rather than a search excerpt.
+///
+/// The search path caps each page tightly because it is choosing between ten of
+/// them and the model only reads a snippet of each. `web_fetch` was handed the
+/// URL on purpose, so it gets the whole text -- up to the tool-output ceiling,
+/// which is what actually bounds the request. Reusing the search options meant
+/// the tool returned roughly 1,600 characters of any documentation page it was
+/// asked for, with nothing saying the rest existed.
+pub fn page_options() -> FetchOptions {
+    FetchOptions {
+        // Longer than a search's budget because there is one page, not ten, and
+        // it is the page the model asked to read.
+        timeout: std::time::Duration::from_secs(15),
+        content_limit: 24_000,
+        max_concurrency: 1,
+        parse_concurrency: 1,
+        // HTML is bulky and most of it is markup; the text that comes out is
+        // bounded by `content_limit` above.
+        max_response_bytes: 2_000_000,
+        ..FetchOptions::default()
+    }
+}
+
 fn truncate_chars(value: &str, limit: usize) -> String {
     let mut chars = value.chars();
     let excerpt = chars.by_ref().take(limit).collect::<String>();

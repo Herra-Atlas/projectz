@@ -50,6 +50,7 @@ import { EMPTY_TITLE_MODELS, type AiEvent, type AttachedFile, type BackgroundRun
 import type { ActivityStep, ChatMessage, ChatSession, SessionRunStatus, ToolStepStats } from "../../features/chat/types";
 
 import { closeOpenSteps, closeRunningThought } from "./closeOpenSteps";
+import { appendReasoning, applyReasoningSegment } from "../../features/chat/reasoningSteps";
 import { useDictation } from "../../features/stt/useDictation";
 import { hasPartialReply, partialReplyMessage } from "./partialReply";
 import { MARKDOWN_STYLES } from "./markdownStyles";
@@ -1120,14 +1121,10 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       } else if (payload.kind === "reasoning_delta" && payload.text) {
         // Appended to the last thought rather than kept as one growing string,
         // so a thought that started before a tool call stays its own step
-        // instead of merging with the thinking that came after it.
+        // instead of merging with the thinking that came after it. Shared with
+        // the sub-agent panel so both draw one thought the same way.
         const steps = run.activity;
-        const last = steps[steps.length - 1];
-        if (last?.kind === "thought" && last.running) {
-          last.text += payload.text;
-        } else {
-          steps.push({ kind: "thought", text: payload.text, running: true, startedAt: Date.now() });
-        }
+        appendReasoning(steps, payload.text);
         run.reasoning += payload.text;
         if (isActive) {
           streamReasoningRef.current = run.reasoning;
@@ -1137,15 +1134,10 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       } else if (payload.kind === "reasoning_segment" && payload.text) {
         // The backend closed a stretch of thinking, which is the only moment its
         // duration is knowable. The text arrives whole rather than as deltas,
-        // so it replaces whatever streamed in place of it.
+        // so it replaces whatever streamed in place of it -- including a row the
+        // answer's beginning already closed a moment ago.
         const steps = run.activity;
-        const last = steps[steps.length - 1];
-        const seconds = last?.kind === "thought" && last.startedAt !== undefined
-          ? (Date.now() - last.startedAt) / 1000
-          : 0;
-        const segment: ActivityStep = { kind: "thought", text: payload.text, seconds, running: false };
-        if (last?.kind === "thought" && last.running) steps[steps.length - 1] = segment;
-        else steps.push(segment);
+        applyReasoningSegment(steps, payload.text);
         if (isActive) {
           streamActivityRef.current = [...steps];
           scheduleStreamFlush();

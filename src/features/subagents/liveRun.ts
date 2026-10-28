@@ -1,5 +1,6 @@
 import type { ActivityStep } from "../chat/types";
 import type { AiEvent, WebSearchOutput } from "../../pages/chat/types";
+import { appendReasoning, applyReasoningSegment } from "../chat/reasoningSteps";
 
 /**
  * A sub-agent run while it is still happening.
@@ -100,9 +101,12 @@ export function runningSubAgentFromEvent(metrics: AiEvent["metrics"]): RunningSu
  * A mirror of the chat page's own listener, for the same reason
  * `transcript.rs` mirrors it: the shapes are shared (`ActivityStep`, the step
  * kinds) and the panel draws them the same way, so the folding has to produce
- * the same thing. Deliberately not shared with the chat page -- that listener is
- * bound to React state, the background-run map and the notification stack, none
- * of which a sub-agent's live view has or wants.
+ * the same thing. The reasoning folds themselves are shared with the chat page
+ * (`features/chat/reasoningSteps.ts`) rather than written twice, because a
+ * thought drawn twice in one panel and once in the other is exactly what a
+ * second copy of that rule produced. The listener is not shared: it is bound to
+ * React state, the background-run map and the notification stack, none of which
+ * a sub-agent's live view has or wants.
  */
 export function foldEvent(run: LiveRun, event: AiEvent): void {
   const metrics = event.metrics ?? {};
@@ -112,25 +116,12 @@ export function foldEvent(run: LiveRun, event: AiEvent): void {
       break;
     case "reasoning_delta":
       if (event.text) {
-        const last = run.activity[run.activity.length - 1];
-        if (last?.kind === "thought" && last.running) {
-          last.text += event.text;
-        } else {
-          run.activity.push({ kind: "thought", text: event.text, running: true, startedAt: Date.now() });
-        }
+        appendReasoning(run.activity, event.text);
         run.reasoning += event.text;
       }
       break;
     case "reasoning_segment":
-      if (event.text) {
-        const last = run.activity[run.activity.length - 1];
-        const seconds = last?.kind === "thought" && last.startedAt !== undefined
-          ? (Date.now() - last.startedAt) / 1000
-          : 0;
-        const segment: ActivityStep = { kind: "thought", text: event.text, seconds, running: false };
-        if (last?.kind === "thought" && last.running) run.activity[run.activity.length - 1] = segment;
-        else run.activity.push(segment);
-      }
+      if (event.text) applyReasoningSegment(run.activity, event.text);
       break;
     case "tool_call":
       if (event.metrics) {

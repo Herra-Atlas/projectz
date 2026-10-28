@@ -51,9 +51,9 @@ pub const MOVE_FILE: ToolSpec = ToolSpec {
     command_argument: None,
     execute: |arguments, context| {
         let _ = &context;
-        Box::pin(std::future::ready(
-            super::file::require_workspace().and_then(|root| move_file(arguments, root)),
-        ))
+        super::blocking(move || {
+            super::file::require_workspace().and_then(|root| move_file(arguments, root))
+        })
     },
 };
 
@@ -81,10 +81,10 @@ pub const DELETE_FILE: ToolSpec = ToolSpec {
     effect: super::Effect::Write,
     command_argument: None,
     execute: |arguments, context| {
-        Box::pin(std::future::ready(
+        super::blocking(move || {
             super::file::require_workspace()
-                .and_then(|root| delete_file(arguments, root, &context)),
-        ))
+                .and_then(|root| delete_file(arguments, root, &context))
+        })
     },
 };
 

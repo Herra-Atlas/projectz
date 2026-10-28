@@ -11,10 +11,11 @@
 //! on Windows a bare `cargo` is not an executable, so the shell is still used
 //! there and is part of why the command is treated as one opaque string.
 
+use std::path::Path;
 use std::process::Stdio;
 
 use serde_json::Value;
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 
 use super::{ToolContext, ToolSpec};
 
@@ -112,7 +113,13 @@ pub const TERMINAL_OUTPUT: ToolSpec = ToolSpec {
         "required": ["id"],
         "additionalProperties": false
     }"#,
-    effect: super::Effect::Read,
+    // Volatile, not Read: the result is a *cursor*, not a function of the
+    // arguments. With identical arguments the second poll returns the bytes
+    // printed since the first, so caching it handed every later poll the same
+    // first chunk -- and skipped `refresh_status`, so a finished command was
+    // never reported as finished. A poll is a question about the present and
+    // must reach the process every time.
+    effect: super::Effect::Volatile,
     command_argument: None,
     execute: |arguments, context| {
         let _ = &context;
@@ -144,7 +151,10 @@ pub const TERMINAL_STATUS: ToolSpec = ToolSpec {
         "required": ["id"],
         "additionalProperties": false
     }"#,
-    effect: super::Effect::Read,
+    // Volatile for the same reason as `terminal_output`: liveness is not a
+    // function of the id alone, and a cached "still running" is exactly the
+    // answer that stops a model from polling a command that has finished.
+    effect: super::Effect::Volatile,
     command_argument: None,
     execute: |arguments, context| {
         let _ = &context;
@@ -231,7 +241,17 @@ pub(crate) fn platform_command(command: &str) -> Command {
         process
             .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
             .arg(format!(
-                "$global:LASTEXITCODE = $null; {command}; $commandSucceeded = $?; if ($null -ne $LASTEXITCODE) {{ exit $LASTEXITCODE }}; if ($commandSucceeded) {{ exit 0 }} else {{ exit 1 }}"
+                // **UTF-8 out, not the OEM code page.** PowerShell 5.1 writes its
+                // redirected stdout in the console code page -- 437, 866, 1252, and
+                // so on -- while the pipe is decoded as UTF-8. Every accented,
+                // Cyrillic or CJK byte therefore arrived as U+FFFD, silently, in
+                // every `git log`, `dir` and compiler diagnostic. `UTF8Encoding
+                // $false` is what suppresses the BOM this would otherwise prepend.
+                "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; \
+                 $OutputEncoding = [Console]::OutputEncoding; \
+                 $global:LASTEXITCODE = $null; {command}; $commandSucceeded = $?; \
+                 if ($null -ne $LASTEXITCODE) {{ exit $LASTEXITCODE }}; \
+                 if ($commandSucceeded) {{ exit 0 }} else {{ exit 1 }}"
             ));
         process
     } else {
@@ -247,6 +267,84 @@ pub(crate) fn platform_command(command: &str) -> Command {
     process
 }
 
+/// Everything that makes a command a *script* rather than a program and flags.
+const SHELL_SYNTAX: &[char] = &[
+    ';', '&', '|', '<', '>', '"', '\'', '`', '$', '*', '?', '(', ')', '{', '}', '[', ']', '#', '\n',
+    '\r',
+];
+
+/// The command as a direct spawn, when it is only a program and its arguments.
+///
+/// PowerShell 5.1 is a .NET host: starting it costs 150-400 ms on a cold page
+/// cache, which is twenty to forty times what `git status` takes to run. Most of
+/// what a model issues is a bare program with flags -- `cargo test`, `npm run
+/// build`, `git status` -- and the platform resolves those from PATH itself, so
+/// the shell adds nothing but that startup.
+///
+/// A command with quoting, a pipe, a redirect, a variable, a glob or a separator
+/// is left to the shell, and so is one that fails to spawn: a cmdlet such as
+/// `dir`, or a built-in such as `cd`, is not a program on PATH. Every fallback is
+/// the exact command that ran before this existed, so nothing that worked can
+/// stop working.
+fn direct_command(command: &str) -> Option<Command> {
+    if command.contains(SHELL_SYNTAX) {
+        return None;
+    }
+    let mut parts = command.split_whitespace();
+    let program = parts.next()?;
+    // `FOO=bar cmd` is shell syntax even without a metacharacter in it.
+    if program.contains('=') {
+        return None;
+    }
+    let mut process = Command::new(program);
+    process.args(parts);
+    process.env("NO_COLOR", "1");
+    crate::child::hide_console_async(&mut process);
+    Some(process)
+}
+
+/// What every command needs, whichever way it is launched.
+fn prepare(command_line: &mut Command, root: &Path) {
+    command_line
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    // A waiting command can still be stopped, so it needs to be reachable as a
+    // tree for the same reason a background one does: on Unix `kill_tree` signals
+    // the group, which only exists if the command leads one.
+    #[cfg(unix)]
+    command_line.process_group(0);
+}
+
+/// Starts the command directly when it can be, through the shell otherwise.
+fn spawn_command(command: &str, root: &Path) -> Result<Child, String> {
+    if let Some(mut direct) = direct_command(command) {
+        prepare(&mut direct, root);
+        if let Ok(child) = direct.spawn() {
+            return Ok(child);
+        }
+    }
+    let mut shell = platform_command(command);
+    prepare(&mut shell, root);
+    shell
+        .spawn()
+        .map_err(|error| format!("Could not start the command: {error}"))
+}
+
+/// Ends the command and everything it started.
+///
+/// `kill_on_drop` signals the shell the tool holds a handle to; the process the
+/// user cares about is that shell's child. The pid is read before the child is
+/// consumed by `wait_with_output`, so the tree-killer the background path already
+/// uses can be pointed at it. Run off the async worker, because on Windows the
+/// killer is `taskkill.exe` -- a process launch plus a blocking wait.
+async fn stop_tree(pid: Option<u32>) {
+    let Some(pid) = pid else { return };
+    let _ = tokio::task::spawn_blocking(move || super::process::kill_tree(pid)).await;
+}
+
 async fn run(command: String, timeout_secs: u64, context: ToolContext) -> Result<String, String> {
     // The workspace, not whatever the process inherited. A terminal tool that
     // ran somewhere else would make every relative path in its output a lie.
@@ -257,16 +355,11 @@ async fn run(command: String, timeout_secs: u64, context: ToolContext) -> Result
     // answer here even though it is a merely unhelpful one for a read.
     let root = super::file::require_workspace()?;
 
-    let mut command_line = platform_command(&command);
-    command_line
-        .current_dir(&root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let child = command_line
-        .spawn()
-        .map_err(|error| format!("Could not start the command: {error}"))?;
+    let child = spawn_command(&command, &root)?;
+    // Taken before `wait_with_output` consumes the child: `kill_on_drop` reaches
+    // only the shell, so the pid is what lets a timeout end the processes the
+    // shell started. See `stop_tree`.
+    let pid = child.id();
 
     let wait = child.wait_with_output();
     tokio::pin!(wait);
@@ -275,12 +368,15 @@ async fn run(command: String, timeout_secs: u64, context: ToolContext) -> Result
     let output = tokio::select! {
         finished = &mut wait => finished.map_err(|error| format!("Command failed: {error}"))?,
         _ = super::approval::wait_until_cancelled(&cancelled) => {
-            // The child is dropped with `kill_on_drop` set, so the process goes
-            // with the future. Leaving it running would let a cancelled reply
-            // keep burning the user's CPU with nothing watching it.
+            // The tree, not just the shell. Dropping `wait` below still triggers
+            // `kill_on_drop` for `powershell.exe`; this reaches the `cargo`,
+            // `node` or `tsc` it started, which otherwise kept the build locked
+            // and the port bound after the tool had reported a clean stop.
+            stop_tree(pid).await;
             return Err("Cancelled before the command finished".into());
         }
         _ = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)) => {
+            stop_tree(pid).await;
             return Err(format!(
                 "The command was stopped after {timeout_secs}s without finishing. \
                  Narrow the command or run it in the background yourself."
@@ -401,15 +497,43 @@ mod tests {
     }
 
     /// The two follow-up tools carry no command and observe only. `terminal_kill`
-    /// is a write because stopping a process is the consequential half; reading
-    /// output and asking after a process change nothing.
+    /// is a write because stopping a process is the consequential half.
+    ///
+    /// Output and status are `Volatile`, not `Read`: both answer a question about
+    /// the present, so the same arguments legitimately produce a different answer
+    /// every time. Caching them returned the first poll's snapshot for every later
+    /// one and skipped the liveness check entirely.
     #[test]
     fn the_follow_up_tools_are_observed_without_a_command() {
-        assert_eq!(TERMINAL_OUTPUT.effect, super::super::Effect::Read);
-        assert_eq!(TERMINAL_STATUS.effect, super::super::Effect::Read);
+        assert_eq!(TERMINAL_OUTPUT.effect, super::super::Effect::Volatile);
+        assert_eq!(TERMINAL_STATUS.effect, super::super::Effect::Volatile);
         assert_eq!(TERMINAL_KILL.effect, super::super::Effect::Write);
         for tool in [TERMINAL_OUTPUT, TERMINAL_STATUS, TERMINAL_KILL] {
             assert_eq!(tool.command_argument, None);
+        }
+    }
+
+    /// Only a bare program and its flags skip the shell.
+    ///
+    /// The direct path exists because PowerShell's startup is 150-400 ms per call,
+    /// but anything the shell interprets has to reach the shell: guessing at a
+    /// pipeline or a variable would run something other than what was written.
+    #[test]
+    fn a_shell_command_is_not_spawned_directly() {
+        assert!(direct_command("cargo test --lib").is_some());
+        assert!(direct_command("git status").is_some());
+        for scripted in [
+            "cargo test; rm -rf src",
+            "dir | more",
+            "echo hi > out.txt",
+            "$env:FOO = 'bar'; npm run build",
+            "Get-ChildItem *.rs",
+            "\"C:\\Program Files\\x.exe\" --run",
+        ] {
+            assert!(
+                direct_command(scripted).is_none(),
+                "{scripted} is shell syntax"
+            );
         }
     }
 }

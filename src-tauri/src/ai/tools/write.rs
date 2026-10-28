@@ -70,9 +70,9 @@ pub const WRITE_FILE: ToolSpec = ToolSpec {
     effect: super::Effect::Write,
     command_argument: None,
     execute: |arguments, context| {
-        Box::pin(std::future::ready(
-            super::file::require_workspace().and_then(|root| write(arguments, root, &context)),
-        ))
+        super::blocking(move || {
+            super::file::require_workspace().and_then(|root| write(arguments, root, &context))
+        })
     },
 };
 
@@ -143,9 +143,9 @@ pub const EDIT_FILE: ToolSpec = ToolSpec {
     effect: super::Effect::Write,
     command_argument: None,
     execute: |arguments, context| {
-        Box::pin(std::future::ready(
-            super::file::require_workspace().and_then(|root| edit(arguments, root, &context)),
-        ))
+        super::blocking(move || {
+            super::file::require_workspace().and_then(|root| edit(arguments, root, &context))
+        })
     },
 };
 
@@ -202,9 +202,10 @@ pub const EDIT_LINES: ToolSpec = ToolSpec {
     effect: super::Effect::Write,
     command_argument: None,
     execute: |arguments, context| {
-        Box::pin(std::future::ready(
-            super::file::require_workspace().and_then(|root| edit_lines(arguments, root, &context)),
-        ))
+        super::blocking(move || {
+            super::file::require_workspace()
+                .and_then(|root| edit_lines(arguments, root, &context))
+        })
     },
 };
 
@@ -259,8 +260,15 @@ fn edit_lines(
         verify_unchanged(&path, &lines, start, end, expected)?;
     }
 
+    // A file's line endings are part of it. `lines()` strips the `\r` from a CRLF
+    // file, so rejoining with a bare `\n` rewrote every line of a Windows file on
+    // a one-line edit -- and the diff, built from the same normalised text, hid
+    // it: the panel reported one line while the whole file had changed. The
+    // ending is read from the file and reused, and the diff compares against what
+    // was actually on disk.
+    let eol = if body.contains("\r\n") { "\r\n" } else { "\n" };
     // Whether the file ended with a newline, captured before the rebuild because
-    // `join` can never preserve it.
+    // the list of lines never carries it.
     let ended_with_newline = body.ends_with('\n') || body.is_empty();
 
     let replaced: Vec<&str> = new_text.lines().collect();
@@ -268,18 +276,18 @@ fn edit_lines(
     updated.extend(lines[..start - 1].iter().map(|line| line.to_string()));
     updated.extend(replaced.iter().map(|line| line.to_string()));
     updated.extend(lines[end..].iter().map(|line| line.to_string()));
-    let mut body = updated.join("\n");
+    let mut rebuilt = updated.join(eol);
     // The trailing newline is preserved rather than assumed, because losing it is
     // not a no-op: it shows as a "\ No newline at end of file" line in every
     // future diff of this file, and most tooling will keep re-adding it. A
     // `new_text` that itself ends in one wins, since that is the model saying
     // the file should end that way.
-    if (ended_with_newline || new_text.ends_with('\n')) && !body.is_empty() {
-        body.push('\n');
+    if (ended_with_newline || new_text.ends_with('\n')) && !rebuilt.is_empty() {
+        rebuilt.push_str(eol);
     }
 
-    atomic_write(&resolved, body.as_bytes())?;
-    context.report_diff(super::diff::diff(&lines.join("\n"), &body));
+    atomic_write(&resolved, rebuilt.as_bytes())?;
+    context.report_diff(super::diff::diff(&body, &rebuilt));
 
     // Read back what landed, numbered as a read numbers it. Closes the loop for
     // the model without a second round trip, which is what a small local model
@@ -329,7 +337,13 @@ fn verify_unchanged(
     end: usize,
     expected: &str,
 ) -> Result<(), String> {
-    if lines[start - 1..end].join("\n") == expected {
+    // Both sides are folded to the same shape before comparing. A model copying a
+    // read back naturally includes the trailing newline the read showed it, and a
+    // CRLF file's lines compare without their `\r`. Without this the guard fired
+    // on a file that had not changed, and its message said the file *had* changed
+    // -- which teaches the model to stop sending `expected_text`, the one check
+    // that protects the user's work.
+    if fold_expected(&lines[start - 1..end].join("\n")) == fold_expected(expected) {
         return Ok(());
     }
     Err(format!(
@@ -342,6 +356,17 @@ fn verify_unchanged(
         // refusal that shows no lines is a refusal the model cannot act on.
         super::file::numbered_slice(&lines.join("\n"), start, Some(end - start + 1))
     ))
+}
+
+/// One shape for comparing a read-back range with what the model echoed.
+///
+/// Line endings and the trailing newline are the two things a faithful copy picks
+/// up from a read and a re-join does not carry, so both are removed before the
+/// comparison rather than being treated as a changed file.
+fn fold_expected(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .trim_end_matches('\n')
+        .to_string()
 }
 
 /// Reads a 1-based line number, rejecting zero and negatives.
@@ -567,8 +592,15 @@ fn apply(body: &str, change: &Change) -> Result<Applied, String> {
     }
     // Nothing matched exactly. Look again with indentation, whitespace runs and
     // look-alike punctuation folded away.
-    match lenient_range(body, &change.old_text) {
-        Some((start, end)) => {
+    let candidates = lenient_ranges(body, &change.old_text);
+    match candidates.len() {
+        0 => Err(
+            "`old_text` was not found. Read the file and copy the text exactly, or use edit_lines \
+             with the line numbers from a read."
+                .to_string(),
+        ),
+        1 => {
+            let (start, end) = candidates[0];
             let mut updated = String::with_capacity(body.len() + change.new_text.len());
             updated.push_str(&body[..start]);
             updated.push_str(&change.new_text);
@@ -578,40 +610,72 @@ fn apply(body: &str, change: &Change) -> Result<Applied, String> {
                 lenient: true,
             })
         }
-        None => Err(
-            "`old_text` was not found. Read the file and copy the text exactly, or use edit_lines \
-             with the line numbers from a read."
-                .to_string(),
-        ),
+        // The exact path refuses ambiguity rather than guessing, and this one has
+        // to as well. Two blocks that differ only in indentation is exactly the
+        // case the lenient pass exists for, so replacing the first of them edits a
+        // place the model never named -- and reports success.
+        count if !change.replace_all => Err(format!(
+            "`old_text` appears {count} times once whitespace and punctuation differences are \
+             ignored. Include more surrounding text to identify one, or set replace_all to change \
+             all of them."
+        )),
+        _ => {
+            // Applied from the end backwards, so an earlier range's offsets are
+            // still valid when its turn comes. A window that overlaps one already
+            // replaced is skipped: applying it would rewrite text that is no
+            // longer the text it was matched against.
+            let mut updated = body.to_string();
+            let mut next_start = usize::MAX;
+            for (start, end) in candidates.into_iter().rev() {
+                if end > next_start {
+                    continue;
+                }
+                next_start = start;
+                updated.replace_range(start..end, &change.new_text);
+            }
+            Ok(Applied {
+                body: updated,
+                lenient: true,
+            })
+        }
     }
 }
 
-/// Finds the byte range of `needle` in `body`, ignoring per-line whitespace and
+/// Finds every byte range where `needle` occurs, ignoring per-line whitespace and
 /// look-alike punctuation.
 ///
 /// Line-based rather than character-based on purpose: the drift this exists to
 /// absorb -- a re-indented block, tabs where spaces were typed, a curly apostrophe
 /// -- is per-line, and comparing whole lines cannot slide past a boundary and
 /// match the wrong function the way a character window could.
-fn lenient_range(body: &str, needle: &str) -> Option<(usize, usize)> {
+///
+/// All of them, not the first: the count is what lets [`apply`] refuse an
+/// ambiguous lenient match the same way the exact pass does.
+fn lenient_ranges(body: &str, needle: &str) -> Vec<(usize, usize)> {
     let wanted: Vec<String> = needle.lines().map(normalise).collect();
     if wanted.is_empty() {
-        return None;
+        return Vec::new();
     }
     let spans = line_spans(body);
     if spans.len() < wanted.len() {
-        return None;
+        return Vec::new();
     }
+    // Folded once for the whole body rather than once per candidate window. The
+    // previous shape normalised every line again at every offset, which is
+    // O(lines x needle lines) allocations on the path taken exactly when matching
+    // is already hard.
+    let folded: Vec<String> = spans.iter().map(|(_, _, text)| normalise(text)).collect();
+    let mut found = Vec::new();
     for start in 0..=spans.len() - wanted.len() {
         let matched = wanted
             .iter()
             .enumerate()
-            .all(|(offset, expected)| normalise(spans[start + offset].2) == *expected);
+            .all(|(offset, expected)| folded[start + offset] == *expected);
         if matched {
-            return Some((spans[start].0, spans[start + wanted.len() - 1].1));
+            found.push((spans[start].0, spans[start + wanted.len() - 1].1));
         }
     }
-    None
+    found
 }
 
 /// Each line of `body` as `(start byte, end byte, text)`, the range excluding the
@@ -820,6 +884,79 @@ mod tests {
         .expect_err("ambiguous");
         assert!(error.contains("2 times"), "{error}");
         assert_eq!(body_of(&root, "a.rs"), "x\nx\n");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The lenient pass refuses ambiguity too.
+    ///
+    /// This is the case the lenient pass exists for -- two blocks that differ only
+    /// in indentation -- so returning the first match edits a block the model did
+    /// not name. The exact pass has always refused this; the folded one used to
+    /// take the first hit silently.
+    #[test]
+    fn an_ambiguous_lenient_match_is_refused() {
+        let root = root();
+        std::fs::write(
+            root.join("a.rs"),
+            "fn a() {\n    let x = 1;\n    }\nfn b() {\n    let x = 1;\n    }\n",
+        )
+        .expect("seed");
+        let error = edit(
+            json!({
+                "path": "a.rs",
+                "old_text": "  let x = 1;\n  }",
+                "new_text": "  let x = 2;\n  }"
+            }),
+            root.clone(),
+            &discarding(),
+        )
+        .expect_err("ambiguous");
+        assert!(error.contains("2 times"), "{error}");
+        assert!(error.contains("whitespace"), "{error}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A line edit on a CRLF file changes one line, not every line.
+    ///
+    /// `str::lines()` drops the `\r`, so rejoining with `\n` rewrote the whole
+    /// file and the diff -- built from the same normalised text -- showed a single
+    /// changed line over a file git saw as entirely rewritten.
+    #[test]
+    fn a_line_edit_keeps_the_files_crlf_endings() {
+        let root = root();
+        std::fs::write(root.join("a.txt"), "one\r\ntwo\r\nthree\r\n").expect("seed");
+        edit_lines(
+            json!({ "path": "a.txt", "start_line": 2, "end_line": 2, "new_text": "TWO" }),
+            root.clone(),
+            &discarding(),
+        )
+        .expect("edit");
+        assert_eq!(body_of(&root, "a.txt"), "one\r\nTWO\r\nthree\r\n");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A read-back range is compared without its trailing newline.
+    ///
+    /// A model that copies what a read showed it sends the newline too; the join
+    /// the guard compares against never has it. Refusing that edit told the model
+    /// the file had changed, which taught it not to use the guard at all.
+    #[test]
+    fn expected_text_tolerates_the_trailing_newline() {
+        let root = root();
+        std::fs::write(root.join("a.txt"), "one\ntwo\nthree\n").expect("seed");
+        edit_lines(
+            json!({
+                "path": "a.txt",
+                "start_line": 2,
+                "end_line": 3,
+                "new_text": "TWO\nTHREE",
+                "expected_text": "two\nthree\n"
+            }),
+            root.clone(),
+            &discarding(),
+        )
+        .expect("edit");
+        assert_eq!(body_of(&root, "a.txt"), "one\nTWO\nTHREE\n");
         let _ = std::fs::remove_dir_all(&root);
     }
 

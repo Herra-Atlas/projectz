@@ -41,7 +41,7 @@ pub use access::AccessSet;
 pub use approval::{Approval, ApprovalGate, ApprovalRequest, QuestionRequest};
 pub use cache::ToolCache;
 pub use policy::{Decision, PermissionMode};
-pub use registry::{DynamicTool, Effect, Sink, ToolContext, ToolRegistry, ToolSpec};
+pub use registry::{blocking, DynamicTool, Effect, Sink, ToolContext, ToolRegistry, ToolSpec};
 pub use run::{RunHandle, SubAgentNotice};
 pub use ui::ToolSummary;
 

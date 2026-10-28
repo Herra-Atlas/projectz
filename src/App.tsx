@@ -465,6 +465,10 @@ function AppShell() {
   const serversChipRef = useRef<HTMLButtonElement | null>(null);
   const [serversMenu, setServersMenu] = useState<{ top: number; right: number }>({ top: 60, right: 20 });
 
+  // Names are looked up once per loaded model, not on every poll:
+  // `local_models_list` stats and parses the GGUF header of every registered
+  // model, and a name cannot change without a different model being loaded.
+  const modelNamesRef = useRef<Record<string, string>>({});
   useEffect(() => {
     let live = true;
     const poll = async () => {
@@ -491,9 +495,15 @@ function AppShell() {
             : { ...current, loaded_model_id: status.loaded_model_id, loading_model_id: status.loading_model_id, started_at: status.started_at },
         );
       }
-      const llamaName = llamaId ? await invoke<{ id: string; name: string }[]>("local_models_list")
-        .then((models) => models.find((model) => model.id === llamaId)?.name ?? null)
-        .catch(() => null) : null;
+      let llamaName = llamaId ? modelNamesRef.current[llamaId] ?? null : null;
+      if (llamaId && llamaName === null) {
+        llamaName = await invoke<{ id: string; name: string }[]>("local_models_list")
+          .then((models) => {
+            for (const model of models) modelNamesRef.current[model.id] = model.name;
+            return modelNamesRef.current[llamaId] ?? null;
+          })
+          .catch(() => null);
+      }
       // One audio process per purpose: a purpose that is not answering keeps
       // its last figure rather than blinking out of the chip, and a purpose
       // that answered "not running" really is gone.

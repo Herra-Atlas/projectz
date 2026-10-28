@@ -103,10 +103,12 @@ fn normalized(arguments: &Value, root: Option<&Path>) -> Value {
         if value.is_null() {
             continue;
         }
-        if let Some(root) = root {
+        // A path only has a workspace-relative form when there is a workspace;
+        // with none the call is refused anyway, so the spelling is left alone.
+        if root.is_some() {
             if PATH_ARGUMENTS.contains(&key.as_str()) {
                 if let Some(text) = value.as_str() {
-                    out.insert(key.clone(), Value::String(relative_path(root, text)));
+                    out.insert(key.clone(), Value::String(relative_path(text)));
                     continue;
                 }
             }
@@ -115,7 +117,7 @@ fn normalized(arguments: &Value, root: Option<&Path>) -> Value {
                     let rewritten = items
                         .iter()
                         .map(|item| match item.as_str() {
-                            Some(text) => Value::String(relative_path(root, text)),
+                            Some(text) => Value::String(relative_path(text)),
                             None => item.clone(),
                         })
                         .collect();
@@ -131,14 +133,31 @@ fn normalized(arguments: &Value, root: Option<&Path>) -> Value {
 
 /// One path argument in the form the key compares.
 ///
+/// **Lexical on purpose.** This runs for every cached call, twice (once to look up
+/// and once to store), and a cache key is not a security boundary: the tool
+/// resolves the same path again before it touches anything. Resolving here meant a
+/// hit paid for per-component existence checks and two canonicalisations just to
+/// discover it had nothing to do -- more disk work than the answer saved.
+///
 /// A refused path -- absolute, or containing `..` -- is left exactly as written.
 /// The tool will refuse it too, and rewriting it would be claiming an equivalence
 /// between two calls that are both about to fail for their own unrelated reasons.
-fn relative_path(root: &Path, requested: &str) -> String {
-    match super::file::resolve_within(root, requested) {
-        Ok(resolved) => super::walk::relative_slash(root, &resolved),
-        Err(_) => requested.to_string(),
+fn relative_path(requested: &str) -> String {
+    let path = Path::new(requested);
+    if path.is_absolute() {
+        return requested.to_string();
     }
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+            std::path::Component::CurDir => {}
+            // `..`, a root, or a Windows drive prefix: left as written, for the
+            // reason above.
+            _ => return requested.to_string(),
+        }
+    }
+    parts.join("/")
 }
 
 /// The next stamp after `previous`, in the same `utc_now` format.

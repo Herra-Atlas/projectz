@@ -22,7 +22,14 @@ pub async fn panel_terminal_run(command: String, workspace: String) -> Result<St
         process
             .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
             .arg(format!(
-                "$global:LASTEXITCODE = $null; {command}; $commandSucceeded = $?; if ($null -ne $LASTEXITCODE) {{ exit $LASTEXITCODE }}; if ($commandSucceeded) {{ exit 0 }} else {{ exit 1 }}"
+                // The same UTF-8 handshake the agent's terminal uses: PowerShell
+                // 5.1 writes a redirected pipe in the console code page, which is
+                // not UTF-8, so every non-ASCII byte was decoded as U+FFFD.
+                "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; \
+                 $OutputEncoding = [Console]::OutputEncoding; \
+                 $global:LASTEXITCODE = $null; {command}; $commandSucceeded = $?; \
+                 if ($null -ne $LASTEXITCODE) {{ exit $LASTEXITCODE }}; \
+                 if ($commandSucceeded) {{ exit 0 }} else {{ exit 1 }}"
             ));
         process
     } else {
