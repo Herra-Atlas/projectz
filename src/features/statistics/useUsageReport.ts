@@ -26,6 +26,11 @@ export function useUsageReport(enabled: boolean, refreshKey: number) {
     invoke<UsageReport>("database_usage_report", {
       range: current.key,
       since: rangeStart(current.days),
+      // The same length immediately before `since`, which is what the figure
+      // row compares against. Derived from the same `days`, so the two windows
+      // cannot end up different lengths. "All" has no period before it, so the
+      // report reads the empty string as no comparison rather than as a date.
+      previousSince: current.days === null ? "" : rangeStart(current.days * 2),
       bucketSql: current.bucket,
     })
       .then((result) => {

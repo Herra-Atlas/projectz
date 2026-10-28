@@ -1,4 +1,5 @@
 import PreviewNote from "./PreviewNote";
+import ImageStage from "./ImageStage";
 import { useFileBytes, type PreviewProps } from "./useFileBytes";
 
 /**
@@ -12,6 +13,9 @@ import { useFileBytes, type PreviewProps } from "./useFileBytes";
  * `object-contain` inside a centred box: a 4000px photograph and a 16px icon both
  * land somewhere sensible, and nothing is cropped. Never upscaled past its own
  * size, because a blown-up screenshot is worse than a small one.
+ *
+ * An `.svg` does not come through here -- it is text, and [`SvgPreview`] draws it
+ * from the source the editor already holds.
  */
 export default function ImagePreview({ path, skill = null }: PreviewProps) {
   const { data, error } = useFileBytes(path, skill);
@@ -20,7 +24,7 @@ export default function ImagePreview({ path, skill = null }: PreviewProps) {
   if (!data) return <PreviewNote>Reading…</PreviewNote>;
 
   return (
-    <div className="grid min-h-0 flex-1 place-items-center overflow-auto bg-[var(--rail)] p-4">
+    <ImageStage>
       <img
         src={data.url}
         alt={path}
@@ -29,6 +33,6 @@ export default function ImagePreview({ path, skill = null }: PreviewProps) {
         decoding="async"
         className="max-h-full max-w-full object-contain"
       />
-    </div>
+    </ImageStage>
   );
 }

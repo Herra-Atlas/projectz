@@ -81,11 +81,6 @@ const PAGES: IndexPage[] = [
         keywords: ["system prompt", "custom instructions", "rules", "personality", "context"],
       },
       {
-        anchor: "general.notifications",
-        label: "Response completions",
-        keywords: ["notification", "notify", "alert", "done", "finished"],
-      },
-      {
         anchor: "general.metrics",
         label: "Show token metrics",
         keywords: ["tokens", "usage", "stats", "per reply"],
@@ -103,6 +98,37 @@ const PAGES: IndexPage[] = [
     entries: [
       { anchor: "appearance.theme", label: "Theme", keywords: ["dark", "light", "system", "colours", "colors", "palette"] },
       { anchor: "appearance.accent", label: "Accent colour", keywords: ["color", "highlight", "tint", "brand"] },
+    ],
+  },
+  {
+    view: "notifications",
+    name: "Notifications",
+    entries: [
+      {
+        anchor: "notifications.enabled",
+        label: "Enable notifications",
+        keywords: ["notifications", "alerts", "sound", "on", "off", "master", "silence"],
+      },
+      {
+        anchor: "notifications.approval",
+        label: "Approval needed",
+        keywords: ["approval", "permission", "allow", "deny", "tool call", "agent waiting", "sound"],
+      },
+      {
+        anchor: "notifications.input",
+        label: "Input needed",
+        keywords: ["question", "ask_user", "answer", "agent waiting", "input", "sound"],
+      },
+      {
+        anchor: "notifications.response",
+        label: "Response ready",
+        keywords: ["finished", "complete", "done", "response", "reply", "background", "sound", "chime"],
+      },
+      {
+        anchor: "notifications.failed",
+        label: "Turn failed",
+        keywords: ["failed", "error", "stopped", "turn", "reply", "failure", "sound", "bell"],
+      },
     ],
   },
   {

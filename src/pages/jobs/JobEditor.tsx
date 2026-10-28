@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { AccessSwitches } from "../../components/AccessSwitches";
 import HelpMark from "../../components/HelpMark";
+import Select from "../../components/Select";
 import { Toggle } from "../../components/SettingsSection";
 import { useModelRegistry } from "../../features/models/useModelRegistry";
 import { useMachineTotals } from "../../features/jobs/useJobs";
@@ -122,37 +123,57 @@ export default function JobEditor({
 
         <Field label="Model" hint="Which model runs the instruction. A local model is started for the run if it is not already loaded.">
           <div className="space-y-2">
-            <select value={draft.model.kind} onChange={(event) => {
-              const kind = event.target.value as "local" | "remote";
-              // A job's "stop when busy" default follows the model: a local run
-              // costs the PC, a remote one does not.
-              patch({
-                model: kind === "local"
-                  ? { kind: "local", id: localModels[0]?.id ?? "" }
-                  : { kind: "remote", endpoint_id: endpoints[0]?.id ?? "", model: endpoints[0]?.models[0] ?? "" },
-                conditions: { ...draft.conditions, stop_when_busy: kind === "local" },
-              });
-            }} className="min-h-9 rounded-lg border border-[var(--line)] bg-[var(--page)] px-2 text-[13px] text-[var(--text)]">
-              <option value="local">Local model</option>
-              <option value="remote">Provider model</option>
-            </select>
+            <Select
+              label="Model kind"
+              value={draft.model.kind}
+              options={[
+                { value: "local", label: "Local model" },
+                { value: "remote", label: "Provider model" },
+              ]}
+              onChange={(value) => {
+                const kind = value as "local" | "remote";
+                // A job's "stop when busy" default follows the model: a local run
+                // costs the PC, a remote one does not.
+                patch({
+                  model: kind === "local"
+                    ? { kind: "local", id: localModels[0]?.id ?? "" }
+                    : { kind: "remote", endpoint_id: endpoints[0]?.id ?? "", model: endpoints[0]?.models[0] ?? "" },
+                  conditions: { ...draft.conditions, stop_when_busy: kind === "local" },
+                });
+              }}
+              className="w-40"
+            />
             {draft.model.kind === "local" ? (
-              <select value={draft.model.id} onChange={(event) => patch({ model: { kind: "local", id: event.target.value } })} className="min-h-9 w-full rounded-lg border border-[var(--line)] bg-[var(--page)] px-2 text-[13px] text-[var(--text)]">
-                {localModels.length === 0 && <option value="">No local models added</option>}
-                {localModels.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}
-              </select>
+              <Select
+                label="Local model"
+                value={draft.model.id}
+                options={localModels.length === 0
+                  ? [{ value: "", label: "No local models added", disabled: true }]
+                  : localModels.map((model) => ({ value: model.id, label: model.name }))}
+                onChange={(value) => patch({ model: { kind: "local", id: value } })}
+                className="w-full"
+              />
             ) : (
               <div className="flex gap-2">
-                <select value={draft.model.endpoint_id} onChange={(event) => {
-                  const next = endpoints.find((item) => item.id === event.target.value);
-                  patch({ model: { kind: "remote", endpoint_id: event.target.value, model: next?.models[0] ?? "" } });
-                }} className="min-h-9 flex-1 rounded-lg border border-[var(--line)] bg-[var(--page)] px-2 text-[13px] text-[var(--text)]">
-                  {endpoints.length === 0 && <option value="">No providers configured</option>}
-                  {endpoints.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                </select>
-                <select value={draft.model.model} onChange={(event) => patch({ model: { kind: "remote", endpoint_id: remote?.endpoint_id ?? "", model: event.target.value } })} className="min-h-9 flex-1 rounded-lg border border-[var(--line)] bg-[var(--page)] px-2 text-[13px] text-[var(--text)]">
-                  {(endpoint?.models ?? []).map((name) => <option key={name} value={name}>{name}</option>)}
-                </select>
+                <Select
+                  label="Provider"
+                  value={draft.model.endpoint_id}
+                  options={endpoints.length === 0
+                    ? [{ value: "", label: "No providers configured", disabled: true }]
+                    : endpoints.map((item) => ({ value: item.id, label: item.name }))}
+                  onChange={(value) => {
+                    const next = endpoints.find((item) => item.id === value);
+                    patch({ model: { kind: "remote", endpoint_id: value, model: next?.models[0] ?? "" } });
+                  }}
+                  className="flex-1"
+                />
+                <Select
+                  label="Model"
+                  value={draft.model.model}
+                  options={(endpoint?.models ?? []).map((name) => ({ value: name, label: name }))}
+                  onChange={(value) => patch({ model: { kind: "remote", endpoint_id: remote?.endpoint_id ?? "", model: value } })}
+                  className="flex-1"
+                />
               </div>
             )}
           </div>
@@ -205,9 +226,14 @@ export default function JobEditor({
                 <label className="flex flex-wrap items-center gap-2">
                   <input type="radio" checked={repeatKind === "weekly"} onChange={() => setRepeatKind("weekly")} />
                   On
-                  <select value={weekday} disabled={repeatKind !== "weekly"} onChange={(event) => setWeekday(Number(event.target.value))} className="min-h-9 rounded-lg border border-[var(--line)] bg-[var(--page)] px-2 disabled:opacity-40">
-                    {WEEKDAYS.map((day, index) => <option key={day} value={index}>{day}</option>)}
-                  </select>
+                  <Select
+                    label="Weekday"
+                    value={String(weekday)}
+                    options={WEEKDAYS.map((day, index) => ({ value: String(index), label: day }))}
+                    onChange={(value) => setWeekday(Number(value))}
+                    disabled={repeatKind !== "weekly"}
+                    className="w-32"
+                  />
                   at
                   <input type="time" value={weeklyAt} disabled={repeatKind !== "weekly"} onChange={(event) => setWeeklyAt(event.target.value)} className="min-h-9 rounded-lg border border-[var(--line)] bg-[var(--page)] px-2 disabled:opacity-40" />
                   <span className="text-[12px] text-[var(--quiet)]">empty = as soon as that day arrives</span>
@@ -245,12 +271,16 @@ export default function JobEditor({
         </Field>
 
         <Field label="Workspace" hint="The folder the job works in. The tools are pointed at it for the run, then put back.">
-          <select value={draft.workspace ?? ""} onChange={(event) => patch({ workspace: event.target.value || null })} className="min-h-9 w-full rounded-lg border border-[var(--line)] bg-[var(--page)] px-2 text-[13px] text-[var(--text)]">
-            <option value="">The workspace that is open</option>
-            {workspaces.paths.map((path) => (
-              <option key={path} value={path}>{workspaceLabel(path)} — {path}</option>
-            ))}
-          </select>
+          <Select
+            label="Workspace"
+            value={draft.workspace ?? ""}
+            options={[
+              { value: "", label: "The workspace that is open" },
+              ...workspaces.paths.map((path) => ({ value: path, label: `${workspaceLabel(path)} — ${path}` })),
+            ]}
+            onChange={(value) => patch({ workspace: value || null })}
+            className="w-full"
+          />
         </Field>
 
         <Field label="Access" hint="What this job's agent may use. A tool that is off is not offered to the model at all. Jobs is always off for a job's own run, so it cannot schedule more work.">

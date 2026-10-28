@@ -1,10 +1,11 @@
 import { useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Download, LoaderCircle, Plus, Search, X } from "lucide-react";
+import { Download, Folder, LoaderCircle, Plus, Search, X } from "lucide-react";
 import { ANCHOR_ATTRIBUTE, FlashHighlight, MARKABLE_ATTRIBUTE, SettingsPageTitle } from "./SettingsSection";
 import SkillRow from "./skills/SkillRow";
 import InstallSkillDialog from "./skills/InstallSkillDialog";
 import SkillsEmptyState from "./skills/SkillsEmptyState";
+import NameInput from "./rightPanel/tabs/NameInput";
 import { createSkill, useSkillList } from "../features/skills/useSkills";
 import type { Skill } from "../features/skills/types";
 import type { Notify } from "../features/notifications/types";
@@ -35,6 +36,8 @@ export default function SkillsPage({
   const [query, setQuery] = useState("");
   const [installing, setInstalling] = useState(false);
   const [busy, setBusy] = useState(false);
+  /** The name field is open, waiting for a skill's name. */
+  const [naming, setNaming] = useState(false);
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -47,14 +50,14 @@ export default function SkillsPage({
   /**
    * Makes a new skill and opens it.
    *
-   * The name is asked for with the browser's own prompt rather than a page of the
-   * settings window: a skill's only required field is its name, the folder is
-   * where every other part of it is written, and a whole page to collect one
-   * string would close again a second later.
+   * **The name is typed in the page, not in a browser prompt.** `window.prompt`
+   * is not implemented by the webview the app runs in -- it returns `null` and
+   * the press looked like a button that did nothing. The field is the tree's own
+   * naming control (`NameInput`), so Enter commits, Escape cancels and clicking
+   * away keeps the name, exactly as creating a file or renaming a row behaves.
    */
-  const create = async () => {
-    const name = window.prompt("Name the skill", "")?.trim();
-    if (!name) return;
+  const create = async (name: string) => {
+    setNaming(false);
     setBusy(true);
     try {
       const skill = await createSkill(name);
@@ -102,7 +105,7 @@ export default function SkillsPage({
           <button
             type="button"
             {...{ [ANCHOR_ATTRIBUTE]: "skills.list", [MARKABLE_ATTRIBUTE]: "" }}
-            onClick={() => void create()}
+            onClick={() => setNaming(true)}
             disabled={busy}
             className="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-[var(--accent)] px-3.5 text-[12.5px] font-semibold text-[var(--accent-ink)] transition-opacity hover:opacity-90 disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
           >
@@ -111,6 +114,21 @@ export default function SkillsPage({
           </button>
         </div>
       </SettingsPageTitle>
+
+      {/* The name lives in the page, beside the list it is about to join -- the
+          same inline row the Files tree uses. It stays open while the folder is
+          being made, so the spinner on the button has something to belong to. */}
+      {naming && (
+        <div className="mb-4 flex items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-2">
+          <Folder size={14} className="shrink-0 text-[var(--muted)]" />
+          <span className="shrink-0 text-[12px] text-[var(--quiet)]">New skill</span>
+          <NameInput
+            initialValue="new-skill"
+            onCommit={(name) => void create(name)}
+            onCancel={() => setNaming(false)}
+          />
+        </div>
+      )}
 
       {loading ? (
         <p className="flex items-center gap-2 text-sm text-[var(--muted)]">
@@ -121,7 +139,7 @@ export default function SkillsPage({
           Skills could not be read: {failed}
         </p>
       ) : skills.length === 0 ? (
-        <SkillsEmptyState onCreate={() => void create()} />
+        <SkillsEmptyState onCreate={() => setNaming(true)} />
       ) : (
         <>
           {skills.length > 5 && (

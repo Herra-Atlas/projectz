@@ -15,6 +15,7 @@ import { formatDuration } from "../../features/chat/duration";
 
 const PROMPT_COLOR = "var(--accent)";
 const COMPLETION_COLOR = "var(--muted)";
+const CACHED_COLOR = "var(--series-2)";
 const RATE_COLOR = "var(--accent)";
 
 const AXIS = { stroke: "var(--quiet)", fontSize: 10 } as const;
@@ -27,13 +28,13 @@ const TOOLTIP_STYLE = {
   fontSize: 12,
 } as const;
 
-/** Input against output tokens, one pair of bars per reply. */
+/** The conversation each reply started from, against what it produced. */
 export function ReplyTokensChart({ stats }: { stats: SessionStats }) {
   if (stats.replies.length === 0) return <ChartEmpty />;
 
   const data = stats.replies.map((reply) => ({
     label: `#${reply.index}`,
-    prompt: reply.promptTokens,
+    prompt: reply.contextTokens,
     completion: reply.completionTokens,
   }));
 
@@ -48,10 +49,13 @@ export function ReplyTokensChart({ stats }: { stats: SessionStats }) {
             cursor={{ fill: "color-mix(in srgb, var(--raised) 60%, transparent)" }}
             contentStyle={TOOLTIP_STYLE}
             labelStyle={{ color: "var(--muted)" }}
-            formatter={(value, name) => [formatTokens(Number(value)), name === "prompt" ? "Input" : "Output"]}
+            formatter={(value, name) => [formatTokens(Number(value)), name === "prompt" ? "Context" : "Output"]}
           />
-          <Bar dataKey="prompt" fill={PROMPT_COLOR} radius={[3, 3, 0, 0]} maxBarSize={14} />
-          <Bar dataKey="completion" fill={COMPLETION_COLOR} radius={[3, 3, 0, 0]} maxBarSize={14} />
+          {/* No entrance animation: Recharts replays it on every container
+              resize, so dragging the panel made a finished chart redraw itself
+              from the left. */}
+          <Bar dataKey="prompt" fill={PROMPT_COLOR} radius={[3, 3, 0, 0]} maxBarSize={14} isAnimationActive={false} />
+          <Bar dataKey="completion" fill={COMPLETION_COLOR} radius={[3, 3, 0, 0]} maxBarSize={14} isAnimationActive={false} />
         </BarChart>
       </ResponsiveContainer>
     </div>
@@ -87,28 +91,36 @@ export function ReplyRateChart({ stats }: { stats: SessionStats }) {
               return [seconds ? `${rate} in ${formatDuration(seconds)}` : rate, "Speed"];
             }}
           />
-          <Line type="monotone" dataKey="rate" stroke={RATE_COLOR} strokeWidth={2} dot={{ r: 2.5 }} activeDot={{ r: 4 }} />
+          <Line type="monotone" dataKey="rate" stroke={RATE_COLOR} strokeWidth={2} dot={{ r: 2.5 }} activeDot={{ r: 4 }} isAnimationActive={false} />
         </LineChart>
       </ResponsiveContainer>
     </div>
   );
 }
 
-/** Context growth: the prompt size sent for each reply, in turn order.
+/** Context growth: how large the conversation was when each reply started.
  *
  * The x axis is the reply's position rather than a clock time, because messages
  * carry the session's timestamp rather than their own, so a real timeline would
- * collapse every point onto one date. The tooltip reports both halves of the
- * exchange, since a growing input with a flat output is the shape worth seeing.
+ * collapse every point onto one date. The figure is the reply's **first** request,
+ * not its last: a tool round re-sends results that are never stored, so plotting
+ * the final round drew a peak the next turn could never repeat and made an
+ * ordinary tool call look like the context collapsing.
+ *
+ * The cached line is what the provider said it already had. It tracks the input
+ * closely when the prefix is stable, which is the shape of a conversation whose
+ * cache is working.
  */
 export function ContextChart({ stats }: { stats: SessionStats }) {
   if (stats.context.length === 0) return <ChartEmpty />;
 
   const data = stats.context.map((point) => ({
     label: `#${point.index}`,
-    prompt: point.promptTokens,
+    prompt: point.contextTokens,
     completion: point.completionTokens,
+    cached: point.cachedTokens,
   }));
+  const anyCached = stats.context.some((point) => point.cachedTokens !== null);
 
   return (
     <div className="h-[150px] w-full">
@@ -127,7 +139,10 @@ export function ContextChart({ stats }: { stats: SessionStats }) {
             cursor={{ stroke: GRID }}
             contentStyle={TOOLTIP_STYLE}
             labelStyle={{ color: "var(--muted)" }}
-            formatter={(value, name) => [formatTokens(Number(value)), name === "prompt" ? "Input" : "Output"]}
+            formatter={(value, name) => [
+              formatTokens(Number(value)),
+              name === "prompt" ? "Context" : name === "cached" ? "Cached" : "Output",
+            ]}
           />
           <Area
             type="monotone"
@@ -137,7 +152,23 @@ export function ContextChart({ stats }: { stats: SessionStats }) {
             fill="url(#pz-context-fill)"
             dot={{ r: 2.5 }}
             activeDot={{ r: 4 }}
+            isAnimationActive={false}
           />
+          {/* Only when a provider reported it: an absent figure is "not said",
+              and a flat line at zero would read as "nothing was cached". */}
+          {anyCached && (
+            <Line
+              type="monotone"
+              dataKey="cached"
+              stroke={CACHED_COLOR}
+              strokeWidth={1.5}
+              strokeDasharray="3 3"
+              dot={false}
+              activeDot={{ r: 3 }}
+              connectNulls={false}
+              isAnimationActive={false}
+            />
+          )}
         </AreaChart>
       </ResponsiveContainer>
     </div>

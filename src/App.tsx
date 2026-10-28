@@ -9,6 +9,7 @@ import { NotificationHostProvider } from "./features/notifications/notificationH
 import { useCopiedNotification, useNotifications } from "./features/notifications/useNotifications";
 import Sidebar from "./components/Sidebar";
 import TooltipLayer from "./components/TooltipLayer";
+import FindBar from "./components/find/FindBar";
 import ChatPage from "./pages/chat/ChatPage";
 import SettingsModal from "./components/SettingsModal";
 import StartupScreen from "./components/StartupScreen";
@@ -24,6 +25,7 @@ import { useRightPanel } from "./features/rightPanel/useRightPanel";
 import { displayModelName } from "./features/models/modelName";
 import { useWorkspaces, workspaceLabel } from "./features/workspace/useWorkspaces";
 import { loadGeneralSettings } from "./features/settings/generalSettings";
+import { loadNotificationSettings } from "./features/notifications/settings";
 import { createPortal } from "react-dom";
 import type { ChatMessage, SessionActivity, SessionRunStatus } from "./features/chat/types";
 import type { WorkingMode } from "./features/chat/chatMode";
@@ -330,7 +332,14 @@ function AppShell() {
       // Behind the startup screen, so the chat page's greeting and the composer's
       // preferences are already in memory when the app first renders. Read after
       // the import above, which is what migrates this record on an old install.
-      return loadGeneralSettings().catch(() => undefined);
+      //
+      // The notification record is primed here too, because a reply can finish
+      // before any settings page has been opened and its completion sound is read
+      // from the cache at that moment.
+      return Promise.all([
+        loadGeneralSettings(),
+        loadNotificationSettings(),
+      ]).catch(() => undefined);
     }).then(() => {
       if (!mounted) return;
       setStartupProgress({ phase: "ready", message: "Opening ProjectZ", progress: 100 });
@@ -748,6 +757,10 @@ function AppShell() {
       />
 
       <NotificationStack notifications={notifications} copiedId={copiedNotificationId} onDismiss={dismissNotification} onCopy={copyNotification} />
+      {/* One find bar for the whole app. It portals itself into the settings
+          dialog when that is open, and searches whichever surfaces declared
+          themselves scopes -- so Ctrl+F means the same thing on every view. */}
+      <FindBar />
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} onEndpointsChanged={() => setEndpointRefreshKey((key) => key + 1)} preferences={preferences} onPreferencesChange={savePreferences} appearance={appearance} onAppearanceChange={saveAppearance} notify={notify} onOpenSkill={(slug) => { setOpenSkill(slug); setSettingsOpen(false); }} />
       <TooltipLayer />
     </div>

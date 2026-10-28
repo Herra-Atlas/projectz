@@ -19,6 +19,8 @@ pub struct TokenBucket {
     pub bucket: String,
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
+    /// Calls made to a model in this bucket, tool rounds included.
+    pub requests: i64,
 }
 
 /// One conversation's contribution, used for the per-model and activity figures.
@@ -38,6 +40,8 @@ pub struct ModelUsage {
     pub model_id: String,
     pub provider_id: String,
     pub replies: i64,
+    /// Calls to this model, which is more than `replies` once tools are used.
+    pub requests: i64,
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
 }
@@ -48,8 +52,23 @@ pub struct ModelBucket {
     pub bucket: String,
     pub model_id: String,
     pub provider_id: String,
+    pub requests: i64,
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
+}
+
+/// One tool, as the agent's own steps recorded it.
+///
+/// Counted from `messages.activity_json` rather than from message rows: a tool
+/// call is a step inside a reply, not a turn, which is why the old "searches"
+/// figure was always zero. `cached` and `failed` are the two things worth
+/// separating — a cached call costs nothing and a failed one cost a round.
+#[derive(Serialize, Clone, Debug)]
+pub struct ToolUsage {
+    pub tool: String,
+    pub calls: i64,
+    pub cached: i64,
+    pub failed: i64,
 }
 
 /// Everything the statistics page renders, for one timeframe.
@@ -65,6 +84,9 @@ pub struct UsageReport {
     pub prompt_tokens: i64,
     pub completion_tokens: i64,
     pub total_tokens: i64,
+    /// Calls made to a model over the period, tool rounds included. One reply
+    /// that ran three tools is four requests.
+    pub requests: i64,
     /// Prompt tokens the provider reported as served from its cache, over the
     /// period.
     pub cached_tokens: i64,
@@ -103,6 +125,42 @@ pub struct UsageReport {
     pub taste_models: Vec<ModelUsage>,
     /// Taste's per-model, per-bucket tokens, for the taste series view.
     pub taste_timeline: Vec<ModelBucket>,
+    /// Tool calls made in the period, busiest first, counted from the steps the
+    /// run recorded rather than from message rows.
+    pub tools: Vec<ToolUsage>,
+    /// The headline figures for the period immediately before this one.
+    ///
+    /// Carried so the figure row can say what each number did against the
+    /// equivalent period, which is the second line of a card. Only totals: the
+    /// page draws one comparison per card, so a timeline or a breakdown would be
+    /// computed and never read.
+    pub previous: PreviousUsage,
+}
+
+/// The same headline figures, over the period before the one on screen.
+///
+/// Every field is a total the figure row compares against. `Default` is what an
+/// unknown previous period looks like, so the frontend reads zeroes rather than
+/// having to tell "no comparison" apart from a missing field.
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct PreviousUsage {
+    pub sessions: i64,
+    pub user_messages: i64,
+    pub assistant_messages: i64,
+    pub searches: i64,
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    pub total_tokens: i64,
+    pub requests: i64,
+    /// Cache figures, so the hit-rate card's change is measured exactly the way
+    /// the rate itself is: over the replies that reported a figure at all.
+    pub cached_tokens: i64,
+    pub cache_prompt_tokens: i64,
+    pub cache_reported_replies: i64,
+    pub taste_total_tokens: i64,
+    /// Distinct model/provider pairs, matching what `models.len()` counts for
+    /// the current period. Grouped the same way, so the two are comparable.
+    pub models: i64,
 }
 
 /// How many models the per-model series plots.
@@ -113,6 +171,17 @@ pub struct UsageReport {
 /// never anything a caller supplied.
 const MODEL_SERIES_LIMIT: usize = 6;
 
+/// One reply's request count, read from the run's own metrics.
+///
+/// The run loop counts a request every time it calls the model, so a reply that
+/// ran tools reports more than one. The JSON column is read rather than a real
+/// one because this figure arrived after the schema's last migration and a
+/// counter that only ever grows does not justify one. A reply written before the
+/// counter existed made at least one request, so `COALESCE(..., 1)` is exact for
+/// a single-request reply and an undercount only for an old tool-heavy one.
+const REPLY_REQUESTS: &str =
+    "COALESCE(CAST(json_extract(metrics_json,'$.requests') AS INTEGER), 1)";
+
 /// Counts a column that may be NULL, treating NULL as zero so a conversation
 /// that never reported tokens contributes a zero rather than dropping out.
 fn sum_or_zero(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<i64> {
@@ -120,19 +189,137 @@ fn sum_or_zero(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<i64> {
         .map(|value| value.unwrap_or(0))
 }
 
+/// The headline figures for the window `[previous_since, since)`.
+///
+/// The upper bound is exclusive and the lower one inclusive, so the two windows
+/// tile without counting a day twice: the last day of the previous period is the
+/// day before the first day of the current one.
+///
+/// Only the totals `PreviousUsage` carries are read, in four queries rather than
+/// one per figure. The cache columns are read the way the current period reads
+/// them -- over replies that reported a figure -- because a rate divided by the
+/// period's whole prompt would not be comparable with the rate beside it.
+fn previous_usage(
+    connection: &Connection,
+    previous_since: &str,
+    since: &str,
+) -> Result<PreviousUsage, String> {
+    let sessions = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sessions
+             WHERE substr(created_at,1,10) >= ?1 AND substr(created_at,1,10) < ?2",
+            params![previous_since, since],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| error.to_string())?;
+
+    let (
+        user_messages,
+        assistant_messages,
+        searches,
+        prompt_tokens,
+        completion_tokens,
+        requests,
+        cached_tokens,
+        cache_prompt_tokens,
+        cache_reported_replies,
+    ) = connection
+        .query_row(
+            &format!(
+                "SELECT
+                     COALESCE(SUM(role = 'user'), 0),
+                     COALESCE(SUM(role = 'assistant'), 0),
+                     COALESCE(SUM(role = 'tool'), 0),
+                     COALESCE(SUM(prompt_tokens), 0),
+                     COALESCE(SUM(completion_tokens), 0),
+                     COALESCE(SUM(CASE WHEN role = 'assistant' THEN {REPLY_REQUESTS} ELSE 0 END), 0),
+                     COALESCE(SUM(cached_tokens), 0),
+                     COALESCE(SUM(CASE WHEN cached_tokens IS NOT NULL THEN prompt_tokens ELSE 0 END), 0),
+                     COALESCE(SUM(cached_tokens IS NOT NULL), 0)
+                 FROM messages
+                 WHERE substr(created_at,1,10) >= ?1 AND substr(created_at,1,10) < ?2"
+            ),
+            params![previous_since, since],
+            |row| {
+                Ok((
+                    sum_or_zero(row, 0)?,
+                    sum_or_zero(row, 1)?,
+                    sum_or_zero(row, 2)?,
+                    sum_or_zero(row, 3)?,
+                    sum_or_zero(row, 4)?,
+                    sum_or_zero(row, 5)?,
+                    sum_or_zero(row, 6)?,
+                    sum_or_zero(row, 7)?,
+                    sum_or_zero(row, 8)?,
+                ))
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+    // Grouped by model *and* provider, which is the pair `models` holds for the
+    // current period: the same model name behind two providers is two rows
+    // there, so it has to be two here for the comparison to mean anything.
+    let models = connection
+        .query_row(
+            "SELECT COUNT(*) FROM (
+                 SELECT 1 FROM messages
+                 WHERE substr(created_at,1,10) >= ?1 AND substr(created_at,1,10) < ?2
+                       AND model_id IS NOT NULL AND role = 'assistant'
+                 GROUP BY model_id, provider_id
+             )",
+            params![previous_since, since],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| error.to_string())?;
+
+    let (taste_prompt_tokens, taste_completion_tokens) = connection
+        .query_row(
+            "SELECT COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0)
+             FROM taste_runs
+             WHERE substr(started_at,1,10) >= ?1 AND substr(started_at,1,10) < ?2",
+            params![previous_since, since],
+            |row| Ok((sum_or_zero(row, 0)?, sum_or_zero(row, 1)?)),
+        )
+        .map_err(|error| error.to_string())?;
+
+    Ok(PreviousUsage {
+        sessions,
+        user_messages,
+        assistant_messages,
+        searches,
+        prompt_tokens,
+        completion_tokens,
+        total_tokens: prompt_tokens + completion_tokens,
+        requests,
+        cached_tokens,
+        cache_prompt_tokens,
+        cache_reported_replies,
+        taste_total_tokens: taste_prompt_tokens + taste_completion_tokens,
+        models,
+    })
+}
+
 /// Builds a report for activity on or after `since`.
 ///
 /// `since` is an ISO date (`YYYY-MM-DD`). Bucketing happens in the timeline
 /// query only, so the caller picks the bucket width through `bucket_sql`.
 ///
-/// Every figure is read from a real column. `save_chat_session` writes the
-/// per-reply metrics into `messages.prompt_tokens` / `completion_tokens` and
-/// maintains `sessions.prompt_tokens` / `completion_tokens` as a rollup, so no
-/// query here parses `metrics_json` and each one is a plain numeric aggregate
-/// that SQLite can serve from the `created_at` index.
+/// `previous_since` is the start of the equivalent period immediately before
+/// `since`, or `None` when there is nothing to compare against. It comes from
+/// the same timeframe table as `since`, so both windows are the same length by
+/// construction rather than by two calculations agreeing.
+///
+/// Almost every figure is read from a real column. `save_chat_session` writes
+/// the per-reply metrics into `messages.prompt_tokens` / `completion_tokens` and
+/// maintains `sessions.prompt_tokens` / `completion_tokens` as a rollup, so each
+/// aggregate is a numeric sum SQLite can serve from the `created_at` index. Two
+/// exceptions read JSON, both for figures that have no column: `requests` (the
+/// run's own count of calls, see `REPLY_REQUESTS`) and the tool calls in
+/// `activity_json`, which are steps inside a reply rather than turns.
 pub fn build_report(
     connection: &Connection,
     since: &str,
+    previous_since: Option<&str>,
     range: &str,
     bucket_sql: &str,
 ) -> Result<UsageReport, String> {
@@ -164,12 +351,24 @@ pub fn build_report(
         )
         .map_err(|error| error.to_string())?;
 
-    let (prompt_tokens, completion_tokens) = connection
+    // Requests are summed only over replies: a user message and a tool row are
+    // not calls to a model, and counting them would make the figure meaningless.
+    let (prompt_tokens, completion_tokens, requests) = connection
         .query_row(
-            "SELECT COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0)
-             FROM messages WHERE substr(created_at,1,10) >= ?1",
+            &format!(
+                "SELECT COALESCE(SUM(prompt_tokens), 0),
+                        COALESCE(SUM(completion_tokens), 0),
+                        COALESCE(SUM(CASE WHEN role = 'assistant' THEN {REPLY_REQUESTS} ELSE 0 END), 0)
+                 FROM messages WHERE substr(created_at,1,10) >= ?1"
+            ),
             params![since],
-            |row| Ok((sum_or_zero(row, 0)?, sum_or_zero(row, 1)?)),
+            |row| {
+                Ok((
+                    sum_or_zero(row, 0)?,
+                    sum_or_zero(row, 1)?,
+                    sum_or_zero(row, 2)?,
+                ))
+            },
         )
         .map_err(|error| error.to_string())?;
 
@@ -183,7 +382,8 @@ pub fn build_report(
         .prepare(&format!(
             "SELECT {bucket_sql} AS bucket,
                     COALESCE(SUM(prompt_tokens), 0),
-                    COALESCE(SUM(completion_tokens), 0)
+                    COALESCE(SUM(completion_tokens), 0),
+                    COALESCE(SUM(CASE WHEN role = 'assistant' THEN {REPLY_REQUESTS} ELSE 0 END), 0)
              FROM messages
              WHERE substr(created_at,1,10) >= ?1 AND completion_tokens IS NOT NULL
              GROUP BY bucket ORDER BY bucket ASC"
@@ -195,6 +395,7 @@ pub fn build_report(
                 bucket: row.get(0)?,
                 prompt_tokens: sum_or_zero(row, 1)?,
                 completion_tokens: sum_or_zero(row, 2)?,
+                requests: sum_or_zero(row, 3)?,
             })
         })
         .map_err(|error| error.to_string())?
@@ -259,15 +460,16 @@ pub fn build_report(
         .map_err(|error| error.to_string())?;
 
     let mut model_statement = connection
-        .prepare(
+        .prepare(&format!(
             "SELECT model_id, COALESCE(provider_id, ''), COUNT(*),
+                    COALESCE(SUM({REPLY_REQUESTS}), 0),
                     COALESCE(SUM(prompt_tokens), 0),
                     COALESCE(SUM(completion_tokens), 0)
              FROM messages
              WHERE substr(created_at,1,10) >= ?1 AND model_id IS NOT NULL AND role = 'assistant'
              GROUP BY model_id, provider_id
-             ORDER BY COUNT(*) DESC",
-        )
+             ORDER BY COUNT(*) DESC"
+        ))
         .map_err(|error| error.to_string())?;
     let models = model_statement
         .query_map(params![since], |row| {
@@ -275,8 +477,9 @@ pub fn build_report(
                 model_id: row.get(0)?,
                 provider_id: row.get(1)?,
                 replies: sum_or_zero(row, 2)?,
-                prompt_tokens: sum_or_zero(row, 3)?,
-                completion_tokens: sum_or_zero(row, 4)?,
+                requests: sum_or_zero(row, 3)?,
+                prompt_tokens: sum_or_zero(row, 4)?,
+                completion_tokens: sum_or_zero(row, 5)?,
             })
         })
         .map_err(|error| error.to_string())?
@@ -293,6 +496,7 @@ pub fn build_report(
     let mut model_timeline_statement = connection
         .prepare(&format!(
             "SELECT {bucket_sql} AS bucket, model_id, COALESCE(provider_id, ''),
+                    COALESCE(SUM({REPLY_REQUESTS}), 0),
                     COALESCE(SUM(prompt_tokens), 0),
                     COALESCE(SUM(completion_tokens), 0)
              FROM messages
@@ -319,8 +523,9 @@ pub fn build_report(
                 bucket: row.get(0)?,
                 model_id: row.get(1)?,
                 provider_id: row.get(2)?,
-                prompt_tokens: sum_or_zero(row, 3)?,
-                completion_tokens: sum_or_zero(row, 4)?,
+                requests: sum_or_zero(row, 3)?,
+                prompt_tokens: sum_or_zero(row, 4)?,
+                completion_tokens: sum_or_zero(row, 5)?,
             })
         })
         .map_err(|error| error.to_string())?
@@ -365,6 +570,9 @@ pub fn build_report(
                 model_id: row.get(0)?,
                 provider_id: row.get(1)?,
                 replies: sum_or_zero(row, 2)?,
+                // One learning run is one request; there is no tool loop to add
+                // rounds to it.
+                requests: sum_or_zero(row, 2)?,
                 prompt_tokens: sum_or_zero(row, 3)?,
                 completion_tokens: sum_or_zero(row, 4)?,
             })
@@ -380,6 +588,7 @@ pub fn build_report(
     let mut taste_timeline_statement = connection
         .prepare(&format!(
             "SELECT {bucket_sql} AS bucket, model_id, COALESCE(provider_id, ''),
+                    COUNT(*),
                     COALESCE(SUM(prompt_tokens), 0),
                     COALESCE(SUM(completion_tokens), 0)
              FROM (
@@ -398,13 +607,58 @@ pub fn build_report(
                 bucket: row.get(0)?,
                 model_id: row.get(1)?,
                 provider_id: row.get(2)?,
-                prompt_tokens: sum_or_zero(row, 3)?,
-                completion_tokens: sum_or_zero(row, 4)?,
+                requests: sum_or_zero(row, 3)?,
+                prompt_tokens: sum_or_zero(row, 4)?,
+                completion_tokens: sum_or_zero(row, 5)?,
             })
         })
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
+
+    // What the agent *did*, as opposed to what it cost.
+    //
+    // A tool call is a step inside a reply, not a message row, so this reads the
+    // steps the run stored. `json_each` walks `activity_json` in SQL and returns
+    // one row per step; `kind = 'tool'` selects the calls. Only rows inside the
+    // period are read, by the same date prefix every other query uses.
+    //
+    // `cached` and `failed` are kept apart because they mean different things: a
+    // cached call was answered without work, a failed one cost a round and
+    // produced nothing.
+    let mut tool_statement = connection
+        .prepare(
+            "SELECT json_extract(step.value, '$.tool') AS tool,
+                    COUNT(*),
+                    COALESCE(SUM(json_extract(step.value, '$.cached') = 1), 0),
+                    COALESCE(SUM(json_extract(step.value, '$.failed') = 1), 0)
+             FROM messages AS message, json_each(message.activity_json) AS step
+             WHERE substr(message.created_at,1,10) >= ?1
+                   AND json_extract(step.value, '$.kind') = 'tool'
+                   AND json_extract(step.value, '$.tool') IS NOT NULL
+             GROUP BY tool
+             ORDER BY COUNT(*) DESC",
+        )
+        .map_err(|error| error.to_string())?;
+    let tools = tool_statement
+        .query_map(params![since], |row| {
+            Ok(ToolUsage {
+                tool: row.get(0)?,
+                calls: sum_or_zero(row, 1)?,
+                cached: sum_or_zero(row, 2)?,
+                failed: sum_or_zero(row, 3)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    // The comparison window. Read once, after the figures it is compared
+    // against, so a failed comparison query cannot half-fill a report.
+    let previous = match previous_since {
+        Some(start) => previous_usage(connection, start, since)?,
+        None => PreviousUsage::default(),
+    };
 
     Ok(UsageReport {
         range: range.to_string(),
@@ -416,6 +670,7 @@ pub fn build_report(
         prompt_tokens,
         completion_tokens,
         total_tokens: prompt_tokens + completion_tokens,
+        requests,
         cached_tokens,
         cache_prompt_tokens,
         cache_reported_replies,
@@ -429,6 +684,8 @@ pub fn build_report(
         taste_runs,
         taste_models,
         taste_timeline,
+        tools,
+        previous,
     })
 }
 
@@ -464,7 +721,14 @@ mod tests {
                      -- records that the provider reported no cache figure, and a
                      -- default of 0 would turn an unknown into a fact. See
                      -- `cache_hits_ignore_replies_that_reported_no_figure`.
-                     cached_tokens INTEGER
+                     cached_tokens INTEGER,
+                     -- The run's own metrics. `requests` lives here rather than in
+                     -- a column: the counter arrived after the last migration and
+                     -- is only ever read by this report.
+                     metrics_json TEXT,
+                     -- The steps behind a reply, which is where a tool call is
+                     -- recorded. There is no `role = 'tool'` row to count.
+                     activity_json TEXT
                  );
                  CREATE TABLE taste_runs (
                      id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -544,8 +808,14 @@ mod tests {
             None,
         );
 
-        let report =
-            build_report(&connection, "2026-10-01", "7d", "substr(created_at,1,10)").unwrap();
+        let report = build_report(
+            &connection,
+            "2026-10-01",
+            None,
+            "7d",
+            "substr(created_at,1,10)",
+        )
+        .unwrap();
 
         assert_eq!(
             report.total_tokens, 140,
@@ -668,8 +938,14 @@ mod tests {
             Some(50),
         );
 
-        let report =
-            build_report(&connection, "2026-10-01", "30d", "substr(created_at,1,10)").unwrap();
+        let report = build_report(
+            &connection,
+            "2026-10-01",
+            None,
+            "30d",
+            "substr(created_at,1,10)",
+        )
+        .unwrap();
         assert_eq!(report.cached_tokens, 700);
         // 2000, not 7000: the unreported reply is excluded from both sides, so
         // the rate is a like-for-like ratio rather than a diluted one.
@@ -697,8 +973,14 @@ mod tests {
             Some(50),
         );
 
-        let report =
-            build_report(&connection, "2026-10-01", "30d", "substr(created_at,1,10)").unwrap();
+        let report = build_report(
+            &connection,
+            "2026-10-01",
+            None,
+            "30d",
+            "substr(created_at,1,10)",
+        )
+        .unwrap();
         assert_eq!(report.cache_reported_replies, 0);
         assert_eq!(report.cached_tokens, 0);
     }
@@ -741,8 +1023,14 @@ mod tests {
             Some(20),
         );
 
-        let report =
-            build_report(&connection, "2026-10-01", "30d", "substr(created_at,1,10)").unwrap();
+        let report = build_report(
+            &connection,
+            "2026-10-01",
+            None,
+            "30d",
+            "substr(created_at,1,10)",
+        )
+        .unwrap();
 
         assert_eq!(report.sessions, 1);
         assert_eq!(report.user_messages, 1);
@@ -780,8 +1068,14 @@ mod tests {
             Some(5),
         );
 
-        let report =
-            build_report(&connection, "2026-10-01", "7d", "substr(created_at,1,10)").unwrap();
+        let report = build_report(
+            &connection,
+            "2026-10-01",
+            None,
+            "7d",
+            "substr(created_at,1,10)",
+        )
+        .unwrap();
 
         assert_eq!(report.sessions, 1);
         assert_eq!(report.prompt_tokens, 10);
@@ -827,8 +1121,14 @@ mod tests {
             Some(8),
         );
 
-        let report =
-            build_report(&connection, "2026-10-01", "7d", "substr(created_at,1,10)").unwrap();
+        let report = build_report(
+            &connection,
+            "2026-10-01",
+            None,
+            "7d",
+            "substr(created_at,1,10)",
+        )
+        .unwrap();
 
         assert_eq!(report.timeline.len(), 2);
         assert_eq!(report.timeline[0].bucket, "2026-10-01");
@@ -866,8 +1166,14 @@ mod tests {
             Some(9),
         );
 
-        let report =
-            build_report(&connection, "2026-10-01", "7d", "substr(created_at,1,10)").unwrap();
+        let report = build_report(
+            &connection,
+            "2026-10-01",
+            None,
+            "7d",
+            "substr(created_at,1,10)",
+        )
+        .unwrap();
 
         // The aggregate view carries one bucket holding both replies' totals,
         // while the per-model view carries one entry per model for that same
@@ -912,8 +1218,14 @@ mod tests {
             );
         }
 
-        let report =
-            build_report(&connection, "2026-10-01", "7d", "substr(created_at,1,10)").unwrap();
+        let report = build_report(
+            &connection,
+            "2026-10-01",
+            None,
+            "7d",
+            "substr(created_at,1,10)",
+        )
+        .unwrap();
 
         assert_eq!(report.models.len(), MODEL_SERIES_LIMIT + 1);
         assert_eq!(report.model_timeline.len(), MODEL_SERIES_LIMIT);
@@ -958,8 +1270,14 @@ mod tests {
             None,
         );
 
-        let report =
-            build_report(&connection, "2026-10-01", "7d", "substr(created_at,1,10)").unwrap();
+        let report = build_report(
+            &connection,
+            "2026-10-01",
+            None,
+            "7d",
+            "substr(created_at,1,10)",
+        )
+        .unwrap();
 
         assert_eq!(report.model_timeline.len(), 1);
         assert_eq!(report.model_timeline[0].model_id, "gpt");
@@ -1005,8 +1323,14 @@ mod tests {
             None,
         );
 
-        let report =
-            build_report(&connection, "2026-10-01", "7d", "substr(created_at,1,10)").unwrap();
+        let report = build_report(
+            &connection,
+            "2026-10-01",
+            None,
+            "7d",
+            "substr(created_at,1,10)",
+        )
+        .unwrap();
 
         assert_eq!(report.user_messages, 1);
         assert_eq!(report.assistant_messages, 1);
@@ -1047,8 +1371,14 @@ mod tests {
             Some(4),
         );
 
-        let report =
-            build_report(&connection, "2026-10-01", "7d", "substr(created_at,1,10)").unwrap();
+        let report = build_report(
+            &connection,
+            "2026-10-01",
+            None,
+            "7d",
+            "substr(created_at,1,10)",
+        )
+        .unwrap();
 
         assert_eq!(report.session_usage.len(), 1);
         let session = &report.session_usage[0];
@@ -1099,8 +1429,14 @@ mod tests {
             Some(2),
         );
 
-        let report =
-            build_report(&connection, "2026-10-01", "7d", "substr(created_at,1,10)").unwrap();
+        let report = build_report(
+            &connection,
+            "2026-10-01",
+            None,
+            "7d",
+            "substr(created_at,1,10)",
+        )
+        .unwrap();
 
         assert_eq!(report.models.len(), 2);
         let openai = report
@@ -1113,11 +1449,300 @@ mod tests {
         assert_eq!(openai.completion_tokens, 12);
     }
 
+    /// The comparison window is the one before `since`, and it is measured on
+    /// its own rows rather than by subtracting the current period's figures.
+    #[test]
+    fn previous_figures_come_from_the_window_before_since() {
+        let connection = fixture();
+        insert_session(&connection, "old", "Older", "2026-09-25T10:00:00.000Z");
+        insert_message(
+            &connection,
+            "p1",
+            "old",
+            "user",
+            "2026-09-25T10:00:00.000Z",
+            None,
+            None,
+            None,
+            None,
+        );
+        insert_message(
+            &connection,
+            "p2",
+            "old",
+            "assistant",
+            "2026-09-25T10:00:05.000Z",
+            Some("gpt"),
+            Some("openai"),
+            Some(100),
+            Some(40),
+        );
+        connection
+            .execute(
+                "UPDATE messages SET metrics_json = ?2 WHERE id = ?1",
+                params![
+                    "p2",
+                    r#"{"prompt_tokens":100,"completion_tokens":40,"requests":2}"#
+                ],
+            )
+            .unwrap();
+        insert_taste(
+            &connection,
+            "2026-09-25T11:00:00.000Z",
+            Some("gpt-4o-mini"),
+            "openai",
+            Some(2_000),
+            Some(100),
+        );
+
+        insert_session(&connection, "new", "Newer", "2026-10-01T10:00:00.000Z");
+        insert_message(
+            &connection,
+            "c1",
+            "new",
+            "user",
+            "2026-10-01T10:00:00.000Z",
+            None,
+            None,
+            None,
+            None,
+        );
+        insert_message(
+            &connection,
+            "c2",
+            "new",
+            "assistant",
+            "2026-10-01T10:00:05.000Z",
+            Some("gpt"),
+            Some("openai"),
+            Some(10),
+            Some(5),
+        );
+
+        let report = build_report(
+            &connection,
+            "2026-10-01",
+            Some("2026-09-24"),
+            "7d",
+            "substr(created_at,1,10)",
+        )
+        .unwrap();
+
+        // The current period is untouched by the comparison window.
+        assert_eq!(report.sessions, 1);
+        assert_eq!(report.user_messages, 1);
+        assert_eq!(report.prompt_tokens, 10);
+        assert_eq!(report.total_tokens, 15);
+        assert_eq!(report.taste_total_tokens, 0);
+
+        assert_eq!(report.previous.sessions, 1);
+        assert_eq!(report.previous.user_messages, 1);
+        assert_eq!(report.previous.assistant_messages, 1);
+        assert_eq!(report.previous.searches, 0);
+        assert_eq!(report.previous.prompt_tokens, 100);
+        assert_eq!(report.previous.completion_tokens, 40);
+        assert_eq!(report.previous.total_tokens, 140);
+        assert_eq!(report.previous.requests, 2);
+        assert_eq!(report.previous.models, 1);
+        assert_eq!(report.previous.taste_total_tokens, 2_100);
+    }
+
+    /// The two windows tile: the day `since` names is in the current period and
+    /// not in the previous one, so a figure cannot be counted twice.
+    #[test]
+    fn the_boundary_day_belongs_to_the_current_period_only() {
+        let connection = fixture();
+        insert_session(&connection, "s1", "Boundary", "2026-10-01T10:00:00.000Z");
+        insert_message(
+            &connection,
+            "m1",
+            "s1",
+            "assistant",
+            "2026-10-01T10:00:05.000Z",
+            Some("gpt"),
+            Some("openai"),
+            Some(10),
+            Some(5),
+        );
+
+        let report = build_report(
+            &connection,
+            "2026-10-01",
+            Some("2026-10-01"),
+            "7d",
+            "substr(created_at,1,10)",
+        )
+        .unwrap();
+
+        // An empty window: `>= 2026-10-01 AND < 2026-10-01` matches nothing.
+        assert_eq!(report.previous.sessions, 0);
+        assert_eq!(report.previous.total_tokens, 0);
+        // While the day itself is in the current period.
+        assert_eq!(report.total_tokens, 15);
+    }
+
+    /// The previous period's cache figures are narrowed to the replies that
+    /// reported one, exactly as the current period's are. Comparing a
+    /// like-for-like rate with a diluted one would make every period look worse.
+    #[test]
+    fn previous_cache_figures_ignore_replies_that_reported_no_figure() {
+        let connection = fixture();
+        insert_session(&connection, "old", "Older", "2026-09-25T10:00:00.000Z");
+        insert_cached_reply(
+            &connection,
+            "p1",
+            "old",
+            "2026-09-25T10:00:00.000Z",
+            1_000,
+            50,
+            400,
+        );
+        insert_message(
+            &connection,
+            "p2",
+            "old",
+            "assistant",
+            "2026-09-25T11:00:00.000Z",
+            Some("m"),
+            Some("p"),
+            Some(5_000),
+            Some(50),
+        );
+
+        let report = build_report(
+            &connection,
+            "2026-10-01",
+            Some("2026-09-24"),
+            "7d",
+            "substr(created_at,1,10)",
+        )
+        .unwrap();
+
+        assert_eq!(report.previous.cached_tokens, 400);
+        assert_eq!(report.previous.cache_prompt_tokens, 1_000);
+        assert_eq!(report.previous.cache_reported_replies, 1);
+    }
+
+    /// No previous window is zeroes rather than an error: a caller with nothing
+    /// to compare against still gets a report, and the page draws no change.
+    #[test]
+    fn no_previous_window_reports_zeroes() {
+        let connection = fixture();
+        insert_session(&connection, "s1", "First", "2026-10-01T10:00:00.000Z");
+        insert_message(
+            &connection,
+            "m1",
+            "s1",
+            "assistant",
+            "2026-10-01T10:00:05.000Z",
+            Some("gpt"),
+            Some("openai"),
+            Some(10),
+            Some(5),
+        );
+
+        let report = build_report(
+            &connection,
+            "2026-10-01",
+            None,
+            "7d",
+            "substr(created_at,1,10)",
+        )
+        .unwrap();
+
+        assert_eq!(report.total_tokens, 15);
+        assert_eq!(report.previous.total_tokens, 0);
+        assert_eq!(report.previous.sessions, 0);
+        assert_eq!(report.previous.models, 0);
+    }
+
+    /// A request is one call to the model, and a tool call is a step inside a
+    /// reply. Neither can be read from the row counts: one reply is one row but
+    /// may be several requests, and no row is written for a tool at all.
+    #[test]
+    fn requests_and_tool_calls_are_read_from_the_reply_itself() {
+        let connection = fixture();
+        insert_session(&connection, "s1", "First", "2026-10-01T10:00:00.000Z");
+        insert_message(
+            &connection,
+            "m1",
+            "s1",
+            "assistant",
+            "2026-10-01T10:00:05.000Z",
+            Some("gpt"),
+            Some("openai"),
+            Some(100),
+            Some(40),
+        );
+        connection
+            .execute(
+                "UPDATE messages SET metrics_json = ?2, activity_json = ?3 WHERE id = ?1",
+                params![
+                    "m1",
+                    r#"{"prompt_tokens":100,"completion_tokens":40,"requests":3}"#,
+                    r#"[{"kind":"tool","tool":"read_file","failed":false},
+                        {"kind":"tool","tool":"read_file","cached":true},
+                        {"kind":"tool","tool":"grep","failed":true},
+                        {"kind":"thought"}]"#,
+                ],
+            )
+            .unwrap();
+        // A reply written before the counter existed: at least one request.
+        insert_message(
+            &connection,
+            "m2",
+            "s1",
+            "assistant",
+            "2026-10-01T11:00:00.000Z",
+            Some("gpt"),
+            Some("openai"),
+            Some(10),
+            Some(4),
+        );
+
+        let report = build_report(
+            &connection,
+            "2026-10-01",
+            None,
+            "7d",
+            "substr(created_at,1,10)",
+        )
+        .unwrap();
+
+        // 3 counted + 1 assumed, and the per-model and per-bucket figures agree.
+        assert_eq!(report.requests, 4);
+        assert_eq!(report.models[0].requests, 4);
+        assert_eq!(report.timeline[0].requests, 4);
+
+        assert_eq!(report.tools.len(), 2);
+        let read = report
+            .tools
+            .iter()
+            .find(|entry| entry.tool == "read_file")
+            .unwrap();
+        assert_eq!(read.calls, 2);
+        assert_eq!(read.cached, 1);
+        assert_eq!(read.failed, 0);
+        let grep = report
+            .tools
+            .iter()
+            .find(|entry| entry.tool == "grep")
+            .unwrap();
+        assert_eq!(grep.calls, 1);
+        assert_eq!(grep.failed, 1);
+    }
+
     #[test]
     fn empty_database_reports_zeroes_rather_than_failing() {
         let connection = fixture();
-        let report =
-            build_report(&connection, "2026-10-01", "7d", "substr(created_at,1,10)").unwrap();
+        let report = build_report(
+            &connection,
+            "2026-10-01",
+            None,
+            "7d",
+            "substr(created_at,1,10)",
+        )
+        .unwrap();
 
         assert_eq!(report.sessions, 0);
         assert_eq!(report.total_tokens, 0);

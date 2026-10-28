@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { SttModel } from "../../../features/stt/types";
 import type { Notify } from "../../../features/notifications/types";
 import { SettingsPageTitle } from "../../SettingsSection";
+import Select from "../../Select";
 
 /**
  * Languages worth naming in a picker.
@@ -87,28 +88,23 @@ export function SttModelSettingsPage({
       </SettingsPageTitle>
 
       <section className="px-4 py-3">
-        <label htmlFor="stt-language" className="block text-sm font-medium text-[var(--text)]">
-          Language
-        </label>
+        <span className="block text-sm font-medium text-[var(--text)]">Language</span>
         <p className="mt-0.5 text-xs leading-5 text-[var(--quiet)]">
           {parakeet
             ? "Parakeet works out the language itself, so there is nothing to set."
             : "What you speak into the microphone. Detecting it costs a second pass over the audio."}
         </p>
-        <select
-          id="stt-language"
+        <Select
+          label="Language"
           value={language}
-          onChange={(event) => choose(event.target.value)}
+          onChange={choose}
           disabled={parakeet}
-          className="mt-2 h-9 w-56 rounded-md border border-[var(--line)] bg-[var(--rail)] px-2 text-sm text-[var(--text)] outline-none focus-visible:border-[var(--accent)] disabled:opacity-40"
-        >
-          <option value="">Detect automatically</option>
-          {LANGUAGES.map((option) => (
-            <option key={option.code} value={option.code}>
-              {option.name}
-            </option>
-          ))}
-        </select>
+          options={[
+            { value: "", label: "Detect automatically" },
+            ...LANGUAGES.map((option) => ({ value: option.code, label: option.name })),
+          ]}
+          className="mt-2 w-56"
+        />
       </section>
     </>
   );

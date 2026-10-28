@@ -75,8 +75,13 @@ const PERSIST_DEBOUNCE_MS: u64 = 400;
 ///
 /// A stored width of zero -- or a value that became nonsense after a bad write
 /// -- would otherwise produce an invisible window with no way to recover it.
-const MIN_WIDTH: f64 = 320.0;
-const MIN_HEIGHT: f64 = 240.0;
+///
+/// The same numbers as `minWidth`/`minHeight` in `tauri.conf.json`, which is the
+/// floor the OS enforces: keeping them in step means the geometry restored here
+/// is a size the window can actually hold, rather than one the OS silently
+/// raises on the first frame.
+const MIN_WIDTH: f64 = 800.0;
+const MIN_HEIGHT: f64 = 600.0;
 
 /// How much of the window must be on the target monitor for its position to be
 /// honoured, as a fraction of the window's own area.

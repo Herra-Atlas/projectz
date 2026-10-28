@@ -10,7 +10,6 @@
       "identifier": "opener:allow-open-path",
       "allow": [{ "path": "$APPDATA/**" }]
     },
-    "dialog:default",
-    "notification:default"
+    "dialog:default"
   ]
 }

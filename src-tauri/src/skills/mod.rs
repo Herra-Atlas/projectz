@@ -170,28 +170,66 @@ pub fn get(slug: &str) -> Result<(Skill, String, Vec<SkillFile>), String> {
     Ok((skill, instructions, manifest(&dir)))
 }
 
+/// The folders a new skill starts with.
+///
+/// The Agent Skills layout the app already scans: scripts are executable,
+/// references are read on demand, assets are copied or shown. Created empty so
+/// the Files panel opens onto the shape instead of onto a lone file.
+const STARTER_FOLDERS: [&str; 3] = ["scripts", "references", "assets"];
+
+/// A first trigger, built from the name the user typed.
+///
+/// **A blank description is a skill the agent can never choose.** The index it
+/// reads is `name — description`, so an empty one offers a name and no reason to
+/// open it. This is a seed to be replaced, not a guess at what the skill is for.
+fn starter_description(name: &str) -> String {
+    format!("Use when working on {}.", name.trim())
+}
+
+/// A skeleton body, with the sections every skill ends up needing.
+fn starter_body(name: &str) -> String {
+    format!("# {}\n\n## When to use\n\n## Steps\n", name.trim())
+}
+
 /// Creates a folder for a new skill.
 ///
 /// The slug is derived once and then kept: a rename changes the label, not the
 /// address, so a link and a running conversation both keep pointing at the same
 /// skill.
 pub fn create(draft: &SkillDraft) -> Result<Skill, String> {
-    let root = root();
+    create_at(&root(), draft)
+}
+
+/// The create, against an explicit root so a test can watch the scaffold without
+/// touching the process-global skills folder -- the same split the panel uses.
+fn create_at(root: &Path, draft: &SkillDraft) -> Result<Skill, String> {
     let name = required(&draft.name, "name")?;
-    let body = required(&draft.instructions, "instructions")?;
-    let slug = unique_slug(&root, &slugify(&name));
+    let description = clean(&draft.description).unwrap_or_else(|| starter_description(&name));
+    // **A new skill may start with an empty body**, because the page opens the
+    // folder in the Files panel and that is where the skill is actually written;
+    // an empty one is filled with a skeleton instead of refusing the create. An
+    // *update* still needs words, because that is the door an agent writes
+    // through, and a blank replacement would erase a skill while looking like a
+    // save.
+    let body = {
+        let body = bounded(&draft.instructions, "instructions")?;
+        if body.is_empty() {
+            starter_body(&name)
+        } else {
+            body
+        }
+    };
+    let slug = unique_slug(root, &slugify(&name));
     let dir = root.join(&slug);
     std::fs::create_dir_all(&dir)
         .map_err(|error| format!("Could not create {}: {error}", dir.display()))?;
-    write_markdown(
-        &dir,
-        &frontmatter::render(
-            &slug,
-            clean(&draft.description).as_deref().unwrap_or(""),
-            &body,
-        ),
-    )?;
-    resolve(&slug)
+    for folder in STARTER_FOLDERS {
+        let path = dir.join(folder);
+        std::fs::create_dir_all(&path)
+            .map_err(|error| format!("Could not create {}: {error}", path.display()))?;
+    }
+    write_markdown(&dir, &frontmatter::render(&slug, &description, &body))?;
+    resolve_at(root, &slug)
 }
 
 /// Replaces a skill's text, keeping its slug and files.
@@ -582,10 +620,20 @@ fn clean_text(value: &str) -> Option<String> {
 }
 
 fn required(value: &str, field: &str) -> Result<String, String> {
-    let trimmed = value.trim();
+    let trimmed = bounded(value, field)?;
     if trimmed.is_empty() {
         return Err(format!("A skill needs a `{field}`"));
     }
+    Ok(trimmed)
+}
+
+/// A field that may be empty, but still has a ceiling.
+///
+/// Split from [`required`] so "must say something" and "must not say too much"
+/// are two rules a caller can take one of: a new skill's body starts empty, and
+/// a name never may.
+fn bounded(value: &str, field: &str) -> Result<String, String> {
+    let trimmed = value.trim();
     let limit = if field == "name" { 120 } else { 20_000 };
     if trimmed.chars().count() > limit {
         return Err(format!("`{field}` is longer than {limit} characters"));
@@ -639,6 +687,83 @@ mod tests {
         assert_eq!(slugify("  A -- B  "), "a-b");
         assert_eq!(slugify(""), "skill");
         assert_eq!(slugify("---"), "skill");
+    }
+
+    /// A body may be empty and a name may not: a new skill is a folder whose
+    /// words are written in the Files panel, while a nameless one is a folder
+    /// nothing could address.
+    #[test]
+    fn an_empty_body_is_allowed_but_an_empty_name_is_not() {
+        assert_eq!(bounded("", "instructions"), Ok(String::new()));
+        assert_eq!(bounded("  Do it.  ", "instructions"), Ok("Do it.".into()));
+        assert!(required("", "name").is_err());
+        assert_eq!(
+            required("  Code review  ", "name"),
+            Ok("Code review".into())
+        );
+    }
+
+    /// A new skill is not an empty folder: it has a trigger, a skeleton body and
+    /// the three folders the Agent Skills layout is made of, so the Files panel
+    /// opens onto something to fill in rather than onto a lone file.
+    #[test]
+    fn a_new_skill_is_scaffolded_with_a_trigger_and_folders() {
+        let root = temp("scaffold");
+        let skill = create_at(
+            &root,
+            &SkillDraft {
+                name: "Code review".into(),
+                description: None,
+                instructions: String::new(),
+            },
+        )
+        .expect("create");
+
+        assert_eq!(skill.slug, "code-review");
+        let description = skill.description.unwrap_or_default();
+        assert!(
+            description.starts_with("Use when"),
+            "no seeded trigger: {description:?}"
+        );
+        for folder in STARTER_FOLDERS {
+            assert!(
+                root.join("code-review").join(folder).is_dir(),
+                "{folder} was not created"
+            );
+        }
+        let markdown =
+            std::fs::read_to_string(root.join("code-review").join(SKILL_FILE)).expect("read back");
+        assert!(
+            markdown.contains("description:"),
+            "the header carries no description line"
+        );
+        assert!(
+            markdown.contains("## When to use"),
+            "the body is not a skeleton"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// What the agent's own create passes is kept rather than replaced by the
+    /// scaffold: a supplied trigger and body are the skill.
+    #[test]
+    fn a_supplied_description_and_body_are_kept() {
+        let root = temp("supplied");
+        let skill = create_at(
+            &root,
+            &SkillDraft {
+                name: "diff review".into(),
+                description: Some("When reviewing a diff.".into()),
+                instructions: "Check the diff.".into(),
+            },
+        )
+        .expect("create");
+
+        assert_eq!(skill.description.as_deref(), Some("When reviewing a diff."));
+        let markdown =
+            std::fs::read_to_string(root.join("diff-review").join(SKILL_FILE)).expect("read back");
+        assert!(markdown.contains("Check the diff."));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The container check is the security boundary: no absolute path, no `..`,

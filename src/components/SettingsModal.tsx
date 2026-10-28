@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open as openFile } from "@tauri-apps/plugin-dialog";
-import { ArrowLeft, AudioLines, BookMarked, Bot, Brain, ChevronDown, ChevronRight, CircleDot, Cpu, Disc3, Download, GripVertical, Info, Mic, MoveRight, Palette, Pencil, Plug, Plus, Scissors, Search, Server, Settings2, SlidersHorizontal, Smartphone, Sparkles, Trash2, Volume2, X, Zap } from "lucide-react";
+import { ArrowLeft, AudioLines, Bell, BookMarked, Bot, Brain, ChevronDown, ChevronRight, CircleDot, Cpu, Disc3, Download, GripVertical, Info, Mic, MoveRight, Palette, Pencil, Plug, Plus, Scissors, Search, Server, Settings2, SlidersHorizontal, Smartphone, Sparkles, Trash2, Volume2, X, Zap } from "lucide-react";
 import { resolveTheme, type Appearance } from "../features/appearance/appearance";
 import AccentPicker from "./appearance/AccentPicker";
 import ThemePicker from "./appearance/ThemePicker";
@@ -24,6 +24,7 @@ import { buildSettingsIndex, type SettingsEntry } from "./settings/settingsIndex
 import { LocalAddMenu } from "./settings/local/LocalAddMenu";
 import { saveGeneralSettings, type GeneralSettings } from "../features/settings/generalSettings";
 import { useGeneralSettings } from "../features/settings/useGeneralSettings";
+import { NotificationPage } from "./settings/notifications/NotificationPage";
 import { SpeechToTextPage } from "./settings/voice/SpeechToTextPage";
 import { AudioEnginePage } from "./settings/voice/AudioEnginePage";
 import { AudioModelsPage } from "./settings/voice/AudioModelsPage";
@@ -38,7 +39,8 @@ import type { DownloadJob } from "../features/downloads/types";
 import { TtsVoiceSettingsPage } from "./settings/voice/TtsVoiceSettingsPage";
 import { TextToSpeechPage } from "./settings/voice/TextToSpeechPage";
 import { DownloadPage } from "./settings/downloads/DownloadPage";
-import type { SettingsPage } from "./settings/settingsPages";
+import { pageName } from "./settings/settingsPages";
+import type { SettingsPage, SpeechStage } from "./settings/settingsPages";
 import { useTaste } from "../features/taste/useTaste";
 import { useMessaging } from "../features/communications/useMessaging";
 import { ANCHOR_ATTRIBUTE, FlashHighlight, SettingsPageTitle, SettingsSearchScope, SettingsSection, SETTINGS_HIGHLIGHT_EVENT } from "./SettingsSection";
@@ -208,7 +210,41 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
   // rather than fetching it again.
   const generalSettings = useGeneralSettings();
   const [instructionExampleIndex, setInstructionExampleIndex] = useState(0);
-  const [page, setPage] = useState<SettingsPage>({ view: "general" });
+  const [page, setPageState] = useState<SettingsPage>({ view: "general" });
+  /**
+   * The pages this window has been on, oldest first.
+   *
+   * Back is a fact, not a table. It used to be one rule per page, written by
+   * hand, which meant every new drill-down had to be added to it -- and the one
+   * that was not, the audio.cpp download opened from a speech page, returned to a
+   * page the user had never been on. Remembering the visit makes Back correct for
+   * pages that do not exist yet.
+   */
+  const [visited, setVisited] = useState<SettingsPage[]>([]);
+  /**
+   * Which stage of Speech to text is showing.
+   *
+   * Held here rather than in the page, which unmounts as soon as anything is
+   * opened from it: switching to Wake word and returning to the section used to
+   * land on the transcription stage, which is a different question.
+   */
+  const [speechStage, setSpeechStage] = useState<SpeechStage>("Speech to text");
+
+  /** Move to another page, remembering the one it was opened from. */
+  const setPage = (next: SettingsPage) => {
+    // A section you are already on is not a place you came from -- and search
+    // re-opens the page it is on to highlight a row.
+    if (next.view !== page.view) setVisited((current) => [...current, page]);
+    setPageState(next);
+  };
+
+  /** Return to the page this one was opened from. */
+  const goBack = () => {
+    const previous = visited[visited.length - 1];
+    if (previous === undefined) return;
+    setPageState(previous);
+    setVisited(visited.slice(0, -1));
+  };
   /**
    * Every visit starts on General.
    *
@@ -217,10 +253,14 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
    * had already painted -- so reopening flashed whichever page was left behind,
    * which read as "Providers is the default" even though General won a frame
    * later. Reset while the dialog is hidden and the first frame it draws is the
-   * right one.
+   * right one. The history and the speech stage go with it: both are facts about
+   * this visit, not preferences.
    */
   useEffect(() => {
-    if (!open) setPage({ view: "general" });
+    if (open) return;
+    setPageState({ view: "general" });
+    setVisited([]);
+    setSpeechStage("Speech to text");
   }, [open]);
   /**
    * Taste's record, read by the *modal* rather than by its page.
@@ -489,7 +529,10 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
       await invoke(command, { endpoint: { ...draft, name: draft.name.trim(), base_url: draft.base_url.trim(), api_key: draft.api_key.trim() } });
       await refreshEndpoints();
       notify("success", editing ? `${draft.name} updated` : `${draft.name} added`);
-      setPage({ view: "providers" });
+      // Back to where the form was opened from, which is the provider list
+      // unless search had jumped from somewhere else. The form is finished, so
+      // it does not stay in the history as a place to return to.
+      goBack();
     } catch (reason) {
       notify("error", `Provider could not be saved: ${String(reason)}`);
     } finally {
@@ -771,28 +814,10 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
     }
   };
 
-  // Where each drilled-in page returns to, and what the back control is called.
-  // The provider form is the one page that stands in for a list, so the header
-  // treats it as a sub-page. A download returns to the page whose engine offered
-  // it: llama.cpp's models, or one of the two voice pages.
-  const isSubPage = page.view === "form" || page.view === "model" || page.view === "download" || page.view === "ttsVoice" || page.view === "sttModel" || page.view === "audioModel";
-  const backTarget: SettingsPage =
-    page.view === "model" ? { view: "local" }
-      : page.view === "download"
-        ? page.kind === "stt" ? { view: "stt" } : page.kind === "tts" ? { view: "tts" } : page.kind === "wake" ? { view: "stt" } : page.kind === "audio" ? { view: "audioModels" } : { view: "local" }
-      : page.view === "ttsVoice" ? { view: "tts" }
-      : page.view === "sttModel" ? { view: "stt" }
-      : page.view === "audioModels" ? { view: "audio" }
-      : page.view === "audioModel" ? (page.from === "wake" ? { view: "stt" } : { view: "audioModels" })
-      : { view: "providers" };
-  const backLabel =
-    page.view === "model" ? "Back to local models"
-      : page.view === "download" ? (page.kind === "stt" ? "Back to speech to text" : page.kind === "tts" ? "Back to text to speech" : page.kind === "wake" ? "Back to wake word" : page.kind === "audio" ? "Back to audio models" : "Back to local models")
-      : page.view === "ttsVoice" ? "Back to text to speech"
-      : page.view === "sttModel" ? "Back to speech to text"
-      : page.view === "audioModels" ? "Back to audio engine"
-      : page.view === "audioModel" ? (page.from === "wake" ? "Back to wake word" : "Back to audio models")
-      : "Back to providers";
+  // Back is the page this one was opened from. Nothing here has to know which
+  // pages are drill-downs or where each one returns to: the visit is the answer.
+  const previous = visited[visited.length - 1] ?? null;
+  const backLabel = previous === null ? undefined : `Back to ${pageName(previous)}`;
 
   // The two collapsible nav groups stay tinted while *any* page they own is the
   // one showing -- including the drill-down pages (a model, a voice, a
@@ -834,7 +859,10 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
             band then drew the second rule, a few pixels lower. */}
         <header className="flex min-h-[60px] items-center justify-between border-b border-[var(--line)] px-4 sm:px-6">
           <div className="flex min-w-0 flex-1 items-center gap-2.5">
-            {isSubPage && <button type="button" onClick={() => setPage(backTarget)} className="grid size-8 place-items-center rounded-md text-[var(--muted)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label={backLabel} aria-labelledby={undefined}><ArrowLeft size={16} /></button>}
+            {/* Drawn whenever there is a page behind this one, which includes
+                every section the sidebar moved away from: Back means the same
+                thing everywhere instead of only on pages that are drill-downs. */}
+            {previous !== null && <button type="button" onClick={goBack} className="grid size-8 place-items-center rounded-md text-[var(--muted)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label={backLabel} aria-labelledby={undefined}><ArrowLeft size={16} /></button>}
             {/* The search field takes the place the static "Settings / General" label
                 used to hold. A window with eleven sections is one where a reader has to
                 guess which page owns a row, and a title that only repeated the page they
@@ -852,6 +880,10 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
             <p className="hidden px-2.5 pb-1.5 pt-1 text-[11px] font-medium text-[var(--quiet)] sm:block">Application</p>
             <button type="button" data-settings-nav="general" aria-label="General" onClick={() => setPage({ view: "general" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "general" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><SlidersHorizontal size={16} />General</button>
             <button type="button" data-settings-nav="appearance" aria-label="Appearance" onClick={() => setPage({ view: "appearance" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "appearance" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Palette size={16} />Appearance</button>
+            {/* One page, because the sound and the switch it belongs to are one
+                decision: a switch on one page and its tone on another is a pair
+                that has to be kept in step by reading both. */}
+            <button type="button" data-settings-nav="notifications" aria-label="Notifications" onClick={() => setPage({ view: "notifications" })} className={`flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "notifications" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Bell size={16} />Notifications</button>
             {/* The assistant's own surfaces: what it can learn (Taste), what it can
                 load (Skills) and what it can reach (MCP). They were in Application,
                 where a reader looking for "where do I change the browser" found them
@@ -918,7 +950,10 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
             <button type="button" data-settings-nav="system" aria-label="System" onClick={() => setPage({ view: "system" })} className={`flex min-h-9 shrink-0 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "system" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Info size={16} />System</button>
           </nav>
 
-          <div className="min-w-0 flex-1 overflow-y-auto">
+          {/* A find scope, so Ctrl+F still searches where the user is looking:
+              the settings body is the page, and the nav beside it is chrome the
+              search would otherwise dim. */}
+          <div className="min-w-0 flex-1 overflow-y-auto" data-find-scope="" data-find-label="settings">
             <div className="mx-auto max-w-[960px] px-5 py-6 sm:px-9 sm:py-8">
               {/* No `key`: a search result on the page already open must not remount the
                   scope, or the dim it is about to set is thrown away with the old node. */}
@@ -1126,24 +1161,35 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
                 </div>}
               </>
               : page.view === "stt" ? <SpeechToTextPage
+                stage={speechStage}
+                onStageChange={setSpeechStage}
                 onDownload={() => setPage({ view: "download", kind: "stt" })}
-                onAudioDownload={() => setPage({ view: "download", kind: "audio" })}
+                onAudioDownload={() => setPage({ view: "download", kind: "audio", group: "recognition" })}
                 // An audio.cpp model's settings are its family spec, not the
                 // whisper model page: same list, two kinds of file behind it.
                 onModelSettings={(model) => setPage(model.toLowerCase().endsWith(".gguf") ? { view: "audioModel", model } : { view: "sttModel", model })}
-                // A wake pack's spec page returns to the wake stage, not to the
-                // audio models list it was never opened from.
-                onWakeModelSettings={(model) => setPage({ view: "audioModel", model, from: "wake" })}
+                // A wake pack's spec page returns to the wake stage, because that
+                // is the page it was opened from.
+                onWakeModelSettings={(model) => setPage({ view: "audioModel", model })}
                 onDownloadWake={() => setPage({ view: "download", kind: "wake" })}
                 onCreateVoice={() => setPage({ view: "voiceEnroll" })}
                 notify={notify}
               />
-              : page.view === "tts" ? <TextToSpeechPage onDownload={(engine) => setPage({ view: "download", kind: engine })} onVoiceSettings={(voice, engine) => setPage(engine === "audiocpp" ? { view: "audioModel", model: voice } : { view: "ttsVoice", voice })} notify={notify} />
-              : page.view === "voiceEnroll" ? <VoiceEnrollPage notify={notify} onBack={() => setPage({ view: "stt" })} />
+              : page.view === "tts" ? <TextToSpeechPage onDownload={(engine) => setPage({ view: "download", kind: engine, group: engine === "audio" ? "speech" : undefined })} onVoiceSettings={(voice, engine) => setPage(engine === "audiocpp" ? { view: "audioModel", model: voice } : { view: "ttsVoice", voice })} notify={notify} />
+              : page.view === "voiceEnroll" ? <VoiceEnrollPage notify={notify} onBack={goBack} />
               : page.view === "audio" ? <AudioEnginePage notify={notify} />
               : page.view === "audioModels" ? <AudioModelsPage onDownload={() => setPage({ view: "download", kind: "audio" })} onModelSettings={(model) => setPage({ view: "audioModel", model })} notify={notify} />
-              : page.view === "audioModel" ? <AudioModelSettingsPage modelPath={page.model} onBack={() => setPage(backTarget)} backLabel={backLabel} notify={notify} />
-              : page.view === "download" ? <DownloadPage kind={page.kind} notify={notify} onModelInstalled={() => void refreshLocalModels()} />
+              : page.view === "audioModel" ? <AudioModelSettingsPage modelPath={page.model} onBack={goBack} backLabel={backLabel ?? "Back"} notify={notify} />
+              : page.view === "download" ? <DownloadPage
+                // Keyed by what it is showing: the same component draws every
+                // kind, so without the key a section chosen for one catalogue
+                // would linger over the next.
+                key={`${page.kind}:${page.group ?? ""}`}
+                kind={page.kind}
+                group={page.group}
+                notify={notify}
+                onModelInstalled={() => void refreshLocalModels()}
+              />
               : page.view === "ttsVoice" ? <TtsVoiceSettingsPage voice={page.voice} notify={notify} />
               : page.view === "sttModel" ? <SttModelSettingsPage model={page.model} notify={notify} />
               : page.view === "downloads" ? <DownloadsPage notify={notify} />
@@ -1228,12 +1274,6 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
 
                 <SettingsSection title="Response">
                   <SettingRow
-                    anchor="general.notifications"
-                    label="Response completions"
-                    description="Get notified when ProjectZ has finished a response. Useful for long-running tasks."
-                    control={<Toggle label="Notify when a response is complete" checked={generalSettings.responseNotifications} onChange={(responseNotifications) => updateGeneralSettings({ ...generalSettings, responseNotifications })} />}
-                  />
-                  <SettingRow
                     anchor="general.metrics"
                     label="Show token metrics"
                     description="Display prompt, completion, and generation figures under each reply."
@@ -1270,7 +1310,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
                 groups={providerModelGroups}
                 localModels={localModels}
               />
-              : page.view === "skills" ? <SkillsPage notify={notify} onOpenSkill={onOpenSkill} /> : page.view === "mcp" ? <McpSettingsPage notify={notify} /> : <>
+              : page.view === "skills" ? <SkillsPage notify={notify} onOpenSkill={onOpenSkill} /> : page.view === "mcp" ? <McpSettingsPage notify={notify} /> : page.view === "notifications" ? <NotificationPage notify={notify} /> : <>
                 <SettingsPageTitle><h2 className="text-[17px] font-semibold tracking-tight">{page.endpoint ? "Edit provider" : "Add provider"}<FlashHighlight anchor="providers.add" /></h2></SettingsPageTitle>
                 <form onSubmit={(event) => void saveEndpoint(event)} className="max-w-xl space-y-4">
                   <label className="block text-sm text-[var(--muted)]">Provider name<input ref={nameRef} required value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} className="mt-1.5 h-10 w-full rounded-md border border-[var(--line)] bg-[var(--rail)] px-3 text-[13px] text-[var(--text)] outline-none placeholder:text-[var(--quiet)] focus:border-[var(--accent)]" placeholder="e.g. Local Ollama" /></label>
@@ -1285,7 +1325,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
                   <div className="flex flex-wrap gap-2 border-t border-[var(--line)] pt-5">
                     <button type="submit" disabled={loading} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg bg-[var(--accent)] px-3.5 text-[13px] font-semibold text-[var(--accent-ink)] transition-opacity hover:opacity-90 disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]">{loading ? "Saving…" : page.endpoint ? "Save changes" : "Add provider"}</button>
                     <button type="button" onClick={() => void testEndpoint(draft)} disabled={testingId === draft.id || !draft.base_url.trim()} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-[var(--line)] px-3 text-[13px] text-[var(--text)] transition-colors hover:bg-[var(--raised)] disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><Zap size={15} />{testingId === draft.id ? "Testing…" : "Test and find models"}</button>
-                    <button type="button" onClick={() => setPage({ view: "providers" })} className="min-h-9 rounded-lg px-3 text-[13px] text-[var(--muted)] transition-colors hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]">Cancel</button>
+                    <button type="button" onClick={goBack} className="min-h-9 rounded-lg px-3 text-[13px] text-[var(--muted)] transition-colors hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]">Cancel</button>
                   </div>
                 </form>
               </>}

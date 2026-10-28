@@ -17,7 +17,9 @@ pub enum PermissionMode {
     /// Only the explicitly listed read tools run without asking.
     #[serde(rename = "auto_safe")]
     AutoSafe,
-    /// The listed read and write tools run without asking.
+    /// The listed read and write tools run without asking. Running a program is
+    /// not a write: the terminal family asks at this level and every level below
+    /// `full`, because "auto-approve writes" is a statement about the workspace.
     #[serde(rename = "auto_writes")]
     AutoWrites,
     /// Every tool runs without asking.
@@ -51,12 +53,6 @@ const AUTO_READ_TOOLS: &[&str] = &[
     "skill_read",
     "search_web",
     "web_fetch",
-    // Observing a background command. Stopping one is a write and rides in the
-    // other list, so a run trusted to look is not thereby trusted to kill.
-    "terminal_output",
-    // Asking after a background process -- is it alive, its id, its exit code --
-    // observes the same way reading its output does.
-    "terminal_status",
 ];
 /// Write tools, approved without asking only from `auto_writes` upward.
 ///
@@ -71,21 +67,36 @@ const AUTO_WRITE_TOOLS: &[&str] = &[
     "edit_lines",
     "skill_manage",
     "skill_write",
-    "skill_run",
     "move_file",
     "delete_file",
     "write_document",
     "sub_agent",
     "schedule_job",
-    // Running a command is `Effect::Write` -- it can change anything the tool
-    // set can change -- so it belongs here with the other writes. It was left out
-    // of this list while its own sibling `terminal_kill` was in it, which made
-    // "auto-approve writes" still prompt for every command, the one thing a user
-    // picking that level is trying to stop.
+];
+
+/// Tools that start, stop or observe a process.
+///
+/// Deliberately on **neither** allowlist: absence is the rule, so `decide` asks
+/// for them at `ask`, `auto_safe` and `auto_writes`, and allows them only at
+/// `full`. Running a program is not a write — it can do anything the account can,
+/// not only what the tool set can — so a level that says "auto-approve writes"
+/// must not hand it over. The observing pair is here with the launching pair
+/// because one capability is one decision: a run with no business starting a
+/// process has no business reading or stopping one either.
+///
+/// `skill_run` belongs to this group for the same reason: it executes a script,
+/// which `access.rs` already classifies as the terminal capability.
+///
+/// Test-only: nothing in production consults this list -- absence from the two
+/// allowlists *is* the rule -- and the tests below use it to state the exception
+/// by name instead of leaving it unnamed.
+#[cfg(test)]
+const PROCESS_TOOLS: &[&str] = &[
     "run_terminal",
-    // Stopping a process is the consequential half of the terminal group; the
-    // read half is `terminal_output`, above.
+    "terminal_output",
+    "terminal_status",
     "terminal_kill",
+    "skill_run",
 ];
 
 /// Decides whether this tool name runs automatically in the selected mode.
@@ -254,9 +265,6 @@ mod tests {
             // per page it opens.
             "search_web",
             "web_fetch",
-            // Looking at what a background process printed is a read; stopping it
-            // is not, and is asserted below.
-            "terminal_output",
         ] {
             assert_eq!(decide(PermissionMode::AutoSafe, tool), Decision::Allow);
         }
@@ -266,12 +274,9 @@ mod tests {
             "edit_lines",
             "skill_manage",
             "skill_write",
-            "skill_run",
             "move_file",
             "delete_file",
             "write_document",
-            "run_terminal",
-            "terminal_kill",
             "sub_agent",
         ] {
             assert_eq!(decide(PermissionMode::AutoSafe, tool), Decision::Ask);
@@ -288,21 +293,28 @@ mod tests {
             "skill_read",
             "search_web",
             "web_fetch",
-            "terminal_output",
             "write_file",
             "edit_file",
             "edit_lines",
             "skill_manage",
             "skill_write",
-            "skill_run",
             "move_file",
             "delete_file",
             "write_document",
             "sub_agent",
-            "run_terminal",
-            "terminal_kill",
+            "schedule_job",
         ] {
             assert_eq!(decide(PermissionMode::AutoWrites, tool), Decision::Allow);
+        }
+        // The terminal family is not a write. A user who picked "auto-approve
+        // writes" has approved changes to their workspace, not arbitrary
+        // programs run as them.
+        for tool in PROCESS_TOOLS {
+            assert_eq!(
+                decide(PermissionMode::AutoWrites, tool),
+                Decision::Ask,
+                "{tool} must ask at auto_writes"
+            );
         }
         // A name no list knows still asks here, and is allowed at `full`: an
         // unrecognised tool is not an invitation to run it unprompted.
@@ -316,21 +328,24 @@ mod tests {
         );
     }
 
-    /// Every tool that can change anything is auto-approved at `auto_writes`.
+    /// Every write tool is auto-approved at `auto_writes`, except the process
+    /// tools, which are deliberately full-access-only.
     ///
     /// Driven off the registry's own `Effect` rather than a copy of the list, so
     /// a tool added later -- or one reclassified from `Read` to `Write` -- cannot
-    /// end up silently prompting at a level that promises it will not. That is
-    /// exactly how `run_terminal` came to ask at `auto_writes` while its sibling
-    /// `terminal_kill` did not.
+    /// end up silently prompting at a level that promises it will not. The
+    /// exception is `PROCESS_TOOLS`, and it is checked separately below rather
+    /// than skipped quietly: a process tool that reached an allowlist would be
+    /// the regression this rule exists to prevent.
     #[test]
-    fn every_write_tool_is_auto_approved_at_auto_writes() {
+    fn every_write_tool_is_auto_approved_at_auto_writes_or_runs_a_process() {
         let registry = registry_for(ToolMode::Agent, true);
         let unlisted = registry
             .names()
             .into_iter()
             .filter(|name| registry.get(name).expect("registered").effect == Effect::Write)
             .filter(|name| !AUTO_WRITE_TOOLS.contains(&name.as_str()))
+            .filter(|name| !PROCESS_TOOLS.contains(&name.as_str()))
             .collect::<Vec<_>>();
         assert!(
             unlisted.is_empty(),
@@ -340,6 +355,9 @@ mod tests {
 
     /// The read half of the same invariant: every observing tool runs unprompted
     /// from `auto_safe` up, so a new read tool cannot be added and then prompt.
+    /// `terminal_output` and `terminal_status` are `Read` and still excepted, for
+    /// the same reason: they belong to the process capability, not to reading the
+    /// workspace.
     #[test]
     fn every_read_tool_is_auto_approved_at_auto_safe() {
         let registry = registry_for(ToolMode::Agent, true);
@@ -348,11 +366,46 @@ mod tests {
             .into_iter()
             .filter(|name| registry.get(name).expect("registered").effect == Effect::Read)
             .filter(|name| !AUTO_READ_TOOLS.contains(&name.as_str()))
+            .filter(|name| !PROCESS_TOOLS.contains(&name.as_str()))
             .collect::<Vec<_>>();
         assert!(
             unlisted.is_empty(),
             "these read tools would prompt at auto_safe: {unlisted:?}"
         );
+    }
+
+    /// The terminal family is reachable only from `full`.
+    ///
+    /// This is the rule a user means by "Full access": no level below it can run,
+    /// stop, or read a program without a prompt. Asserted by name over the
+    /// registry so renaming a tool cannot quietly take it out of the group
+    /// without the list here being updated too.
+    #[test]
+    fn the_process_tools_ask_below_full_and_run_at_full() {
+        let registry = registry_for(ToolMode::Agent, true);
+        let registered = registry.names();
+        for tool in PROCESS_TOOLS {
+            assert!(
+                registered.iter().any(|name| name == tool),
+                "`{tool}` is in PROCESS_TOOLS but not registered"
+            );
+            for mode in [
+                PermissionMode::Ask,
+                PermissionMode::AutoSafe,
+                PermissionMode::AutoWrites,
+            ] {
+                assert_eq!(
+                    decide(mode, tool),
+                    Decision::Ask,
+                    "`{tool}` must prompt at {mode:?}"
+                );
+            }
+            assert_eq!(
+                decide(PermissionMode::Full, tool),
+                Decision::Allow,
+                "`{tool}` must run unprompted at full"
+            );
+        }
     }
 
     /// Asking the user is never gated: the prompt is the interaction, so a dialog

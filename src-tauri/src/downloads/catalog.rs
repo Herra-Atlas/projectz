@@ -21,6 +21,12 @@ pub struct DownloadFile {
     pub size: u64,
     /// Quantisation, quality or language -- whatever distinguishes this file.
     pub note: String,
+    /// The section of this kind's catalogue the file belongs to, when the kind
+    /// has more than one: an audio.cpp package's task, or which runtime a wake
+    /// row needs. Left off the wire for the single-list kinds, so the page can
+    /// hide its section filter rather than offer one choice.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 /// One entry from `/api/models/{repo}/tree/main`.
@@ -50,6 +56,7 @@ pub fn gguf_files(repo: &str, tree: &[TreeEntry]) -> Vec<DownloadFile> {
             name: file_name(&entry.path).to_string(),
             size: entry.size,
             note: quantisation(&entry.path).unwrap_or_default(),
+            group: None,
         })
         .collect()
 }
@@ -121,6 +128,7 @@ pub fn piper_voices(index: &serde_json::Value, query: &str) -> Vec<DownloadFile>
                 name: file_name(model.0).to_string(),
                 size,
                 note: format!("{} · {}", language, quality),
+                group: None,
             },
         ));
     }
@@ -174,6 +182,10 @@ pub fn collection_heads(repo: &str, tree: &[TreeEntry], query: &str) -> Vec<Down
             name: file_name(&entry.path).to_string(),
             size: entry.size,
             note: "openWakeWord · English".to_string(),
+            // These run in-process through ONNX Runtime, while a GGUF wake pack
+            // runs in the audio.cpp server: the runtime is what a reader is
+            // choosing between, so that is the section.
+            group: Some("openWakeWord".to_string()),
         })
         .collect()
 }
@@ -193,17 +205,24 @@ pub fn audio_packages(repo: &str, tree: &[TreeEntry], query: &str) -> Vec<Downlo
             // does not name is installable but unusable, and saying so is more
             // honest than a bare quantisation note.
             let family = families::classify(name);
-            let note = match &family {
-                Some((family, task)) => format!(
-                    "{} · {}",
-                    family.replace('_', " "),
-                    match task {
+            let (note, group) = match &family {
+                Some((family, task)) => {
+                    // The task is the section: a reader looking for a voice is
+                    // not looking through recognition models for it.
+                    let section = match task {
                         Task::Tts => "speech",
                         Task::Asr => "recognition",
                         Task::Wake => "wake word",
-                    }
+                    };
+                    (
+                        format!("{} · {}", family.replace('_', " "), section),
+                        Some(section.to_string()),
+                    )
+                }
+                None => (
+                    "unknown family".to_string(),
+                    Some("unknown family".to_string()),
                 ),
-                None => "unknown family".to_string(),
             };
             Some(DownloadFile {
                 repo: repo.to_string(),
@@ -211,6 +230,7 @@ pub fn audio_packages(repo: &str, tree: &[TreeEntry], query: &str) -> Vec<Downlo
                 name: name.to_string(),
                 size: entry.size,
                 note,
+                group,
             })
         })
         .collect()
@@ -227,6 +247,13 @@ pub fn wake_packages(repo: &str, tree: &[TreeEntry], query: &str) -> Vec<Downloa
     audio_packages(repo, tree, query)
         .into_iter()
         .filter(|file| matches!(families::classify(&file.name), Some((_, Task::Wake))))
+        // On this page the question is which runtime runs the pack, not what it
+        // does: both sources detect a word, and only one of them needs the
+        // audio.cpp server. The section is replaced rather than kept.
+        .map(|mut file| {
+            file.group = Some("audio.cpp".to_string());
+            file
+        })
         .collect()
 }
 
@@ -246,6 +273,7 @@ pub fn stt_models(repo: &str, tree: &[TreeEntry], query: &str) -> Vec<DownloadFi
             name: file_name(&entry.path).to_string(),
             size: entry.size,
             note: recognition_note(repo, &entry.path),
+            group: None,
         })
         .collect()
 }
@@ -361,5 +389,41 @@ mod tests {
         assert_eq!(piper_voices(&index(), "arabic").len(), 1);
         assert_eq!(piper_voices(&index(), "amy").len(), 1);
         assert!(piper_voices(&index(), "klingon").is_empty());
+    }
+
+    #[test]
+    fn an_audio_package_carries_the_section_it_belongs_to() {
+        // The page's section filter reads this, so a row that names its task is
+        // what keeps a voice search from returning recognition models.
+        let tree = vec![
+            file("Kokoro-82M-Q8_0.gguf", 10),
+            file("qwen3-asr-0.6b-q8_0.gguf", 20),
+            file("open-wake-word-alexa-f32.gguf", 30),
+        ];
+        let files = audio_packages(AUDIO_REPO, &tree, "");
+        assert_eq!(files[0].group.as_deref(), Some("speech"));
+        assert_eq!(files[1].group.as_deref(), Some("recognition"));
+        assert_eq!(files[2].group.as_deref(), Some("wake word"));
+    }
+
+    #[test]
+    fn a_wake_package_is_grouped_by_the_runtime_that_runs_it() {
+        // On the wake page every row detects a word, so the useful section is
+        // which runtime needs to be installed for it.
+        let tree = vec![
+            file("Kokoro-82M-Q8_0.gguf", 10),
+            file("open-wake-word-alexa-f32.gguf", 30),
+        ];
+        let files = wake_packages(AUDIO_REPO, &tree, "");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].group.as_deref(), Some("audio.cpp"));
+    }
+
+    #[test]
+    fn a_single_list_kind_offers_no_section() {
+        // The page hides its filter when there is nothing to filter by, which is
+        // what an absent group says.
+        let files = gguf_files("acme/tiny", &[file("tiny-Q4_K_M.gguf", 10)]);
+        assert_eq!(files[0].group, None);
     }
 }

@@ -34,6 +34,9 @@ export type AiEvent = {
     command?: string;
     arguments?: Record<string, unknown>;
     prompt_tokens?: number;
+    /** The conversation when this reply's first request was sent. Recorded once,
+        so a tool round cannot inflate it. */
+    context_tokens?: number;
     completion_tokens?: number;
     /**
      * Every request's input and output for the reply, added up.
@@ -45,6 +48,9 @@ export type AiEvent = {
      */
     used_prompt_tokens?: number;
     used_completion_tokens?: number;
+    /** Calls made to the model for this reply, tool rounds included. Counted by
+        the loop rather than reported by the provider. */
+    requests?: number;
     cached_tokens?: number;
     prompt_eval_tokens_per_second?: number;
     generation_tokens_per_second?: number;

@@ -23,6 +23,46 @@ export type PreviewProps = {
 };
 
 /**
+ * The blob's declared type, from the file's extension.
+ *
+ * The bytes arrive with no name, and an image element is entitled to be told
+ * what it was handed -- without this a `.bmp` or `.ico` is decoded only because
+ * the browser chose to sniff it, and a `.pdf` blob is a bag of bytes with no
+ * type at all. The list is the one `previewKindFor` draws, so a format cannot be
+ * previewable and unlabelled at once.
+ *
+ * `application/octet-stream` is the honest answer for a `.docx`: it is a zip of
+ * XML, and nothing reads it through the URL -- the Word preview takes the
+ * `bytes` side.
+ */
+function mediaTypeFor(path: string): string {
+  const dot = path.lastIndexOf(".");
+  const extension = dot < 0 ? "" : path.slice(dot + 1).toLowerCase();
+  switch (extension) {
+    case "png":
+      return "image/png";
+    case "jpg":
+    case "jpeg":
+    case "jfif":
+      return "image/jpeg";
+    case "gif":
+      return "image/gif";
+    case "webp":
+      return "image/webp";
+    case "bmp":
+      return "image/bmp";
+    case "ico":
+      return "image/x-icon";
+    case "avif":
+      return "image/avif";
+    case "pdf":
+      return "application/pdf";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+/**
  * Reads a file's bytes for the previews that cannot be text.
  *
  * One hook for the image, PDF and Word previews: all three ask the same command
@@ -45,7 +85,7 @@ export function useFileBytes(path: string, skill: string | null = null) {
     invoke<ArrayBuffer>("panel_read_bytes", { relative: path, skill })
       .then((bytes) => {
         if (!active) return;
-        created = URL.createObjectURL(new Blob([bytes]));
+        created = URL.createObjectURL(new Blob([bytes], { type: mediaTypeFor(path) }));
         setData({ bytes, url: created });
       })
       .catch((reason: unknown) => {

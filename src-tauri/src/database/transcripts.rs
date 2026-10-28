@@ -108,7 +108,15 @@ impl Database {
         Self::read_messages(&connection, session_id)
     }
 
-    pub fn last_prompt_tokens(
+    /// How full the context was when the last reply **started**.
+    ///
+    /// Its first request's input, not its last: a reply's own tool rounds re-send
+    /// the conversation with results that are never stored, so the final round's
+    /// figure describes a request the next turn will not make. `context_tokens` is
+    /// written for every reply since it began being recorded; rows older than that
+    /// fall back to `prompt_tokens`, which is exact for a reply that made one
+    /// request and an overstatement only for an old tool-using one.
+    pub fn last_context_tokens(
         &self,
         session_id: &str,
         provider_id: &str,
@@ -117,7 +125,10 @@ impl Database {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let latest = connection
             .query_row(
-                "SELECT provider_id, model_id, prompt_tokens FROM messages WHERE session_id=?1 AND role='assistant' ORDER BY ordinal DESC LIMIT 1",
+                "SELECT provider_id, model_id, \
+                        COALESCE(json_extract(metrics_json,'$.context_tokens'), prompt_tokens) \
+                 FROM messages WHERE session_id=?1 AND role='assistant' \
+                 ORDER BY ordinal DESC LIMIT 1",
                 [session_id],
                 |row| {
                     Ok((

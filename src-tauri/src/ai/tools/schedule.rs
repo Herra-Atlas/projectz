@@ -166,11 +166,18 @@ async fn create(arguments: Value, context: ToolContext) -> Result<String, String
                 // Unattended: there is nobody to answer a prompt, so a job that asks is a
                 // job that parks forever. What actually constrains it is the access set.
                 permission: PermissionMode::Full,
-                // Exactly what this run holds, minus the ability to schedule more.
-                // Read off the same gate the run's calls are checked against, so the
-                // job cannot be given more than the run it came from.
+                // Exactly what this run holds, minus the ability to schedule more and
+                // minus the terminal when the caller was not at `full`.
+                //
+                // `Full` above only exists because a job has no one to ask; it must
+                // not become the way an `auto_writes` run acquires the terminal
+                // family it is denied. Taking the capability away makes such a call a
+                // refusal the job can report, rather than a prompt that waits for an
+                // answer that will never come.
                 access: AccessSet {
                     jobs: false,
+                    terminal: run.approval.mode() == PermissionMode::Full
+                        && run.approval.access().terminal,
                     ..run.approval.access()
                 },
                 model,

@@ -457,6 +457,12 @@ pub fn panel_delete_file(relative: String, skill: Option<String>) -> Result<(), 
 /// folder without touching the process-global -- the same split as [`move_in`].
 fn delete_in(root: &Path, relative: &str) -> Result<(), String> {
     let target = if relative.is_empty() { "." } else { relative };
+    // The tree never offers a delete on the root, and no caller has a reason to
+    // name it -- but `"."` resolves to the whole workspace, and one stray empty
+    // string must not be able to remove it.
+    if target == "." {
+        return Err("The workspace root cannot be deleted".to_string());
+    }
     let target_resolved = resolve_within(root, target)?;
 
     if target_resolved.is_dir() {
@@ -474,6 +480,272 @@ fn delete_in(root: &Path, relative: &str) -> Result<(), String> {
             )
         })
     }
+}
+
+/// The outcome of acting on several selected rows at once.
+///
+/// The same shape as [`ImportSummary`] and for the same reason: a selection is
+/// several independent items, so one refusal must not discard the rest. `done`
+/// holds the paths that were acted on, `refused` one line per item that was not.
+#[derive(Debug, Serialize)]
+pub struct BatchSummary {
+    pub done: Vec<String>,
+    pub refused: Vec<String>,
+}
+
+/// Moves several entries into one folder, reporting each one.
+///
+/// The multi-selection drop in the Files view, and the same rules as a single
+/// move: the target must already be a folder, a name already there is refused,
+/// and a folder cannot be moved into itself or its own subtree. Those are all
+/// enforced by [`move_in`] per item, so one refusal leaves the others moving.
+#[tauri::command]
+pub fn panel_move_paths(
+    paths: Vec<String>,
+    target: String,
+    skill: Option<String>,
+) -> Result<BatchSummary, String> {
+    let root = root_for(skill.as_deref())?;
+    move_many_in(&root, &paths, &target)
+}
+
+/// The batch move, against an explicit root -- the same split as [`move_in`].
+fn move_many_in(root: &Path, paths: &[String], target: &str) -> Result<BatchSummary, String> {
+    // The target is checked once, so a target that is not a folder is one
+    // message rather than the same refusal repeated for every item.
+    let destination = resolve_within(root, if target.is_empty() { "." } else { target })?;
+    if !destination.is_dir() {
+        return Err(format!("{target} is not a folder"));
+    }
+
+    let mut summary = BatchSummary {
+        done: Vec::new(),
+        refused: Vec::new(),
+    };
+    for path in paths {
+        match move_in(root, path, target) {
+            Ok(()) => summary.done.push(path.clone()),
+            Err(reason) => summary.refused.push(reason),
+        }
+    }
+    Ok(summary)
+}
+
+/// Deletes several entries, reporting each one.
+///
+/// The Delete-key path. A folder is removed with everything in it, exactly as a
+/// single delete is; the root can never be a target, because [`delete_in`]
+/// refuses it.
+#[tauri::command]
+pub fn panel_delete_paths(
+    paths: Vec<String>,
+    skill: Option<String>,
+) -> Result<BatchSummary, String> {
+    let root = root_for(skill.as_deref())?;
+    delete_many_in(&root, &paths)
+}
+
+/// The batch delete, against an explicit root -- the same split as [`delete_in`].
+fn delete_many_in(root: &Path, paths: &[String]) -> Result<BatchSummary, String> {
+    let mut summary = BatchSummary {
+        done: Vec::new(),
+        refused: Vec::new(),
+    };
+    for path in paths {
+        match delete_in(root, path) {
+            Ok(()) => summary.done.push(path.clone()),
+            Err(reason) => summary.refused.push(reason),
+        }
+    }
+    Ok(summary)
+}
+
+/// Reveals an entry in the OS file manager, with the file selected.
+///
+/// A *view* action: nothing on disk changes, and it is here rather than in the
+/// opener plugin's JavaScript half so it works for either root -- a skill's
+/// folder as well as the workspace -- without the frontend ever learning the
+/// skills root. The path still resolves through `resolve_within`, because "which
+/// file" must not be answerable with a path outside the tree the panel is drawing.
+#[tauri::command]
+pub fn panel_reveal_path(relative: String, skill: Option<String>) -> Result<(), String> {
+    let root = root_for(skill.as_deref())?;
+    let requested = if relative.is_empty() {
+        "."
+    } else {
+        relative.as_str()
+    };
+    let resolved = resolve_within(&root, requested)?;
+    if !resolved.exists() {
+        return Err(format!("{relative} is no longer there"));
+    }
+    tauri_plugin_opener::reveal_item_in_dir(&resolved)
+        .map_err(|error| format!("Could not open the folder for {relative}: {error}"))
+}
+
+/// What one OS drop did.
+///
+/// Per item rather than one error for the batch, because a drop of five files
+/// where one name is already taken should keep the other four: the failures are
+/// reported beside the successes instead of throwing the whole gesture away.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSummary {
+    /// Workspace-relative paths of everything that landed.
+    pub imported: Vec<String>,
+    /// One line per item that did not, already naming the item and the reason.
+    pub refused: Vec<String>,
+}
+
+/// Copies files or folders dropped from outside the app into the panel's tree.
+///
+/// **A copy, not a move.** Explorer's own default depends on the volume it is
+/// dragging across; an app that guessed would sometimes take the user's file out
+/// of the folder they dragged it from. Copying is the one behaviour that is the
+/// same every time and never loses the original.
+///
+/// The source is whatever the OS handed over, so it is not the model's path and
+/// is not resolved through `resolve_within` -- only the *destination* is, which
+/// is the boundary that matters: a drop can put a file inside the tree and can
+/// never put one anywhere else. Same caller split as the panel's other file
+/// commands: this is the user's own door, with no `ToolSpec` and no permission
+/// gate.
+///
+/// Blocking file I/O on a worker thread: a folder of photographs is a real
+/// copy, and doing it on the main thread would freeze the window that is
+/// supposed to be drawing the progress of the drop.
+#[tauri::command]
+pub async fn panel_import_paths(
+    paths: Vec<String>,
+    target: String,
+    skill: Option<String>,
+) -> Result<ImportSummary, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = root_for(skill.as_deref())?;
+        import_in(&root, &paths, &target)
+    })
+    .await
+    .map_err(|error| format!("The copy stopped unexpectedly: {error}"))?
+}
+
+/// Copies every dropped path into `target` (the empty string is the root).
+///
+/// Takes the root separately so the tests can point it at a temporary folder
+/// without touching the process-global, the same split as [`list_in`].
+fn import_in(root: &Path, paths: &[String], target: &str) -> Result<ImportSummary, String> {
+    let requested = if target.is_empty() { "." } else { target };
+    let destination = resolve_within(root, requested)?;
+    if !destination.is_dir() {
+        return Err(format!("{target} is not a folder"));
+    }
+    // Canonical here, because the folder-into-itself check compares it against a
+    // canonical source: a path with a symlink or a `..` in it would otherwise
+    // miss the case it is there to catch.
+    let canonical_destination = destination
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve {}: {error}", destination.display()))?;
+
+    let mut summary = ImportSummary {
+        imported: Vec::new(),
+        refused: Vec::new(),
+    };
+    for path in paths {
+        match import_one(&destination, &canonical_destination, path) {
+            Ok(name) => summary.imported.push(join_relative(target, &name)),
+            Err(reason) => summary.refused.push(reason),
+        }
+    }
+    Ok(summary)
+}
+
+/// One dropped path, copied under `destination`. Returns the name that landed.
+fn import_one(
+    destination: &Path,
+    canonical_destination: &Path,
+    source_text: &str,
+) -> Result<String, String> {
+    let source = Path::new(source_text);
+    if !source.is_absolute() {
+        return Err(format!("{source_text} is not an absolute path"));
+    }
+    // Resolves a symlink or a `..` in what the OS reported, and fails for a path
+    // that has gone since the drop -- both of which should be named rather than
+    // copied as whatever they happened to point at.
+    let source = source
+        .canonicalize()
+        .map_err(|error| format!("Could not read {source_text}: {error}"))?;
+
+    let Some(name) = source.file_name().and_then(|name| name.to_str()) else {
+        return Err(format!("{} has no usable name", source.display()));
+    };
+    let name = name.to_string();
+
+    // The listing refuses these, so importing one would put a file in the
+    // workspace that the tree can never draw: it would look like the drop did
+    // nothing while the bytes sat on disk.
+    if should_skip(&name) {
+        return Err(format!("{name} is a name the Files tree never shows"));
+    }
+
+    let target = destination.join(&name);
+    if target.exists() {
+        return Err(format!("{name} already exists there"));
+    }
+
+    let metadata =
+        std::fs::metadata(&source).map_err(|error| format!("Could not read {name}: {error}"))?;
+    if metadata.is_dir() {
+        // Copying a folder that contains the folder it is landing in would walk
+        // the tree while writing into it: the copy would never finish. This is
+        // the one case a drop can ask for that is not merely wrong, but endless.
+        if canonical_destination.starts_with(&source) {
+            return Err(format!("{name} contains the folder it was dropped on"));
+        }
+        if let Err(reason) = copy_directory(&source, &target) {
+            // Half a folder is the state a failed copy must not leave: the user
+            // sees a folder that looks complete and has no way to tell which
+            // files are missing.
+            let _ = std::fs::remove_dir_all(&target);
+            return Err(reason);
+        }
+    } else {
+        std::fs::copy(&source, &target)
+            .map_err(|error| format!("Could not copy {name}: {error}"))?;
+    }
+    Ok(name)
+}
+
+/// Copies a folder and everything in it, creating the folder first.
+///
+/// Symlinks are skipped rather than followed. Following one would copy something
+/// the user did not point at, possibly outside the folder they dragged, and
+/// copying the link itself needs a privilege the app has no business asking for
+/// to import a file.
+fn copy_directory(source: &Path, destination: &Path) -> Result<(), String> {
+    std::fs::create_dir(destination)
+        .map_err(|error| format!("Could not create {}: {error}", destination.display()))?;
+
+    let entries = std::fs::read_dir(source)
+        .map_err(|error| format!("Could not read {}: {error}", source.display()))?;
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            // An entry that cannot be classified -- a broken link, a permission
+            // the user lacks -- is skipped rather than failing the folder. The
+            // rest of what they dragged is still worth having.
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        let target = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_directory(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)
+                .map_err(|error| format!("Could not copy {}: {error}", entry.path().display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// Folders that are never worth listing.
@@ -948,5 +1220,255 @@ mod tests {
             "unexpected error: {error}"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Deleting the workspace root is refused by name. The tree never offers it,
+    /// but `""` and `"."` both resolve to the whole tree, and one stray empty
+    /// string must not be able to empty it.
+    #[test]
+    fn the_workspace_root_cannot_be_deleted() {
+        let root = temp_dir("panel-delete-root");
+        write(&root, "keep.txt");
+
+        for path in ["", "."] {
+            let error = delete_in(&root, path).expect_err("refused");
+            assert!(
+                error.contains("root cannot be deleted"),
+                "unexpected error: {error}"
+            );
+        }
+        assert!(
+            root.join("keep.txt").is_file(),
+            "the workspace was removed anyway"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The Delete key acting on a selection: every named entry goes, and the
+    /// answer names them rather than only reporting success.
+    #[test]
+    fn a_batch_delete_removes_every_selected_entry() {
+        let root = temp_dir("panel-delete-batch");
+        write(&root, "a.txt");
+        write(&root, "b.txt");
+
+        let summary =
+            delete_many_in(&root, &["a.txt".to_string(), "b.txt".to_string()]).expect("delete");
+
+        assert_eq!(summary.done, vec!["a.txt", "b.txt"]);
+        assert!(summary.refused.is_empty());
+        assert!(
+            std::fs::read_dir(&root).expect("read").next().is_none(),
+            "something survived the delete"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Dragging a selection onto a folder moves what it can and refuses what it
+    /// cannot: one name already taken must not stop the row beside it from
+    /// arriving, which is the whole reason the answer is per item.
+    #[test]
+    fn a_batch_move_reports_each_entry_separately() {
+        let root = temp_dir("panel-move-batch");
+        write(&root, "note.txt");
+        write(&root, "report.txt");
+        // The name is already taken in the folder the selection is dropped on.
+        write(&root, "archive/note.txt");
+
+        let summary = move_many_in(
+            &root,
+            &["note.txt".to_string(), "report.txt".to_string()],
+            "archive",
+        )
+        .expect("move");
+
+        assert_eq!(summary.done, vec!["report.txt"]);
+        assert_eq!(summary.refused.len(), 1);
+        assert!(
+            summary.refused[0].contains("already exists"),
+            "unexpected refusal: {}",
+            summary.refused[0]
+        );
+        assert!(root.join("archive/report.txt").is_file());
+        assert!(
+            root.join("note.txt").is_file(),
+            "the refused item was moved anyway"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A batch move is aimed at one folder, so a target that is not a folder is
+    /// one refusal for the gesture rather than the same message per item.
+    #[test]
+    fn a_batch_move_needs_a_folder_to_land_in() {
+        let root = temp_dir("panel-move-batch-target");
+        write(&root, "a.txt");
+
+        let error = move_many_in(&root, &["a.txt".to_string()], "a.txt").expect_err("refused");
+        assert!(error.contains("not a folder"), "unexpected error: {error}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A file dropped from outside the app is copied into the folder it was
+    /// dropped on, and the original is left where it was. The source is a real
+    /// temporary path, because an import is handed absolute paths and nothing
+    /// else -- that is the whole difference between it and a move.
+    #[test]
+    fn an_imported_file_lands_in_the_target_and_leaves_the_source() {
+        let root = temp_dir("panel-import-file");
+        let outside = temp_dir("panel-import-source");
+        std::fs::create_dir_all(root.join("docs")).expect("target");
+        std::fs::write(outside.join("photo.txt"), "pixels").expect("source");
+
+        let summary = import_in(
+            &root,
+            &[outside.join("photo.txt").display().to_string()],
+            "docs",
+        )
+        .expect("import");
+
+        assert_eq!(summary.imported, vec!["docs/photo.txt"]);
+        assert!(summary.refused.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs/photo.txt")).expect("read back"),
+            "pixels"
+        );
+        assert!(
+            outside.join("photo.txt").is_file(),
+            "the source was taken instead of copied"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// A dropped folder arrives with its whole tree, not as an empty directory.
+    #[test]
+    fn an_imported_folder_brings_its_contents() {
+        let root = temp_dir("panel-import-folder");
+        let outside = temp_dir("panel-import-tree");
+        std::fs::create_dir_all(outside.join("set/nested")).expect("dirs");
+        std::fs::write(outside.join("set/a.txt"), "a").expect("a");
+        std::fs::write(outside.join("set/nested/b.txt"), "b").expect("b");
+
+        let summary =
+            import_in(&root, &[outside.join("set").display().to_string()], "").expect("import");
+
+        assert_eq!(summary.imported, vec!["set"]);
+        assert_eq!(
+            std::fs::read_to_string(root.join("set/nested/b.txt")).expect("read back"),
+            "b"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// An import never overwrites: a name already in the folder is refused and
+    /// the existing file keeps its contents. The other paths in the same drop
+    /// still land, which is why the refusal is per item.
+    #[test]
+    fn an_import_refuses_a_name_that_is_taken_and_keeps_the_rest() {
+        let root = temp_dir("panel-import-conflict");
+        let outside = temp_dir("panel-import-conflict-source");
+        write(&root, "a.txt");
+        std::fs::write(outside.join("a.txt"), "new").expect("source a");
+        std::fs::write(outside.join("b.txt"), "b").expect("source b");
+
+        let summary = import_in(
+            &root,
+            &[
+                outside.join("a.txt").display().to_string(),
+                outside.join("b.txt").display().to_string(),
+            ],
+            "",
+        )
+        .expect("import");
+
+        assert_eq!(summary.imported, vec!["b.txt"]);
+        assert_eq!(summary.refused.len(), 1);
+        assert!(
+            summary.refused[0].contains("already exists"),
+            "unexpected refusal: {}",
+            summary.refused[0]
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).expect("read"),
+            "x",
+            "the existing file was overwritten"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// A drop can only ever write inside the tree it was aimed at: the
+    /// destination goes through `resolve_within` exactly like every other panel
+    /// write, while the source is the OS's own absolute path.
+    #[test]
+    fn an_import_outside_the_tree_is_refused() {
+        let root = temp_dir("panel-import-escape");
+        let outside = temp_dir("panel-import-escape-source");
+        std::fs::write(outside.join("a.txt"), "a").expect("source");
+
+        let error = import_in(
+            &root,
+            &[outside.join("a.txt").display().to_string()],
+            "../elsewhere",
+        )
+        .expect_err("refused");
+        assert!(
+            error.contains("outside") || error.contains(".."),
+            "unexpected error: {error}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// A folder that contains the folder it is dropped on would be copied into
+    /// itself -- an endless copy -- so it is refused before anything is written.
+    #[test]
+    fn a_folder_containing_the_destination_cannot_be_imported() {
+        let outside = temp_dir("panel-import-cycle");
+        let root = outside.join("workspace");
+        std::fs::create_dir_all(&root).expect("workspace");
+
+        let summary = import_in(&root, &[outside.display().to_string()], "").expect("import");
+
+        assert!(summary.imported.is_empty(), "the folder was copied anyway");
+        assert!(
+            summary.refused[0].contains("contains the folder"),
+            "unexpected refusal: {}",
+            summary.refused[0]
+        );
+        assert_eq!(
+            std::fs::read_dir(&root).expect("read").count(),
+            0,
+            "something was written before the refusal"
+        );
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// A folder the tree never draws is refused by name rather than copied to
+    /// where nobody can see it: the drop would look like it did nothing.
+    #[test]
+    fn an_import_of_a_hidden_folder_is_refused_by_name() {
+        let root = temp_dir("panel-import-hidden");
+        let outside = temp_dir("panel-import-node-modules");
+        std::fs::create_dir_all(outside.join("node_modules")).expect("dir");
+
+        let summary = import_in(
+            &root,
+            &[outside.join("node_modules").display().to_string()],
+            "",
+        )
+        .expect("import");
+
+        assert!(summary.imported.is_empty());
+        assert!(
+            summary.refused[0].contains("never shows"),
+            "unexpected refusal: {}",
+            summary.refused[0]
+        );
+        assert!(!root.join("node_modules").exists(), "it was copied anyway");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 }

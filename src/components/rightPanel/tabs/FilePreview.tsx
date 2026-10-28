@@ -4,6 +4,7 @@ import type { TreeEntry } from "../../../features/rightPanel/useFileTree";
 import { useFileEditor } from "../../../features/rightPanel/useFileEditor";
 import { isRenderedOnly, previewKindFor } from "./preview/previewKind";
 import MarkdownPreview from "./preview/MarkdownPreview";
+import SvgPreview from "./preview/SvgPreview";
 import ImagePreview from "./preview/ImagePreview";
 import PdfPreview from "./preview/PdfPreview";
 import DocxPreview from "./preview/DocxPreview";
@@ -19,10 +20,10 @@ import SheetPreview from "./preview/SheetPreview";
  * `useFileEditor`.
  *
  * **Two families of file.** Text is edited, and its preview is a second view of
- * the same bytes -- that is the toggle, and Markdown and HTML are what it is for.
- * A picture, a PDF, a Word document and a spreadsheet are *drawn*: there is no
- * text to edit, so the editor is not engaged, no Source toggle is offered, and the
- * renderer has the whole panel. See [`isRenderedOnly`].
+ * the same bytes -- that is the toggle, and Markdown, HTML and SVG are what it is
+ * for. A picture, a PDF, a Word document and a spreadsheet are *drawn*: there is
+ * no text to edit, so the editor is not engaged, no Source toggle is offered, and
+ * the renderer has the whole panel. See [`isRenderedOnly`].
  */
 
 type FilePreviewProps = {
@@ -109,6 +110,10 @@ export default function FilePreview({ entry, workspace, skill = null, onBack, on
       return <p className="px-3 py-2 text-xs text-[var(--quiet)]">Reading…</p>;
     }
     if (showingPreview && kind === "markdown") return <MarkdownPreview text={text} />;
+    // An `.svg` is a picture made of text, so it is drawn from the words rather
+    // than from bytes -- see `SvgPreview`. Toggling back gives the source, which
+    // is the view a vector file is usually opened for.
+    if (showingPreview && kind === "svg") return <SvgPreview text={text} />;
     return (
       <textarea
         value={text}

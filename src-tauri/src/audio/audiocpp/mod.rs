@@ -652,10 +652,7 @@ fn options_with_threshold(
 ) -> Option<serde_json::Value> {
     let mut options = stored.unwrap_or_default();
     if takes_threshold {
-        options.insert(
-            "threshold".to_string(),
-            serde_json::Value::from(threshold),
-        );
+        options.insert("threshold".to_string(), serde_json::Value::from(threshold));
     }
     (!options.is_empty()).then(|| serde_json::Value::Object(options))
 }

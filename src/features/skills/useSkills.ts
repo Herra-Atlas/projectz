@@ -39,8 +39,9 @@ export function useSkillList() {
  *
  * The backend derives the slug (lowercase, hyphens, de-duplicated), so the folder
  * the caller should open is the one it answers with rather than one guessed on
- * this side. An empty body is deliberate: a new skill is a folder with a header
- * and nothing else, and the Files panel is what fills it in.
+ * this side. The scaffold -- a starter description, a skeleton body and the
+ * `scripts/`, `references/` and `assets/` folders -- is written there too, so the
+ * Files panel opens onto something to fill in.
  */
 export async function createSkill(name: string): Promise<Skill> {
   return invoke<Skill>("skills_create", {

@@ -141,12 +141,6 @@ pub fn ai_answer_question(
     runtime.answer_question(&question_id, answer)
 }
 
-/// Tells the backend which session is on screen so a reply finishing in it stays silent.
-#[tauri::command]
-pub fn ai_set_viewed_session(runtime: State<'_, AiRuntime>, session_id: Option<String>) {
-    runtime.set_viewed_session(session_id);
-}
-
 /// Generate a short conversation title from the user's opening message,
 /// trying each configured model in order. The frontend passes the persisted
 /// list so the backend stays the single source of truth for provider keys and
@@ -827,17 +821,25 @@ pub fn database_table_rows(
 /// table. `bucket_sql` is interpolated into the timeline query, so it is only
 /// ever a value from that table; an unrecognised key is rejected rather than
 /// passed through.
+///
+/// `previous_since` is the start of the period before `since`, and is empty when
+/// the caller has no comparison window. It is only ever compared against a date
+/// column, so an unexpected value narrows the query rather than reaching SQL as
+/// syntax.
 #[tauri::command]
 pub fn database_usage_report(
     runtime: State<'_, AiRuntime>,
     range: String,
     since: String,
+    previous_since: String,
     bucket_sql: String,
 ) -> Result<crate::database::statistics::UsageReport, String> {
     if !TIMEFRAME_BUCKETS.contains(&bucket_sql.as_str()) {
         return Err("Unknown statistics bucket".into());
     }
-    runtime.database().usage_report(&range, &since, &bucket_sql)
+    runtime
+        .database()
+        .usage_report(&range, &since, &previous_since, &bucket_sql)
 }
 
 /// The only bucket expressions the statistics page may request.

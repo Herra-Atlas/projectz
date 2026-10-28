@@ -57,7 +57,7 @@ export default function DocxPreview({ path, skill = null }: PreviewProps) {
   }
 
   return (
-    <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
+    <div className="min-h-0 flex-1 overflow-auto px-4 py-3" data-find-scope="" data-find-label="document">
       <style>{CONTENT_STYLES}</style>
       <div className="mb-2 flex items-center gap-1.5 text-[11px] text-[var(--quiet)]">
         <FileText size={12} />

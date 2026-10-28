@@ -45,10 +45,6 @@ export type SkillDraft = {
   instructions: string;
 };
 
-/** The header template a new skill starts from. */
-export const blankSkillMarkdown = (name: string): string =>
-  `---\nname: ${name}\ndescription: ""\n---\n\n`;
-
 /**
  * One skill a repository offers, as the install picker draws it.
  *

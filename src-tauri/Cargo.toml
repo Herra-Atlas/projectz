@@ -1,6 +1,6 @@
 [package]
 name = "projectz"
-version = "0.6.0"
+version = "0.6.4"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -32,7 +32,6 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon", "unstable"] }
 tauri-plugin-opener = "2.7"
 tauri-plugin-dialog = "2.8"
-tauri-plugin-notification = "2"
 # A second launch of the app is a request to see the window that is already open,
 # not to start a rival one. Registered first in the builder (see `lib.rs`): it must
 # run before `setup`, and on Windows before any other plugin, to hold the lock early.
@@ -98,6 +97,15 @@ ash = { version = "0.38", optional = true }
 # inherits the app's copy from launch time. Read at spawn time so a tool installed
 # after the app started is usable without a restart; see `src/child/path.rs`.
 winreg = "0.55"
+# WebView2's own settings object. One switch on it --
+# `AreBrowserAcceleratorKeysEnabled` -- is what stops the engine opening its
+# built-in find bar on Ctrl+F, a browser shortcut no key handler in the page can
+# prevent. See `src/webview_settings.rs` for the whole argument.
+webview2-com = "0.39"
+# `Interface::cast`, for reaching `ICoreWebView2Settings3` from the base settings
+# interface that `CoreWebView2::Settings` hands back. The same version
+# webview2-com is built against, so the two share one crate instance.
+windows-core = "0.62"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

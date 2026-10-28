@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { Notify } from "../../features/notifications/types";
 import type { SttInputs, SttSettings } from "../../features/stt/types";
 import { SettingRow } from "../SettingsSection";
+import Select from "../Select";
 
 /**
  * The microphone dictation records from.
@@ -75,21 +76,19 @@ export function MicrophoneSection({ notify }: { notify: Notify }) {
           description={detail}
           hint="The device dictation records from. The app opens it only while the microphone button is held, so nothing listens in the background."
           control={
-            <select
+            <Select
+              label="Microphone"
               value={device ?? ""}
-              onChange={(event) => choose(event.target.value)}
-              aria-label="Microphone"
+              onChange={choose}
               disabled={inputs === null}
-              className="h-9 w-full max-w-[18rem] shrink-0 rounded-md border border-[var(--line)] bg-[var(--rail)] px-2 text-xs text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] disabled:opacity-40"
-            >
-              <option value="">System default</option>
-              {missing && <option value={device}>{device} · not connected</option>}
-              {inputs?.devices.map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
+              size="sm"
+              options={[
+                { value: "", label: "System default" },
+                ...(missing && device ? [{ value: device, label: `${device} · not connected` }] : []),
+                ...(inputs?.devices ?? []).map((name) => ({ value: name, label: name })),
+              ]}
+              className="w-full max-w-[18rem] shrink-0"
+            />
           }
         />
       </div>

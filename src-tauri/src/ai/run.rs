@@ -98,7 +98,6 @@ pub async fn run_prompt(app: &AppHandle, runtime: &AiRuntime, spec: PromptRun) -
     let request = ChatRequest {
         run_id: spec.run_id.clone(),
         session_id: Some(spec.session_id.clone()),
-        session_title: Some(spec.title.clone()),
         messages: spec.messages.clone(),
         endpoint_id: spec.endpoint_id.clone(),
         local_model: spec.local_model,

@@ -10,6 +10,14 @@ export type DownloadFile = {
   size: number;
   /** Quantisation, quality or language -- what tells two files apart. */
   note: string;
+  /**
+   * The section of this kind's catalogue the file belongs to, when the kind has
+   * more than one: an audio.cpp package's task (`speech`, `recognition`,
+   * `wake word`) or which runtime a wake row needs. Absent for the kinds whose
+   * rows are a single list, so the page can hide its section filter rather than
+   * offer a control with one choice in it.
+   */
+  group?: string;
 };
 
 /** What `downloads-progress` carries while a file is arriving. */

@@ -1,3 +1,4 @@
+import type { ToolUsage } from "../statistics/types";
 import type { ChatMessage, ChatSession } from "./types";
 
 export type SessionStats = {
@@ -16,6 +17,16 @@ export type SessionStats = {
   usedPromptTokens: number;
   usedCompletionTokens: number;
   usedTotalTokens: number;
+  /**
+   * Calls made to a model across the conversation, tool rounds included.
+   *
+   * One reply is at least one request, and a reply that ran three tools is four.
+   * A reply saved before the counter existed contributes one, which is exact
+   * for a single-request reply and an undercount for an old tool-heavy one.
+   */
+  requests: number;
+  /** Tool calls by name, busiest first, from the steps behind each reply. */
+  tools: ToolUsage[];
   /** Summed time spent generating, across measured replies. */
   generationSeconds: number;
   promptSeconds: number;
@@ -27,11 +38,17 @@ export type SessionStats = {
   peakContextTokens: number;
   /** True when any rate was inferred from text length rather than reported. */
   hasEstimatedRates: boolean;
+  /** Prompt tokens the provider served from its cache, over replies that said. */
+  cachedTokens: number;
+  /** Those same replies' prompt, the denominator of `cacheHitRate`. */
+  cachePromptTokens: number;
+  /** Share of the prompt read from cache, or null when no reply reported one. */
+  cacheHitRate: number | null;
   models: string[];
   providers: string[];
   /** Per-reply figures for the charts, oldest first. */
   replies: ReplySample[];
-  /** Prompt size per reply, for the context chart. */
+  /** Context size per reply, for the context chart. */
   context: ContextPoint[];
   createdAt: string;
   updatedAt: string;
@@ -41,7 +58,8 @@ export type SessionStats = {
 export type ReplySample = {
   /** 1-based position among the conversation's replies. */
   index: number;
-  promptTokens: number;
+  /** The conversation it started from -- `context_tokens`, not the last round. */
+  contextTokens: number;
   completionTokens: number;
   generationSeconds: number;
   /** Completion tokens per second for this reply, or null when unmeasured. */
@@ -50,13 +68,16 @@ export type ReplySample = {
   rateEstimated: boolean;
 };
 
-/** One point on the context chart: the prompt size sent for a single reply,
-    plotted in the order the replies happened. */
+/** One point on the context chart: how large the conversation was when the
+    reply's first request was sent, plotted in the order the replies happened. */
 export type ContextPoint = {
   index: number;
-  /** Tokens sent to the model, which grows as the conversation accumulates. */
-  promptTokens: number;
+  /** The conversation at the start of this reply. It grows as turns are added,
+      so a drop is a trim rather than an ordinary turn. */
+  contextTokens: number;
   completionTokens: number;
+  /** What the provider reported reading from its cache for this reply. */
+  cachedTokens: number | null;
 };
 
 const emptyStats = (session: ChatSession): SessionStats => ({
@@ -72,12 +93,17 @@ const emptyStats = (session: ChatSession): SessionStats => ({
   usedPromptTokens: 0,
   usedCompletionTokens: 0,
   usedTotalTokens: 0,
+  requests: 0,
+  tools: [],
   generationSeconds: 0,
   promptSeconds: 0,
   aggregateTokensPerSecond: 0,
   averagePromptTokensPerSecond: null,
   peakContextTokens: 0,
   hasEstimatedRates: false,
+  cachedTokens: 0,
+  cachePromptTokens: 0,
+  cacheHitRate: null,
   models: [],
   providers: [],
   replies: [],
@@ -101,6 +127,7 @@ export function computeSessionStats(session: ChatSession): SessionStats {
   const promptRates: number[] = [];
   const models = new Set<string>();
   const providers = new Set<string>();
+  const tools = new Map<string, ToolUsage>();
 
   stats.messageCount = session.messages.length;
 
@@ -121,34 +148,62 @@ export function computeSessionStats(session: ChatSession): SessionStats {
     stats.assistantMessages += 1;
     if (message.reasoning) stats.reasoningReplies += 1;
 
+    // Every reply made at least one call; a reply that ran tools made more, and
+    // the backend counted them. A reply saved before the counter existed falls
+    // back to one.
+    if (message.metrics) stats.requests += message.metrics.requests ?? 1;
+
+    // The steps are the only record of a tool call: no message row is written
+    // for one. Counted here rather than fetched again so the overview needs no
+    // second query.
+    for (const step of message.activity ?? []) {
+      if (step.kind !== "tool") continue;
+      const entry = tools.get(step.tool) ?? { tool: step.tool, calls: 0, cached: 0, failed: 0 };
+      entry.calls += 1;
+      if (step.cached) entry.cached += 1;
+      if (step.failed) entry.failed += 1;
+      tools.set(step.tool, entry);
+    }
+
     const metrics = message.metrics;
     if (!metrics) continue;
 
     // A reply counts as measured only once real throughput is known.
     const measured = metrics.generation_rate_estimated !== true;
-    if (metrics.prompt_tokens != null) {
-      stats.promptTokens += metrics.prompt_tokens;
-      stats.peakContextTokens = Math.max(stats.peakContextTokens, metrics.prompt_tokens);
+    // How large the conversation was when this reply *started*. The last round is
+    // larger whenever a tool ran, but that round is never stored and never
+    // re-sent, so it is not the conversation's size. `context_tokens` is written
+    // by the backend; older replies only have the final-round figure.
+    const contextTokens = metrics.context_tokens ?? metrics.prompt_tokens;
+    if (contextTokens != null) {
+      stats.promptTokens += contextTokens;
+      stats.peakContextTokens = Math.max(stats.peakContextTokens, contextTokens);
     }
     if (metrics.completion_tokens != null) stats.completionTokens += metrics.completion_tokens;
     // What the reply spent across every round it made, which is larger than the
-    // last-round `prompt_tokens` above whenever a tool ran. Falls back to those
-    // last-round figures for a reply saved before the rounds were totalled -- exact
-    // for a reply that made a single request, an undercount only for an old one.
+    // figures above whenever a tool ran. Falls back to the last-round figures for
+    // a reply saved before the rounds were totalled -- exact for a reply that made
+    // a single request, an undercount only for an old one.
     stats.usedPromptTokens += metrics.used_prompt_tokens ?? metrics.prompt_tokens ?? 0;
     stats.usedCompletionTokens += metrics.used_completion_tokens ?? metrics.completion_tokens ?? 0;
+    // The cache figure belongs to the round that reported it -- the provider
+    // answers "how much of *this* request did I already have" -- so its
+    // denominator is that same round's prompt, not the reply's starting context.
+    if (metrics.cached_tokens != null && metrics.prompt_tokens != null) {
+      stats.cachedTokens += metrics.cached_tokens;
+      stats.cachePromptTokens += metrics.prompt_tokens;
+    }
     stats.generationSeconds += metrics.generation_seconds;
     stats.promptSeconds += metrics.prompt_seconds;
     if (metrics.generation_rate_estimated) stats.hasEstimatedRates = true;
 
     // A reply with no usage reporting contributes nothing to the charts, so it
     // is left out rather than plotted as a zero that looks like a stall.
-    const promptTokens = metrics.prompt_tokens ?? 0;
     const completionTokens = metrics.completion_tokens ?? 0;
     if (metrics.prompt_tokens != null || metrics.completion_tokens != null) {
       stats.replies.push({
         index: stats.assistantMessages,
-        promptTokens,
+        contextTokens: contextTokens ?? 0,
         completionTokens,
         generationSeconds: metrics.generation_seconds,
         // A rate is only shown when the model reported the timing behind it.
@@ -157,14 +212,15 @@ export function computeSessionStats(session: ChatSession): SessionStats {
           : null,
         rateEstimated: metrics.generation_rate_estimated === true,
       });
-      // The context chart plots the prompt size at each turn. It is tracked
-      // separately from `replies` because a context figure is worth showing even
-      // when the reply's own timing was inferred.
-      if (metrics.prompt_tokens != null) {
+      // The context chart follows the same measure. It is tracked separately from
+      // `replies` because a context figure is worth showing even when the reply's
+      // own timing was inferred.
+      if (contextTokens != null) {
         stats.context.push({
           index: stats.assistantMessages,
-          promptTokens: metrics.prompt_tokens,
+          contextTokens,
           completionTokens,
+          cachedTokens: metrics.cached_tokens ?? null,
         });
       }
     }
@@ -180,8 +236,10 @@ export function computeSessionStats(session: ChatSession): SessionStats {
     ? stats.completionTokens / stats.generationSeconds
     : 0;
   stats.averagePromptTokensPerSecond = promptRates.length > 0 ? add(promptRates) / promptRates.length : null;
+  stats.cacheHitRate = stats.cachePromptTokens > 0 ? stats.cachedTokens / stats.cachePromptTokens : null;
   stats.models = [...models];
   stats.providers = [...providers];
+  stats.tools = [...tools.values()].sort((a, b) => b.calls - a.calls);
   return stats;
 }
 

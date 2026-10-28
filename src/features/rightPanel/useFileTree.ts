@@ -12,6 +12,9 @@ export type TreeEntry = {
   hasChildren: boolean;
 };
 
+/** The backend's per-item answer to acting on several rows at once. */
+export type BatchSummary = { done: string[]; refused: string[] };
+
 /** Normalize a path to workspace-relative format (forward slashes, no leading ./ or absolute paths). */
 export function normalizePath(path: string): string {
   // Strip Windows extended-length prefix \\?\ (4 chars: \, \, ?, \)
@@ -109,6 +112,62 @@ export function useFileTree(skill?: string | null) {
   const skillRef = useRef<string | null | undefined>(skill);
   skillRef.current = skill;
 
+  /**
+   * Drops a folder, and everything cached under it, from the tree's own state.
+   *
+   * A folder whose path stops naming anything -- deleted, renamed, moved --
+   * leaves a listing keyed by a path that is now a lie. Keeping it is how a
+   * delete ended with the panel reporting a read error for the folder it had just
+   * removed: the watcher names the folder's own path from its children's events,
+   * and the tree dutifully asked for it again. Forgetting it here means the
+   * watcher finds nothing to refresh, and the parent's own re-read removes the
+   * row.
+   *
+   * The subtree goes with it: a folder's descendants are keyed by paths built on
+   * the folder's, so none of them can survive it moving.
+   */
+  const forget = useCallback((path: string) => {
+    if (!path) return;
+    const prefix = `${path}/`;
+    const stale = (key: string) => key === path || key.startsWith(prefix);
+
+    for (const key of Array.from(loadedRef.current)) {
+      if (stale(key)) loadedRef.current.delete(key);
+    }
+    setChildrenByPath((current) => {
+      if (!Object.keys(current).some(stale)) return current;
+      const next: Record<string, TreeEntry[]> = {};
+      for (const [key, entries] of Object.entries(current)) {
+        if (!stale(key)) next[key] = entries;
+      }
+      return next;
+    });
+    setExpanded((current) => {
+      const keys = Array.from(current);
+      if (!keys.some(stale)) return current;
+      return new Set(keys.filter((key) => !stale(key)));
+    });
+  }, []);
+
+  /**
+   * Whether a folder is no longer in its parent's listing.
+   *
+   * Asked only after a read has already failed: a folder deleted here, in
+   * Explorer or by an agent reports a read error nobody can act on, and the one
+   * question worth asking is whether it still exists. Its parent's listing
+   * answers that without a second command -- and a parent that is gone too
+   * answers it as well, by failing.
+   */
+  const isGone = useCallback(async (relative: string): Promise<boolean> => {
+    try {
+      const entries = await listFolder(parentOf(relative), skillRef.current);
+      const name = relative.slice(relative.lastIndexOf("/") + 1);
+      return !entries.some((entry) => entry.name === name);
+    } catch {
+      return true;
+    }
+  }, []);
+
   const load = useCallback(async (relative: string) => {
     setLoadingPath(relative);
     setError(null);
@@ -121,13 +180,22 @@ export function useFileTree(skill?: string | null) {
       }
       return entries;
     } catch (reason) {
+      // A folder that has gone is not an error to show: the tree is about to
+      // stop drawing it, and a red line over the whole panel for a folder the
+      // user just deleted is the deletion reported back as a failure. The root
+      // is never treated this way -- if the workspace itself cannot be read,
+      // that is exactly what the user needs to be told.
+      if (relative !== "" && (await isGone(relative))) {
+        forget(relative);
+        return null;
+      }
       setError(String(reason));
       loadedRef.current.delete(relative);
       return null;
     } finally {
       setLoadingPath(null);
     }
-  }, []);
+  }, [forget, isGone]);
 
   /** A folder's loaded children, or undefined when it has not been fetched. */
   const childrenOf = useCallback(
@@ -263,27 +331,31 @@ export function useFileTree(skill?: string | null) {
     const normalizedPath = normalizePath(sourcePath);
     try {
       await invoke("panel_rename_file", { relative: normalizedPath, newName, skill: skillRef.current ?? null });
+      forget(normalizedPath);
       await load(parentOf(normalizedPath));
     } catch (reason) {
       throw new Error(String(reason));
     }
-  }, [load]);
+  }, [forget, load]);
 
   /**
-   * Deletes a file or directory. Re-reads the item's folder, for the reason the
-   * rename does.
+   * Deletes every row a selection names, reporting each one.
    *
-   * @param path The workspace-relative path of the item to delete.
+   * One command rather than one per row: a selection is several independent
+   * items, and asking five times would leave five parent re-reads behind it --
+   * while one refusal in the middle must not abandon the rest. The paths are
+   * forgotten *before* the listings are re-read, so the watcher's event for a
+   * folder that no longer exists finds nothing to ask about (see [`forget`]).
+   *
+   * @param paths The workspace-relative paths to delete.
    */
-  const del = useCallback(async (path: string) => {
-    const normalizedPath = normalizePath(path);
-    try {
-      await invoke("panel_delete_file", { relative: normalizedPath, skill: skillRef.current ?? null });
-      await load(parentOf(normalizedPath));
-    } catch (reason) {
-      throw new Error(String(reason));
-    }
-  }, [load]);
+  const removeMany = useCallback(async (paths: string[]): Promise<BatchSummary> => {
+    const targets = paths.map(normalizePath);
+    const summary = await invoke<BatchSummary>("panel_delete_paths", { paths: targets, skill: skillRef.current ?? null });
+    for (const path of targets) forget(path);
+    for (const folder of new Set(targets.map(parentOf))) await load(folder);
+    return summary;
+  }, [forget, load]);
 
   /**
    * Creates a file or folder inside `parent` and re-reads just that folder.
@@ -307,29 +379,25 @@ export function useFileTree(skill?: string | null) {
   }, [load]);
 
   /**
-   * Moves a file or folder into another folder, then re-reads both folders.
+   * Moves every row a selection names into one folder, reporting each one.
    *
-   * Two listings rather than one because a move is the only action that changes
-   * *two* places at once: the row has to disappear from where it was and appear
-   * where it landed. Re-reading the whole tree would do that too, but would also
-   * close every folder the user had opened.
+   * Two listings' worth of work rather than one per item: a move changes two
+   * places at once, and every source's own folder has to lose its row. Re-reading
+   * the whole tree would do that too, but would also close every folder the user
+   * had opened.
    *
-   * @param path The workspace-relative path of the item being moved.
-   * @param targetDir The workspace-relative folder to move it into. `""` is root.
+   * @param paths The workspace-relative paths being moved.
+   * @param targetDir The workspace-relative folder to move them into. `""` is root.
    */
-  const move = useCallback(async (path: string, targetDir: string) => {
-    const source = normalizePath(path);
+  const moveMany = useCallback(async (paths: string[], targetDir: string): Promise<BatchSummary> => {
+    const sources = paths.map(normalizePath);
     const target = normalizePath(targetDir);
-    try {
-      await invoke("panel_move_file", { relative: source, target, skill: skillRef.current ?? null });
-      const from = parentOf(source);
-      if (from === target) { await load(target); return; }
-      await load(from);
-      await load(target);
-    } catch (reason) {
-      throw new Error(String(reason));
-    }
-  }, [load]);
+    const summary = await invoke<BatchSummary>("panel_move_paths", { paths: sources, target, skill: skillRef.current ?? null });
+    for (const source of sources) forget(source);
+    const folders = new Set([target, ...sources.map(parentOf)]);
+    for (const folder of folders) await load(folder);
+    return summary;
+  }, [forget, load]);
 
   return { 
     root, 
@@ -341,10 +409,19 @@ export function useFileTree(skill?: string | null) {
     expand,
     collapseAll, 
     refresh,
+    /**
+     * Re-reads one folder's listing, leaving every other folder alone.
+     *
+     * The tree's own actions call this after they change something; a drop from
+     * outside the app does too, because the watcher's own refresh can arrive
+     * while the copy is still landing -- and a folder the user just dropped into
+     * must show what arrived rather than whatever was there mid-copy.
+     */
+    reload: load,
     openAt,
     create,
-    move,
+    moveMany,
     rename,
-    delete: del,
+    removeMany,
   };
 }

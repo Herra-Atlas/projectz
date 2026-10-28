@@ -53,10 +53,6 @@ pub struct AiRuntime {
     active_runs: Arc<Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
     local_runs: Arc<Mutex<HashSet<String>>>,
     local_completions: Arc<Mutex<HashMap<String, String>>>,
-    /// The session the user is currently looking at, set by the frontend on every
-    /// session change. A completion for this session is already on screen, so it must
-    /// not raise a notification.
-    viewed_session: Arc<Mutex<Option<String>>>,
     /// The sub-agents running right now, keyed by their run id.
     ///
     /// A run is only written to the database when it finishes, so a panel that
@@ -96,7 +92,6 @@ impl AiRuntime {
             active_runs: Arc::new(Mutex::new(HashMap::new())),
             local_runs: Arc::new(Mutex::new(HashSet::new())),
             local_completions: Arc::new(Mutex::new(HashMap::new())),
-            viewed_session: Arc::new(Mutex::new(None)),
             running_subagents: Arc::new(Mutex::new(HashMap::new())),
             // Ask-first, and the setting is read per run so a user who switches
             // to Full does not have to restart the app.
@@ -163,24 +158,6 @@ impl AiRuntime {
     /// gate's question map and not its approval one.
     pub fn answer_question(&self, question_id: &str, answer: String) -> bool {
         self.approval.answer_question(question_id, answer)
-    }
-
-    /// Records which session is on screen. `None` means the user is on a new, unsaved
-    /// conversation, which matches no run and so never suppresses a notification.
-    pub fn set_viewed_session(&self, session_id: Option<String>) {
-        if let Ok(mut viewed) = self.viewed_session.lock() {
-            *viewed = session_id;
-        }
-    }
-
-    fn is_viewed(&self, session_id: Option<&str>) -> bool {
-        let Some(session_id) = session_id else {
-            return false;
-        };
-        self.viewed_session
-            .lock()
-            .map(|viewed| viewed.as_deref() == Some(session_id))
-            .unwrap_or(false)
     }
 
     /// The sub-agents currently at work, for a panel that has just opened.
@@ -632,7 +609,6 @@ impl AiRuntime {
     pub async fn run_chat(&self, app: &AppHandle, request: ChatRequest) -> ChatResult {
         let run_id = request.run_id.clone();
         let session_id = request.session_id.clone();
-        let session_title = request.session_title.clone();
         let mut seq = 0u64;
         let mut emit = |kind: &str, text: Option<String>| {
             seq += 1;
@@ -760,11 +736,16 @@ impl AiRuntime {
             Some(override_window) => Some(override_window),
             None => detected_window,
         };
-        let previous_prompt_tokens = session_id
+        // The context the last reply *started* from, not the one it finished on:
+        // its own tool rounds sent results that are never stored, so the final
+        // round is a larger request than this turn will make. Compacting on that
+        // figure trimmed a conversation that had not grown -- and every trim is a
+        // prompt-cache miss for every token after the first rewritten byte.
+        let previous_context_tokens = session_id
             .as_deref()
             .and_then(|id| {
                 self.database
-                    .last_prompt_tokens(id, &endpoint.id, &model)
+                    .last_context_tokens(id, &endpoint.id, &model)
                     .ok()
             })
             .flatten();
@@ -843,7 +824,7 @@ impl AiRuntime {
                 limits.clone(),
                 context_window,
                 local_context_window,
-                previous_prompt_tokens,
+                previous_context_tokens,
                 // The top-level run may delegate; a sub-agent's own run passes false.
                 true,
                 Arc::clone(&on_event),
@@ -905,16 +886,6 @@ impl AiRuntime {
                 };
                 let _ = app.emit("ai-event", &event);
                 info!(run_id, len = content.len(), "chat completed");
-                // Only notify for a reply the user cannot already see. A background run
-                // in another session still notifies, even with the window focused.
-                if response_notifications_enabled(&self.database)
-                    && !self.is_viewed(session_id.as_deref())
-                {
-                    crate::observation::notification::notify_response_completed(
-                        app,
-                        session_title.as_deref(),
-                    );
-                }
                 ChatResult {
                     run_id,
                     content,
@@ -946,17 +917,10 @@ impl AiRuntime {
                         error: None,
                     };
                 }
-                // A reply the user is not watching must not die in silence. This is
-                // where chat *and* scheduled runs land -- a job runs through here
-                // too -- so one notification covers both, and the frontend's own
-                // error bubble covers the conversation that is on screen.
-                if !self.is_viewed(session_id.as_deref()) {
-                    crate::observation::notification::notify_run_failed(
-                        app,
-                        session_title.as_deref(),
-                        &err,
-                    );
-                }
+                // The frontend's own error bubble covers the conversation on
+                // screen; a background failure reaches the user through the
+                // chat view's failure sound, which is the only alert this app
+                // raises now.
                 emit("failed", Some(err.clone()));
                 ChatResult {
                     run_id,
@@ -984,17 +948,6 @@ async fn wait_before_retry(seconds: u64, cancelled: &Arc<std::sync::atomic::Atom
         }
         tokio::time::sleep((deadline - now).min(std::time::Duration::from_millis(200))).await;
     }
-}
-
-fn response_notifications_enabled(database: &std::sync::Arc<crate::database::Database>) -> bool {
-    database
-        .setting::<serde_json::Value>("app.general")
-        .and_then(|settings| {
-            settings
-                .get("responseNotifications")
-                .and_then(serde_json::Value::as_bool)
-        })
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -1082,23 +1035,6 @@ mod tests {
             .await
             .expect_err("all choices unavailable");
         assert_eq!(error, "The selected provider no longer exists");
-    }
-
-    /// The reply the user is watching must stay silent; a run in any other session, or
-    /// with no session on screen, is a background run and still notifies.
-    #[test]
-    fn only_the_session_on_screen_suppresses_its_notification() {
-        let runtime = runtime_without_local_engine("viewed-session");
-        // Nothing on screen yet: an unsaved new chat matches no stored session, so a
-        // finishing reply still has to notify.
-        assert!(!runtime.is_viewed(Some("session-1")));
-        runtime.set_viewed_session(Some("session-1".to_string()));
-        assert!(runtime.is_viewed(Some("session-1")));
-        assert!(!runtime.is_viewed(Some("session-2")));
-        assert!(!runtime.is_viewed(None));
-        // Switching away stops suppressing, so a later background reply notifies again.
-        runtime.set_viewed_session(None);
-        assert!(!runtime.is_viewed(Some("session-1")));
     }
 
     /// The running registry follows a sub-agent from start to finish, which is

@@ -8,6 +8,7 @@ import { useAudioModel } from "../../../features/audio/useAudioModel";
 import { useVoiceTest } from "../../../features/tts/useVoiceTest";
 import type { Notify } from "../../../features/notifications/types";
 import { SettingsPageTitle } from "../../SettingsSection";
+import Select from "../../Select";
 
 /**
  * One audio.cpp model's settings, row by row, from its own spec.
@@ -254,18 +255,17 @@ function OptionRow({
           className="size-4 accent-[var(--accent)] focus-visible:outline-2 focus-visible:outline-[var(--accent)]"
         />
       ) : option.kind === "enum" ? (
-        <select
+        <Select
+          label={humanize(option.name)}
           value={String(effective ?? "")}
-          onChange={(event) => onChange(event.target.value)}
-          className="min-h-8 max-w-[220px] rounded-md border border-[var(--line)] bg-[var(--panel)] px-2 text-[12px] text-[var(--text)] focus-visible:outline-2 focus-visible:outline-[var(--accent)]"
-        >
-          <option value="">(default)</option>
-          {option.values.map((value) => (
-            <option key={value} value={value}>
-              {value}
-            </option>
-          ))}
-        </select>
+          onChange={onChange}
+          size="sm"
+          options={[
+            { value: "", label: "(default)" },
+            ...option.values.map((value) => ({ value, label: value })),
+          ]}
+          className="max-w-[220px]"
+        />
       ) : (
         <input
           type={option.kind === "int" || option.kind === "float" ? "number" : "text"}

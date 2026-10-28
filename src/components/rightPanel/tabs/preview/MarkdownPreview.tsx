@@ -13,7 +13,9 @@ import { CONTENT_CLASS, CONTENT_STYLES } from "./contentStyles";
  */
 export default function MarkdownPreview({ text }: { text: string }) {
   return (
-    <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
+    // A searchable scope: the preview is prose, which is what find is for, and it
+    // scrolls itself, so a match is revealed inside this box rather than the panel.
+    <div className="min-h-0 flex-1 overflow-auto px-4 py-3" data-find-scope="" data-find-label="file preview">
       <style>{CONTENT_STYLES}</style>
       <div className={`${CONTENT_CLASS} text-[13px] leading-7 text-[var(--text)]`}>
         <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>

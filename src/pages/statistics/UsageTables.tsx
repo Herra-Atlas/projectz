@@ -1,6 +1,6 @@
 import { ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react";
 import { formatTimestamp, formatTokens } from "../../features/chat/sessionStats";
-import { displayModelName } from "../../features/models/modelName";
+import { isLocalUsage, modelLabel, providerLabel, type ModelNames } from "../../features/statistics/modelLabels";
 import { useTableSort, type SortDirection } from "../../features/statistics/tableSort";
 import type { ModelUsage, SessionUsage } from "../../features/statistics/types";
 
@@ -80,9 +80,9 @@ function SortArrow({ direction }: { direction: SortDirection | null }) {
 /** The views the models panel pages through.
  *
  * `local` is its own view rather than one provider among several, because a
- * local reply carries no provider at all -- it is not a provider that happens to
- * be named blank, and grouping it with the remote ones would misreport where it
- * ran.
+ * local reply was not answered by a provider at all -- grouping it with the
+ * remote ones would misreport where it ran, and a local id is a UUID rather
+ * than a model name.
  */
 export type ModelView = "all" | "local" | string;
 
@@ -97,22 +97,24 @@ type ModelGroup = { label: string; models: ModelUsage[] };
  * they gave the provider in Settings. The name is resolved from the endpoint
  * list; an id with no matching endpoint falls back to the id itself rather than
  * being dropped, so usage from a removed provider is still accounted for.
+ *
+ * `names` also carries the local models, which is what `isLocalUsage` needs: a
+ * local reply can carry the id of the endpoint that was selected before it, so
+ * the provider column alone cannot decide which view a row belongs in.
  */
-export function modelGroups(models: ModelUsage[], providerNames: Map<string, string>): ModelGroup[] {
-  /** A local reply has no provider: the alias stands in for the model, so the
-      provider column is empty and there is nothing to group it under. */
-  const isLocal = (model: ModelUsage) => model.model_id === "projectz-local" || !model.provider_id;
-
-  const local = models.filter(isLocal);
+export function modelGroups(models: ModelUsage[], names: ModelNames): ModelGroup[] {
+  // `isLocalUsage` is the page's one definition of what a local reply is, so the
+  // group a row lands in and the label it is drawn with cannot disagree.
+  const local = models.filter((model) => isLocalUsage(model, names));
   const byProvider = new Map<string, ModelUsage[]>();
-  for (const model of models.filter((entry) => !isLocal(entry))) {
+  for (const model of models.filter((entry) => !isLocalUsage(entry, names))) {
     byProvider.set(model.provider_id, [...(byProvider.get(model.provider_id) ?? []), model]);
   }
 
   const groups: ModelGroup[] = [{ label: "All", models }];
   if (local.length > 0) groups.push({ label: "Local", models: local });
   for (const [id, rows] of [...byProvider.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-    groups.push({ label: providerNames.get(id) ?? id, models: rows });
+    groups.push({ label: names.providers.get(id) ?? id, models: rows });
   }
   return groups;
 }
@@ -121,22 +123,26 @@ export function modelGroups(models: ModelUsage[], providerNames: Map<string, str
  *
  * Defaults to busiest-first, which is the order the report arrived in. The
  * numeric headers are buttons; clicking one orders by that figure and clicking
- * it again reverses. */
-export function ModelTable({ group }: { group: ModelGroup }) {
+ * it again reverses.
+ *
+ * `names` is the registry the report itself cannot carry: a row stores ids, and
+ * both the model and its provider are named by the user somewhere else. A local
+ * model's id is a UUID, so without this the table would print one. */
+export function ModelTable({ group, names }: { group: ModelGroup; names: ModelNames }) {
   const columns = {
-    replies: (row: ModelUsage) => row.replies,
+    requests: (row: ModelUsage) => row.requests,
     input: (row: ModelUsage) => row.prompt_tokens,
     output: (row: ModelUsage) => row.completion_tokens,
   } as const;
-  const { rows, toggle, directionFor } = useTableSort<ModelUsage, keyof typeof columns>(group.models, columns, { column: "replies", direction: "desc" });
+  const { rows, toggle, directionFor } = useTableSort<ModelUsage, keyof typeof columns>(group.models, columns, { column: "requests", direction: "desc" });
   if (group.models.length === 0) {
     return <p className="px-4 py-10 text-center text-sm text-[var(--muted)]">No model recorded in this period.</p>;
   }
   return (
     <UsageTable<keyof typeof columns>
-      head={["Model", "Replies", "Input", "Output"]}
+      head={["Model", "Requests", "Input", "Output"]}
       sortable={[
-        { key: "replies", label: "Replies" },
+        { key: "requests", label: "Requests" },
         { key: "input", label: "Input" },
         { key: "output", label: "Output" },
       ]}
@@ -144,19 +150,27 @@ export function ModelTable({ group }: { group: ModelGroup }) {
       onSort={toggle}
       caption="Models used in this period"
     >
-      {rows.map((model) => (
-        <tr key={`${model.provider_id}:${model.model_id}`} className="border-b border-[var(--line)] last:border-b-0">
-          <th scope="row" className="max-w-0 px-4 py-2 font-normal">
-            <span className="block truncate text-[var(--text)]" title={model.model_id}>{displayModelName(model.model_id)}</span>
-            {/* The provider subline is dropped inside a per-provider view, where
-                every row already says the same thing. */}
-            {model.provider_id && group.label === "All" && <span className="block truncate text-[11px] text-[var(--quiet)]" title={model.provider_id}>{model.provider_id}</span>}
-          </th>
-          <td className="px-4 py-2 text-right tabular-nums text-[var(--muted)]">{model.replies.toLocaleString()}</td>
-          <td className="px-4 py-2 text-right tabular-nums text-[var(--muted)]">{formatTokens(model.prompt_tokens)}</td>
-          <td className="px-4 py-2 text-right tabular-nums text-[var(--text)]">{formatTokens(model.completion_tokens)}</td>
-        </tr>
-      ))}
+      {rows.map((model) => {
+        const name = modelLabel(model, names);
+        const provider = providerLabel(model, names);
+        return (
+          <tr key={`${model.provider_id}:${model.model_id}`} className="border-b border-[var(--line)] last:border-b-0">
+            <th scope="row" className="max-w-0 px-4 py-2 font-normal">
+              {/* A remote model's full id is the routing key and worth the
+                  tooltip; a local one's is a UUID, so the name is all there is
+                  to say. */}
+              <span className="block truncate text-[var(--text)]" title={isLocalUsage(model, names) ? name : model.model_id}>{name}</span>
+              {/* The provider subline is dropped inside a per-provider view,
+                  where every row already says the same thing. It is absent for
+                  a local row, which has no provider rather than an unnamed one. */}
+              {provider && group.label === "All" && <span className="block truncate text-[11px] text-[var(--quiet)]" title={provider}>{provider}</span>}
+            </th>
+            <td className="px-4 py-2 text-right tabular-nums text-[var(--muted)]">{model.requests.toLocaleString()}</td>
+            <td className="px-4 py-2 text-right tabular-nums text-[var(--muted)]">{formatTokens(model.prompt_tokens)}</td>
+            <td className="px-4 py-2 text-right tabular-nums text-[var(--text)]">{formatTokens(model.completion_tokens)}</td>
+          </tr>
+        );
+      })}
     </UsageTable>
   );
 }

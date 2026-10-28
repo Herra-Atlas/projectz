@@ -1,6 +1,5 @@
-import { useState } from "react";
-
 import type { Notify } from "../../../features/notifications/types";
+import type { SpeechStage } from "../settingsPages";
 import { FlashHighlight, Segmented, SettingsPageTitle } from "../../SettingsSection";
 import { SpeechToTextList } from "./SpeechToTextList";
 import { VoiceRecognitionPage } from "./VoiceRecognitionPage";
@@ -14,11 +13,17 @@ import { WakeWordPage } from "./WakeWordPage";
  * always works whether or not the two gates above it are enabled. The strip sits
  * in the title band beside the heading, the way every other page puts its one
  * control there, and lists the stages in the order audio passes through them.
+ *
+ * Which stage is showing is held by the settings window rather than here: the
+ * page unmounts whenever a drill-down or another section is opened, so a stage
+ * kept locally is forgotten by exactly the downloads and settings pages that are
+ * reached from it.
  */
-const STAGES = ["Voice recognition", "Wake word", "Speech to text"] as const;
-type Stage = (typeof STAGES)[number];
+const STAGES: readonly SpeechStage[] = ["Voice recognition", "Wake word", "Speech to text"] as const;
 
 export function SpeechToTextPage({
+  stage,
+  onStageChange,
   onDownload,
   onAudioDownload,
   onModelSettings,
@@ -27,6 +32,8 @@ export function SpeechToTextPage({
   onCreateVoice,
   notify,
 }: {
+  stage: SpeechStage;
+  onStageChange: (stage: SpeechStage) => void;
   onDownload: () => void;
   onAudioDownload: () => void;
   onModelSettings: (model: string) => void;
@@ -36,10 +43,6 @@ export function SpeechToTextPage({
   onCreateVoice: () => void;
   notify: Notify;
 }) {
-  // Transcription is the default because it is the only stage the app cannot do
-  // without: the other two only decide *when* it listens.
-  const [stage, setStage] = useState<Stage>("Speech to text");
-
   return (
     <>
       <SettingsPageTitle>
@@ -47,7 +50,7 @@ export function SpeechToTextPage({
           <FlashHighlight anchor="stt.engine" />
           Speech to text
         </h2>
-        <Segmented label="Stage" value={stage} options={STAGES} onChange={setStage} />
+        <Segmented label="Stage" value={stage} options={STAGES} onChange={onStageChange} />
       </SettingsPageTitle>
 
       {stage === "Speech to text" ? (

@@ -9,12 +9,12 @@ mod downloads;
 mod jobs;
 mod mcp;
 mod messaging;
-mod observation;
 mod panel;
 mod skills;
 mod system;
 mod taste;
 mod websearch;
+mod webview_settings;
 mod window;
 
 use tauri::{
@@ -91,7 +91,6 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
             let engine_dir = app_data_dir.join("engines");
@@ -243,6 +242,14 @@ pub fn run() {
                 .build(app)?;
 
             if let Some(window) = app.get_webview_window("main") {
+                // The engine's own find bar and right-click menu off, before
+                // anything can use them. Both belong to the browser rather than to
+                // this app: the app has its own find (`src/features/find/`) and
+                // draws its own menus, and a right-click where nothing has drawn
+                // one should do nothing rather than offer Reload and Print. Never
+                // fatal: an old runtime keeps the engine's behaviour and the
+                // frontend's still works beside it.
+                webview_settings::apply(&window);
                 // Geometry first, while the window is still hidden: it has never
                 // been painted, so the user sees it arrive once, already in the
                 // right place, instead of at the configured default and then
@@ -265,7 +272,6 @@ pub fn run() {
             commands::ai_skip_local_reasoning,
             commands::ai_answer_approval,
             commands::ai_answer_question,
-            commands::ai_set_viewed_session,
             commands::ai_generate_title,
             commands::messaging_status,
             commands::messaging_save_settings,
@@ -366,6 +372,10 @@ pub fn run() {
             panel::fs::panel_move_file,
             panel::fs::panel_rename_file,
             panel::fs::panel_delete_file,
+            panel::fs::panel_delete_paths,
+            panel::fs::panel_move_paths,
+            panel::fs::panel_reveal_path,
+            panel::fs::panel_import_paths,
             panel::terminal::panel_terminal_run,
             panel::browser::panel_browser_navigate,
             panel::browser::panel_browser_open_tab,

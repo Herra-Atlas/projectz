@@ -52,8 +52,6 @@ pub struct ChatRequest {
     pub run_id: String,
     #[serde(default)]
     pub session_id: Option<String>,
-    #[serde(default)]
-    pub session_title: Option<String>,
     pub messages: Vec<ChatMessage>,
     pub endpoint_id: Option<String>,
     #[serde(default)]

@@ -1,7 +1,8 @@
-import { ChartNoAxesColumn, Clock, Gauge, Layers } from "lucide-react";
+import { ChartNoAxesColumn, Clock, Gauge, Layers, Wrench } from "lucide-react";
 import { Suspense, lazy } from "react";
 import { formatTokens, type SessionStats } from "../../../features/chat/sessionStats";
 import { formatDuration } from "../../../features/chat/duration";
+import { ToolBars } from "../../statistics/ToolBars";
 import { Group, Stat, StatGrid } from "../StatGroup";
 
 /** Recharts is the heaviest dependency in the app, and the overview panel is
@@ -30,20 +31,39 @@ export default function StatisticsTab({ stats }: { stats: SessionStats }) {
         <StatGrid>
           {/* The real spend leads: every request the conversation made, so a
               reply that ran a tool counts both the round that called it and the
-              round that answered. `Total` and `Prompt` below report only the
-              final round of each reply, which is what the context charts plot. */}
+              round that answered. `Total` and `Prompt` below report the context
+              each reply started from, which is what the charts plot. */}
           <Stat label="Used" value={formatTokens(stats.usedTotalTokens)} hint="every request, incl. tool rounds" />
-          <Stat label="Total" value={formatTokens(stats.totalTokens)} hint="prompt + completion" />
-          <Stat label="Prompt" value={formatTokens(stats.promptTokens)} hint="final round of each reply" />
+          {/* The count beside the spend: one reply that ran three tools is four
+              requests, so this is the number `Used` was summed over. */}
+          <Stat label="Requests" value={stats.requests.toLocaleString()} hint="calls to a model" />
+          <Stat label="Total" value={formatTokens(stats.totalTokens)} hint="context + completion" />
+          <Stat label="Prompt" value={formatTokens(stats.promptTokens)} hint="context at each reply" />
           <Stat label="Completion" value={formatTokens(stats.completionTokens)} hint="generated" />
+          {/* The one figure that says whether the provider's cache is doing its
+              job. `—` when no reply reported a cache figure, because "not said"
+              and "nothing cached" are different facts. */}
+          <Stat
+            label="Cache hit"
+            value={stats.cacheHitRate === null ? "—" : `${Math.round(stats.cacheHitRate * 100)}%`}
+            hint="of the prompt, read from cache"
+          />
         </StatGrid>
+      </Group>
+
+      {/* What the replies actually did, counted from their own steps. The
+          Statistics page draws the same list with the same component, so one
+          conversation and a whole period describe tools identically. */}
+      <Group icon={<Wrench size={13} />} title="Tools">
+        <ToolBars tools={stats.tools} empty="No tool calls in this conversation." />
       </Group>
 
       <Group icon={<Layers size={13} />} title="Context">
         <ChartSlot><ContextChart stats={stats} /></ChartSlot>
         <p className="mt-1.5 text-[11px] text-[var(--quiet)]">
-          Tokens sent at each turn, oldest first. Hover a point for its input and
-          output. A rising line is the conversation accumulating.
+          The conversation when each reply started, oldest first. Hover a point
+          for its context, its output and what came from the cache. A rising line
+          is the conversation accumulating; a drop means the request was trimmed.
         </p>
       </Group>
 
@@ -52,8 +72,8 @@ export default function StatisticsTab({ stats }: { stats: SessionStats }) {
       <Group icon={<ChartNoAxesColumn size={13} />} title="Tokens per reply">
         <ChartSlot><ReplyTokensChart stats={stats} /></ChartSlot>
         <p className="mt-1.5 text-[11px] text-[var(--quiet)]">
-          Input and output for each reply, oldest first. Peaks show the exchanges
-          that carried the most context.
+          Context and output for each reply, oldest first. Peaks show the
+          exchanges that carried the most conversation.
         </p>
       </Group>
 

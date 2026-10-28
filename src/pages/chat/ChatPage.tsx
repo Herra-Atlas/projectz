@@ -8,6 +8,9 @@ import Welcome from "./Welcome";
 import { Markdown } from "./Markdown";
 import { PathText } from "./PathText";
 import { expandWorkspacePaths, trimWorkspacePaths } from "../../features/workspace/workspacePaths";
+import { isOverRightPanel } from "../../features/rightPanel/externalDrop";
+import { playAlertSound } from "../../features/notifications/sound";
+import { cachedNotificationSettings, soundFor, type AlertKind } from "../../features/notifications/settings";
 import FileChanges from "./FileChanges";
 import DocumentCards from "./DocumentCards";
 import { markdownComponents, MarkdownActionsProvider } from "./markdownComponents";
@@ -232,6 +235,24 @@ type ChatPageProps = {
    */
   workspaceRoot?: string | null;
 };
+
+/**
+ * The alert sound for one event, when the user is not looking at this window.
+ *
+ * An alert is a tone the app plays itself -- there is no system notification --
+ * so "not looking" is the whole condition: a sound for a reply being read would
+ * just talk over the user. A background run counts as out of sight whatever the
+ * window is doing; a prompt only matters when the window is hidden or unfocused.
+ * Which sound, and whether there is one at all, comes from the record primed at
+ * startup, so this costs no IPC on the completion path.
+ */
+function playAlertIfUnseen(kind: AlertKind, isActive = true) {
+  if (isActive && !document.hidden && document.hasFocus()) return;
+  const settings = cachedNotificationSettings();
+  if (!settings) return;
+  const sound = soundFor(settings, kind);
+  if (sound) playAlertSound(sound);
+}
 
 export default function ChatPage({ endpointId, model, localModelId, session, sessionLoading = false, activeId = null, onEnsureSession, onFirstSend, onActivity, onModelSelect, onLocalModelSelect, modelRefreshKey, onMessagesChange, onWorkingModeChange, onNotify, onNotifyAction, onClearNotification, onOpenUrl, onOpenFile, titleModels, onAutoTitle, workspaceRoot, defaultEffort }: ChatPageProps) {
   const [messages, setMessages] = useState<ChatMessage[]>(session?.messages ?? []);
@@ -589,9 +610,6 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       // approve every call after the user has set a level that says otherwise.
       setPermission(defaultPermissionRef.current);
     }
-    // Tells the backend which session is on screen, so a reply finishing here does not
-    // raise a notification for something the user is already watching.
-    void invoke("ai_set_viewed_session", { sessionId: nextId }).catch(() => undefined);
     const runId = (nextId && sessionRunIdsRef.current.get(nextId)) || "";
     runIdRef.current = runId;
     const run = (runId && backgroundRunsRef.current.get(runId)) || null;
@@ -766,12 +784,26 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
 
   useEffect(() => {
     const unlistenPromise = getCurrentWebview().onDragDropEvent((event) => {
-      if (event.payload.type === "enter" || event.payload.type === "over") setDraggingFiles(true);
-      if (event.payload.type === "drop") {
+      const payload = event.payload;
+      if (payload.type === "leave") {
         setDraggingFiles(false);
-        void addPaths(event.payload.paths);
+        return;
       }
-      if (event.payload.type === "leave") setDraggingFiles(false);
+      // The position is in physical pixels, and it is the only thing that says
+      // *where* the drop was aimed -- the listener is on the whole window.
+      const scale = window.devicePixelRatio || 1;
+      const overPanel = isOverRightPanel(payload.position.x / scale, payload.position.y / scale);
+      if (payload.type === "drop") {
+        setDraggingFiles(false);
+        // A file dropped on the right panel belongs to the panel: the Files tree
+        // copies it into the folder under the pointer through its own listener.
+        // Attaching it to the composer as well would answer one gesture twice.
+        if (!overPanel) void addPaths(payload.paths);
+        return;
+      }
+      // No "drop files to attach" overlay while the pointer is over a panel that
+      // is not going to attach anything.
+      if (payload.type === "enter" || payload.type === "over") setDraggingFiles(!overPanel);
     });
     return () => { unlistenPromise.then((unlisten) => unlisten()); };
   }, []);
@@ -895,6 +927,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         // Guarded against a repeat of the same id, which a re-emitted event would
         // otherwise queue twice and then answer with one click.
         setPendingApprovals((current) => current.some((entry) => entry.approvalId === approval.approvalId) ? current : [...current, approval]);
+        playAlertIfUnseen("approval");
         return;
       }
       // A question the agent asked with `ask_user`, handled here for the same
@@ -908,6 +941,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           options: Array.isArray(payload.metrics.options) ? payload.metrics.options : [],
         };
         setPendingQuestions((current) => current.some((entry) => entry.questionId === question.questionId) ? current : [...current, question]);
+        playAlertIfUnseen("input");
         return;
       }
       // The agent updated its checklist, so the strip above the composer reflects
@@ -1229,11 +1263,20 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         const generationTokensPerSecond = payload.metrics?.generation_tokens_per_second ?? completionTokens / generationSeconds;
         const promptTokens = payload.metrics?.prompt_tokens;
         const promptEvalTokensPerSecond = payload.metrics?.prompt_eval_tokens_per_second;
+        // The conversation this reply started from, and what the provider read
+        // from its prompt cache: both are carried onto the saved message so the
+        // charts and the cache figure are right before a reload, not after one.
+        const contextTokens = payload.metrics?.context_tokens;
+        const cachedTokens = payload.metrics?.cached_tokens;
         // The reply's spend across every round it made, larger than `promptTokens`
         // whenever a tool ran. Absent from a provider that reports no usage, and
         // then the stored message keeps only the last round's figure.
         const usedPromptTokens = payload.metrics?.used_prompt_tokens;
         const usedCompletionTokens = payload.metrics?.used_completion_tokens;
+        // How many calls the reply made, tool rounds included. The loop counts
+        // them; it has to be carried onto the stored message or statistics can
+        // only ever see replies.
+        const requests = payload.metrics?.requests;
         // Closed **before** the message is built. A step still open when the run
         // ended would otherwise be stored as running forever -- and the stored
         // activity is what the next request's tool recap is derived from, so the
@@ -1251,7 +1294,10 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           }
           return;
         }
-        const next = [...run.baseMessages, { role: "assistant" as const, content: response, reasoning: run.reasoning || undefined, ...(run.activity.length > 0 ? { activity: run.activity } : {}), modelId: run.modelLabel, providerId: run.providerLabel, metrics: { prompt_seconds: promptSeconds, generation_seconds: generationSeconds, elapsed_seconds: elapsedSeconds, tokens_per_second: generationTokensPerSecond, generation_rate_estimated: payload.metrics?.generation_tokens_per_second == null, completion_tokens: completionTokens, ...(promptTokens !== undefined ? { prompt_tokens: promptTokens } : {}), ...(usedPromptTokens !== undefined ? { used_prompt_tokens: usedPromptTokens } : {}), ...(usedCompletionTokens !== undefined ? { used_completion_tokens: usedCompletionTokens } : {}), ...(promptEvalTokensPerSecond !== undefined ? { prompt_eval_tokens_per_second: promptEvalTokensPerSecond } : {}) } }];
+        // A reply that landed where the user was not looking gets the sound; one
+        // on screen has said everything a chime could.
+        playAlertIfUnseen("response", isActive);
+        const next = [...run.baseMessages, { role: "assistant" as const, content: response, reasoning: run.reasoning || undefined, ...(run.activity.length > 0 ? { activity: run.activity } : {}), modelId: run.modelLabel, providerId: run.providerLabel, metrics: { prompt_seconds: promptSeconds, generation_seconds: generationSeconds, elapsed_seconds: elapsedSeconds, tokens_per_second: generationTokensPerSecond, generation_rate_estimated: payload.metrics?.generation_tokens_per_second == null, completion_tokens: completionTokens, ...(promptTokens !== undefined ? { prompt_tokens: promptTokens } : {}), ...(contextTokens !== undefined ? { context_tokens: contextTokens } : {}), ...(cachedTokens !== undefined ? { cached_tokens: cachedTokens } : {}), ...(usedPromptTokens !== undefined ? { used_prompt_tokens: usedPromptTokens } : {}), ...(usedCompletionTokens !== undefined ? { used_completion_tokens: usedCompletionTokens } : {}), ...(requests !== undefined ? { requests } : {}), ...(promptEvalTokensPerSecond !== undefined ? { prompt_eval_tokens_per_second: promptEvalTokensPerSecond } : {}) } }];
         onActivityRef.current(run.sessionId, isActive ? null : "done");
         onMessagesChangeRef.current(run.sessionId, next);
         if (isActive) {
@@ -1327,6 +1373,9 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       } else if (payload.kind === "failed") {
         const message = payload.error || payload.text || "The provider could not complete this response.";
         if (isActive) onNotify("error", message);
+        // The error bubble above is for the conversation on screen; the tone is
+        // for the one the user is not reading.
+        playAlertIfUnseen("failed", isActive);
         run.text = run.text ? `${run.text}\n\nRequest failed: ${message}` : `Request failed: ${message}`;
         // Same rule as a completed reply: close the steps before storing them, so
         // the work that did happen is recorded as finished rather than as a row
@@ -2188,7 +2237,18 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       }}
     >
       {draggingFiles && <div aria-hidden="true" className="pointer-events-none absolute inset-3 z-30 grid place-items-center rounded-xl border-2 border-dashed border-[var(--accent)] bg-[color-mix(in_srgb,var(--accent)_8%,var(--page))] text-sm font-medium text-[var(--text)]">Drop files to attach</div>}
-      <div ref={threadRef} onScroll={handleThreadScroll} onMouseUp={handleThreadSelection} className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-5 py-8 sm:px-8">
+      {/* `data-find-scope` is what makes this transcript searchable by the app's
+          own find bar (`features/find/`). The scope is chosen rather than the whole
+          page on purpose: a search that also matched the sidebar and the composer
+          would dim the chrome the reader navigates by. */}
+      <div
+        ref={threadRef}
+        onScroll={handleThreadScroll}
+        onMouseUp={handleThreadSelection}
+        data-find-scope=""
+        data-find-label="conversation"
+        className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-5 py-8 sm:px-8"
+      >
         {messages.length === 0 && !streamText ? (
           <Welcome hasModel={Boolean(endpointId || localModelId)} mode={mode} userName={userName} />
         ) : (

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useInstalledEngines, type InstalledEngine } from "../features/models/useInstalledEngines";
 import type { Notify } from "../features/notifications/types";
+import Select, { type SelectOption } from "./Select";
 
 /**
  * Which engine one local model runs with.
@@ -68,22 +69,24 @@ export default function EnginePicker({ engineId, onChange, notify, modelId }: En
   };
 
   return (
-    <select
+    <Select
       value={engineId ?? ""}
-      onChange={(event) => void choose(event.target.value)}
-      aria-label="Engine for this model"
-      className="h-9 w-full max-w-[16rem] shrink-0 rounded-md border border-[var(--line)] bg-[var(--rail)] px-2 text-xs text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
-    >
-      {/* Only until a choice exists. A `<select>` with a value matching no option
-          renders blank, which reads as broken rather than as "not chosen yet". */}
-      {engineId == null && <option value="" disabled>Choose an engine</option>}
-      {missing && <option value={engineId!}>{engineId} · not installed</option>}
-      {engines.map((engine) => (
-        <option key={engine.id} value={engine.id}>
-          {engine.version}{engine.source === "custom" ? " · unverified" : ""}
-        </option>
-      ))}
-    </select>
+      onChange={(value) => void choose(value)}
+      label="Engine for this model"
+      placeholder="Choose an engine"
+      // Only until a choice exists. An empty value that matches no row would
+      // render the placeholder, which reads as broken rather than as "not chosen
+      // yet"; the disabled row says which it is.
+      options={[
+        ...(engineId == null ? [{ value: "", label: "Choose an engine", disabled: true }] : []),
+        ...(missing ? [{ value: engineId!, label: `${engineId} · not installed` }] : []),
+        ...engines.map((engine): SelectOption => ({
+          value: engine.id,
+          label: `${engine.version}${engine.source === "custom" ? " · unverified" : ""}`,
+        })),
+      ]}
+      className="w-full max-w-[16rem] shrink-0"
+    />
   );
 }
 

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronDown, Server } from "lucide-react";
+import { Server } from "lucide-react";
+import Select from "./Select";
 
 type Endpoint = { id: string; name: string; models: string[]; enabled: boolean };
 
@@ -30,24 +31,19 @@ export default function ModelPicker({
 
   return (
     <div className="flex min-w-0 items-center gap-2">
-      <label className="relative flex h-10 min-w-0 items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--rail)] px-3 text-[var(--muted)] focus-within:border-[var(--accent)]">
-        <Server size={15} className="shrink-0" />
-        <span className="sr-only">AI provider</span>
-        <select
-          aria-label="AI provider"
-          value={selectedEndpoint}
-          onChange={(event) => {
-            onEndpointChange(event.target.value);
-            setModelInput("");
-            onModelChange("");
-          }}
-          className="w-full min-w-[110px] max-w-[160px] appearance-none bg-transparent pr-5 text-[13px] text-[var(--text)] outline-none"
-        >
-          <option value="">{endpoints.length ? "Choose provider" : "Add provider"}</option>
-          {endpoints.filter((item) => item.enabled).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-        </select>
-        <ChevronDown size={14} className="pointer-events-none absolute right-3" />
-      </label>
+      <Select
+        label="AI provider"
+        icon={<Server size={15} />}
+        value={selectedEndpoint}
+        placeholder={endpoints.length ? "Choose provider" : "Add provider"}
+        options={endpoints.filter((item) => item.enabled).map((item) => ({ value: item.id, label: item.name }))}
+        onChange={(value) => {
+          onEndpointChange(value);
+          setModelInput("");
+          onModelChange("");
+        }}
+        className="h-10 min-w-[130px] max-w-[175px]"
+      />
       {endpoint && <input
         aria-label="Model name"
         className="h-10 w-36 rounded-lg border border-[var(--line)] bg-[var(--rail)] px-3 text-[13px] text-[var(--text)] outline-none placeholder:text-[var(--quiet)] focus:border-[var(--accent)] sm:w-44"

@@ -3,6 +3,16 @@ import { createPortal } from "react-dom";
 import { useNotificationHost } from "../features/notifications/notificationHost";
 
 /**
+ * How long the pointer must rest on an anchor before the card appears.
+ *
+ * Three seconds: a hint answers "what is this?", asked by stopping on something.
+ * It is not a label that follows the pointer across a toolbar. Keyboard focus
+ * still shows it at once -- landing on a control with Tab is deliberate, and
+ * there is no hover to wait out.
+ */
+const HOVER_DELAY_MS = 3000;
+
+/**
  * One themed hover card for every `title` in the app.
  *
  * **Why this is a listener and not a component per call site.** The native
@@ -76,7 +86,7 @@ export default function TooltipLayer() {
     const rect = element.getBoundingClientRect();
     const draw = () => setOpen({ hint, rect });
     if (immediate) draw();
-    else delay.current = window.setTimeout(draw, 120);
+    else delay.current = window.setTimeout(draw, HOVER_DELAY_MS);
   }, [restore]);
 
   useEffect(() => {

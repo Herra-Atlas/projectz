@@ -5,6 +5,8 @@ export type TokenBucket = {
   bucket: string;
   prompt_tokens: number;
   completion_tokens: number;
+  /** Calls to a model in this bucket, tool rounds included. */
+  requests: number;
 };
 
 export type SessionUsage = {
@@ -20,6 +22,8 @@ export type ModelUsage = {
   model_id: string;
   provider_id: string;
   replies: number;
+  /** Calls to this model; more than `replies` once tools are used. */
+  requests: number;
   prompt_tokens: number;
   completion_tokens: number;
 };
@@ -29,8 +33,40 @@ export type ModelBucket = {
   bucket: string;
   model_id: string;
   provider_id: string;
+  requests: number;
   prompt_tokens: number;
   completion_tokens: number;
+};
+
+/** One tool, counted from the steps the agent recorded inside its replies. */
+export type ToolUsage = {
+  tool: string;
+  calls: number;
+  cached: number;
+  failed: number;
+};
+
+/**
+ * The headline figures for the period before the one on screen.
+ *
+ * Every field is a total the figure row compares against, in the same shapes as
+ * `UsageReport`'s own. All zeroes means there is no comparison to draw, which is
+ * what an empty previous window returns rather than a null.
+ */
+export type PreviousUsage = {
+  sessions: number;
+  user_messages: number;
+  assistant_messages: number;
+  searches: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  requests: number;
+  cached_tokens: number;
+  cache_prompt_tokens: number;
+  cache_reported_replies: number;
+  taste_total_tokens: number;
+  models: number;
 };
 
 export type UsageReport = {
@@ -43,6 +79,8 @@ export type UsageReport = {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  /** Calls to a model over the period, tool rounds included. */
+  requests: number;
   /**
    * Prompt tokens the provider reported as served from its cache.
    *
@@ -73,4 +111,8 @@ export type UsageReport = {
   taste_models: ModelUsage[];
   /** Taste's own per-model series, drawn by the same chart as the other views. */
   taste_timeline: ModelBucket[];
+  /** Tool calls in the period, busiest first. */
+  tools: ToolUsage[];
+  /** The same headline figures over the period immediately before this one. */
+  previous: PreviousUsage;
 };

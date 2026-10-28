@@ -889,13 +889,19 @@ impl Database {
         &self,
         range: &str,
         since: &str,
+        previous_since: &str,
         bucket_sql: &str,
     ) -> Result<statistics::UsageReport, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         // Argument order matters here: `build_report` takes the start date
         // before the label. Swapping them filters on `since = "month"`, which
         // matches nothing and makes the page look empty.
-        statistics::build_report(&connection, since, range, bucket_sql)
+        //
+        // `previous_since` is the start of the equivalent period before this
+        // one. An empty string is "no comparison" rather than a date, because
+        // the frontend has nothing to send for a window it cannot describe.
+        let previous_since = (!previous_since.is_empty()).then_some(previous_since);
+        statistics::build_report(&connection, since, previous_since, range, bucket_sql)
     }
 
     /// Stores what each model of a provider can do.
@@ -1686,11 +1692,19 @@ mod tests {
             .unwrap();
 
         let report = database
-            .usage_report("month", "2026-09-02", "substr(created_at,1,10)")
+            .usage_report(
+                "month",
+                "2026-09-02",
+                "2026-08-03",
+                "substr(created_at,1,10)",
+            )
             .unwrap();
 
         assert_eq!(report.range, "month");
         assert_eq!(report.since, "2026-09-02");
+        // The session is inside the current window, so the comparison window is
+        // empty rather than absorbing it.
+        assert_eq!(report.previous.sessions, 0);
         assert_eq!(report.sessions, 1);
         assert_eq!(report.user_messages, 1);
         assert_eq!(report.assistant_messages, 1);
@@ -2425,12 +2439,14 @@ mod tests {
         assert_eq!(loaded[0]["completionTokens"], 35);
         assert_eq!(
             connection
-                .last_prompt_tokens("s1", "openai", "gpt")
+                .last_context_tokens("s1", "openai", "gpt")
                 .unwrap(),
             Some(20)
         );
         assert_eq!(
-            connection.last_prompt_tokens("s1", "other", "gpt").unwrap(),
+            connection
+                .last_context_tokens("s1", "other", "gpt")
+                .unwrap(),
             None
         );
     }

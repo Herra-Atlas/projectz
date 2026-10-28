@@ -11,7 +11,7 @@ import SubAgentsTab from "./tabs/SubAgentsTab";
 import SessionOverviewTab from "./tabs/SessionOverviewTab";
 import type { ChatSession } from "../../features/chat/types";
 import { type PanelViewId, usePanelViews } from "../../features/rightPanel/usePanelViews";
-import { MAX_PANEL_WIDTH, MIN_PANEL_WIDTH } from "../../features/rightPanel/useRightPanel";
+import { clampPanelWidth, maxPanelWidth, MIN_PANEL_WIDTH } from "../../features/rightPanel/useRightPanel";
 
 /**
  * The drag surface on the panel's left edge.
@@ -51,7 +51,10 @@ function ResizeHandle({
   const [dragging, setDragging] = useState(false);
   const startRef = useRef({ pointerX: 0, width: 0 });
 
-  const clamp = useCallback((next: number) => Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, next)), []);
+  // Half the window, read at the moment of the drag rather than captured here:
+  // the ceiling moves with the window, and a drag that began after a resize must
+  // obey the window it is being dragged in.
+  const clamp = useCallback((next: number) => clampPanelWidth(next), []);
 
   const handlePointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     // Primary button only: a right-click drag here would otherwise resize the
@@ -107,7 +110,7 @@ function ResizeHandle({
       aria-label="Resize panel"
       aria-valuenow={Math.round(width)}
       aria-valuemin={MIN_PANEL_WIDTH}
-      aria-valuemax={MAX_PANEL_WIDTH}
+      aria-valuemax={maxPanelWidth()}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={endDrag}
@@ -571,6 +574,12 @@ export default function RightPanel({ open, width, workspace, skill = null, onClo
     <aside
       ref={panelRef}
       aria-label="Right panel"
+      data-right-panel=""
+      // The panel's frame, as a mark rather than an aria name. A file dragged
+      // from Explorer lands wherever the pointer is, and the chat page's own OS
+      // drop listener is window-wide -- this is what lets it tell a drop on the
+      // panel (the Files tree copies it in) from a drop on the chat (it becomes
+      // an attachment). See `isOverRightPanel`.
       // No `overflow-hidden` here. The body is already unmounted when closed
       // (see below), so there is nothing to clip during the width transition --
       // and clipping would also hide the open button, which is deliberately

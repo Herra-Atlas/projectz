@@ -50,10 +50,10 @@ export const PERMISSION_LABELS: Record<PermissionMode, string> = {
 export const PERMISSION_HINTS: Record<PermissionMode, string> = {
   ask: "Ask you before every tool call.",
   auto_safe:
-    "Auto-approve reads — list_dir, read_file, grep, glob, skill_read, search_web, web_fetch, terminal_output and terminal_status. Ask before every other tool.",
+    "Auto-approve reads — list_dir, read_file, grep, glob, skill_read, search_web and web_fetch. Ask before every other tool.",
   auto_writes:
-    "Also auto-approve the writes and commands — write_file, write_document, edit_file, edit_lines, move_file, delete_file, skill_manage, run_terminal, terminal_kill, sub_agent and schedule_job. Ask before anything else.",
-  full: "Auto-approve every tool call.",
+    "Also auto-approve the writes — write_file, write_document, edit_file, edit_lines, move_file, delete_file, skill_manage, skill_write, sub_agent and schedule_job. The terminal and skill scripts still ask; they need full access.",
+  full: "Auto-approve every tool call, including the terminal and skill scripts.",
 };
 
 /** The collapsed selector's value, where the full label will not fit.

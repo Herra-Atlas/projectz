@@ -11,6 +11,14 @@
 import type { Endpoint, LocalModel } from "../../features/models/types";
 import type { DownloadKind } from "../../features/downloads/types";
 
+/**
+ * The stage of the Speech to text page that is showing.
+ *
+ * Named here, beside the pages, because the settings window holds it rather than
+ * the page: the page unmounts whenever anything is opened from it.
+ */
+export type SpeechStage = "Voice recognition" | "Wake word" | "Speech to text";
+
 export type SettingsPage =
   | { view: "providers" }
   | { view: "local" }
@@ -32,11 +40,14 @@ export type SettingsPage =
      and recognition, so they belong to neither of the two lists. */
   | { view: "audioModels" }
   /* One audio.cpp model's options, carried by its model path and named by its
-     family's spec. `from` says which list opened it, because the same record
-     is reached from the wake stage and from the audio models page. */
-  | { view: "audioModel"; model: string; from?: "wake" }
+     family's spec. */
+  | { view: "audioModel"; model: string }
   | { view: "general" }
   | { view: "appearance" }
+  /* What the app may interrupt for, and the sound each event makes. One page:
+     the sound belongs beside the switch it belongs to, not on a page of its
+     own where the two have to be kept in step by reading both. */
+  | { view: "notifications" }
   | { view: "taste" }
   /* The Model section: what the assistant talks to, how hard it may work, and
      how context is kept inside the window. Four pages so a reader tuning them
@@ -54,8 +65,11 @@ export type SettingsPage =
   | { view: "skills" }
   | { view: "mcp" }
   /* A download page is reached from the engine it installs for, so it carries
-     that engine rather than asking again on the page itself. */
-  | { view: "download"; kind: DownloadKind }
+     that engine rather than asking again on the page itself. `group` is the
+     section of the catalogue it opens on, when the page that sent the user here
+     named one -- the audio.cpp download from Speech to text opens on
+     `recognition`, from Text to speech on `speech`. */
+  | { view: "download"; kind: DownloadKind; group?: string }
   /* One voice's own settings, carried by the voice's model path. */
   | { view: "ttsVoice"; voice: string }
   /* A recognition model's own settings: what language it should expect. */
@@ -66,3 +80,46 @@ export type SettingsPage =
   | { view: "system" }
   | { view: "model"; model: LocalModel }
   | { view: "form"; endpoint: Endpoint | null };
+
+/**
+ * What to call a page, for the Back control.
+ *
+ * The sidebar's own vocabulary: search already says which page a row is on with
+ * these words, and a Back that called the same page something else would be a
+ * third opinion about what it is.
+ */
+const PAGE_NAMES: Record<SettingsPage["view"], string> = {
+  providers: "Providers",
+  local: "Local models",
+  engines: "Engines",
+  stt: "Speech to text",
+  tts: "Text to speech",
+  voiceEnroll: "Enrolling a voice",
+  audio: "Audio engine",
+  audioModels: "audio.cpp models",
+  audioModel: "Audio model settings",
+  general: "General",
+  appearance: "Appearance",
+  notifications: "Notifications",
+  taste: "Taste",
+  mainModel: "Main model",
+  subagents: "Subagents",
+  auxiliary: "Auxiliary models",
+  context: "Context",
+  communicationsTelegram: "Telegram",
+  communicationsSettings: "Communications settings",
+  communicationsSecurity: "Communications security",
+  skills: "Skills",
+  mcp: "MCP servers",
+  download: "Download",
+  ttsVoice: "Voice settings",
+  sttModel: "Recognition model settings",
+  downloads: "Downloads",
+  system: "System",
+  model: "Local model settings",
+  form: "Add provider",
+};
+
+export function pageName(page: SettingsPage): string {
+  return PAGE_NAMES[page.view];
+}

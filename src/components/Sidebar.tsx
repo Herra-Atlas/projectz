@@ -441,8 +441,10 @@ export default function Sidebar({
       <div className="mt-auto border-t border-[var(--line)] p-3">
         {/* The Telegram block is fixed here rather than part of the scrolling
             history: its heading has to be reachable whatever the list is doing,
-            and collapsing it is the one piece of section state a person sets. */}
-        {collapsed ? (
+            and collapsing it is the one piece of section state a person sets.
+            Drawn only once there is something in it: an empty transport is a
+            heading over nothing, offering to open a list with no rows. */}
+        {telegramSessions.length > 0 && (collapsed ? (
           <button
             type="button"
             onClick={() => { setCollapsed(false); setTelegramOpen(true); }}
@@ -463,20 +465,16 @@ export default function Sidebar({
             >
               <Send size={13} className="shrink-0" />
               <span className="flex-1 text-left">Telegram</span>
-              {telegramSessions.length > 0 && (
-                <span className="rounded-full bg-[var(--raised)] px-1.5 py-px text-[10px] tabular-nums text-[var(--muted)]">{telegramSessions.length}</span>
-              )}
+              <span className="rounded-full bg-[var(--raised)] px-1.5 py-px text-[10px] tabular-nums text-[var(--muted)]">{telegramSessions.length}</span>
               <ChevronRight size={13} className={`shrink-0 transition-transform ${telegramOpen ? "rotate-90" : ""}`} />
             </button>
             {telegramOpen && (
               <div id="telegram-sessions" className="mt-0.5 max-h-52 space-y-0.5 overflow-y-auto">
-                {telegramSessions.length === 0
-                  ? <p className="px-2 py-2 text-[11px] leading-4 text-[var(--quiet)]">No Telegram conversations yet. Messages sent to the bot appear here.</p>
-                  : telegramSessions.map((session) => <Fragment key={session.id}>{renderSessionRow(session)}</Fragment>)}
+                {telegramSessions.map((session) => <Fragment key={session.id}>{renderSessionRow(session)}</Fragment>)}
               </div>
             )}
           </section>
-        )}
+        ))}
         <button type="button" onClick={onSettings} className={`flex min-h-9 w-full items-center gap-3 rounded-md px-3 text-[13px] text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] ${collapsed ? "justify-center" : ""}`} title={collapsed ? "Settings" : undefined}>
           <Settings2 size={16} />
           {!collapsed && <span>Settings</span>}

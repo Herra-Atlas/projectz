@@ -15,13 +15,12 @@ import { invoke } from "@tauri-apps/api/core";
  * cache cannot fall behind an edit made elsewhere.
  */
 
-/** The settings key the Rust side reads for instructions and notifications. */
+/** The settings key the Rust side reads for instructions and the greeting. */
 export const GENERAL_SETTINGS_KEY = "app.general";
 
 export type GeneralSettings = {
   userName: string;
   instructions: string;
-  responseNotifications: boolean;
   showMetrics: boolean;
   sendWith: "Enter" | "Ctrl + Enter";
 };
@@ -29,7 +28,6 @@ export type GeneralSettings = {
 export const DEFAULT_GENERAL: GeneralSettings = {
   userName: "",
   instructions: "",
-  responseNotifications: false,
   showMetrics: true,
   sendWith: "Enter",
 };

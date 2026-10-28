@@ -372,7 +372,10 @@ html,
 body,
 #root {
   width: 100%;
-  min-width: 320px;
+  /* The window's own floor (tauri.conf.json's minWidth): the webview can never
+     be narrower, so the layout's minimum and the OS's are one number rather
+     than two that drift apart. */
+  min-width: 800px;
   height: 100%;
   min-height: 100%;
   margin: 0;
@@ -549,6 +552,106 @@ select:focus {
    being disabled. */
 .settings-search-mode [data-settings-title] {
   opacity: 1;
+}
+
+/* ---------- Find ----------
+
+   The find bar paints with the CSS Custom Highlight API: matches are `Range`s,
+   never `<mark>` elements, so React's tree is untouched and a keystroke costs a
+   registry write rather than a re-render of the transcript.
+
+   **The dim is the point.** While a search has matches, everything inside a
+   scope that is not a match fades, and the words being looked for are the only
+   thing at full strength. It is a recolour at low alpha rather than `opacity` on
+   the scope, because opacity would take the highlights down with it -- the
+   subtree is one paint group, so an ancestor's opacity fades a highlight exactly
+   like the text around it. A colour on the descendants cannot reach the
+   highlight pseudo-element, which declares its own.
+
+   `!important` because markdown, diff and code styles all set their own colours,
+   and a search has to be able to recede them all at once. The tokens are the
+   theme's, so the fade is right on every palette.
+*/
+
+::highlight(pz-find-match) {
+  background-color: color-mix(in srgb, var(--accent) 26%, transparent);
+  color: var(--text);
+}
+
+::highlight(pz-find-current) {
+  background-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+[data-find-scope][data-find-dim] * {
+  color: color-mix(in srgb, var(--text) 24%, transparent) !important;
+}
+
+/*
+   The bar arrives from the top edge and leaves the way it came. A fade with no
+   direction reads as a tooltip; the short travel and the slight scale read as a
+   surface being pulled down over the page. Opened faster than it closes, because
+   the opening is a response to a keypress and the closing is a dismissal that is
+   already understood.
+*/
+.pz-find {
+  transform-origin: top right;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(-8px) scale(0.985);
+  transition:
+    opacity 130ms ease-out,
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    visibility 0s linear 130ms;
+}
+
+.pz-find[data-open="true"] {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateY(0) scale(1);
+  transition:
+    opacity 90ms ease-out,
+    transform 210ms cubic-bezier(0.22, 1, 0.36, 1),
+    visibility 0s;
+}
+
+/* The drawer under the field, expanded by animating the row track rather than a
+   measured height -- the one way to transition to "as tall as its content". */
+.pz-find-options {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition:
+    grid-template-rows 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 140ms ease-out;
+}
+
+.pz-find-options[data-open="true"] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.pz-find-options > div {
+  overflow: hidden;
+}
+
+/* The match counter, which is keyed so a move re-runs this. A figure that
+   silently changes on a page that also moved is easy to miss. */
+@keyframes pz-find-tick {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.pz-find-tick {
+  animation: pz-find-tick 180ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 /* ---------- Notifications ----------

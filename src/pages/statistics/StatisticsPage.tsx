@@ -8,9 +8,9 @@ import { Panel } from "./FigureCard";
 import FigureRow from "./FigureRow";
 import TokenChart from "./TokenChart";
 import ModelTokenChart from "./ModelTokenChart";
-import ActivityChart from "./ActivityChart";
+import { ToolBars } from "../../components/statistics/ToolBars";
 import { ModelTable, SessionTable, modelGroups } from "./UsageTables";
-import { PanelPager } from "./PanelPager";
+import { PanelTabs } from "./PanelTabs";
 import TimeframeSwitcher from "./TimeframeSwitcher";
 
 /** Read-only usage summary across every conversation.
@@ -44,28 +44,32 @@ export default function StatisticsPage({
   // right panel, opened by the request `App` raises.
   const known = new Set(sessions.map((session) => session.id));
 
-  // The token panel pages between the aggregate view and the per-model one.
-  // Both draw the same underlying series, so this is a change of drawing rather
-  // than of data -- the aggregate stays the default because it is the one that
-  // answers "what did this period cost", which is what most visits want.
+  // The token panel switches between the aggregate view, the per-model one and
+  // taste's own runs. All three draw the same series, so this is a change of
+  // drawing rather than of data -- the aggregate stays the default because it is
+  // the one that answers "what did this period cost", which is what most visits
+  // want. Every view is named in the header, so the switch is one press and the
+  // alternatives are readable before it.
   const [tokenView, setTokenView] = useState(0);
   const [modelView, setModelView] = useState(0);
 
   // Endpoint names, so a provider view is labelled the way the user named the
   // provider in Settings rather than by the internal id stored on each message.
-  const { endpoints } = useModelRegistry(refreshKey);
+  const { endpoints, localModels } = useModelRegistry(refreshKey);
   const providerNames = useMemo(() => new Map(endpoints.map((endpoint) => [endpoint.id, endpoint.name])), [endpoints]);
-  const groups = useMemo(() => modelGroups(report?.models ?? [], providerNames), [report?.models, providerNames]);
+  // A local model's stored id is the UUID its row was given, and its name lives
+  // only here. Without this the table and the chart would print the id.
+  const localModelNames = useMemo(() => new Map(localModels.map((model) => [model.id, model.name])), [localModels]);
+  const names = useMemo(() => ({ providers: providerNames, local: localModelNames }), [providerNames, localModelNames]);
+  const groups = useMemo(() => modelGroups(report?.models ?? [], names), [report?.models, names]);
   // A timeframe switch can report fewer providers than the previous one, which
   // would leave the view index past the end.
-  const modelGroup = groups[Math.min(modelView, groups.length - 1)];
+  const modelIndex = Math.min(modelView, groups.length - 1);
+  const modelGroup = groups[modelIndex];
 
-  const tokenViews = ["Totals", "Per model", "Taste"];
-  const tokenTitles = [
-    "Tokens over time",
-    "Tokens per model",
-    "Taste tokens per model",
-  ];
+  // The tab labels are the view titles themselves, so the header names what is
+  // on screen rather than stating a position in a list.
+  const tokenViews = ["Tokens over time", "Tokens per model", "Taste tokens per model"];
 
   return (
     <main className="flex min-h-0 flex-1 flex-col">
@@ -73,7 +77,11 @@ export default function StatisticsPage({
         <div className="min-w-0">
           <h1 className="text-sm font-semibold">Statistics</h1>
           <p className="text-xs text-[var(--quiet)]">
-            {report ? `Usage since ${report.since} · times in UTC` : "Usage across all conversations"}
+            {report
+              ? report.range === "all"
+                ? "All time · times in UTC"
+                : `Usage since ${report.since} · times in UTC`
+              : "Usage across all conversations"}
           </p>
         </div>
         <TimeframeSwitcher value={range} onChange={setRange} />
@@ -82,49 +90,59 @@ export default function StatisticsPage({
       <div className="min-h-0 flex-1 overflow-y-auto p-5 sm:p-7">
         {error && <p role="alert" className="mb-5 text-sm text-[var(--danger)]">{error}</p>}
 
-        <FigureRow report={report} />
+        <FigureRow report={report} axis={current.axis} />
 
         <div className="mt-5">
           <Panel
-            title={tokenTitles[tokenView] ?? "Tokens"}
-            action={
-              <>
-                {loading && <span className="mr-2 text-[11px] text-[var(--quiet)]">Loading…</span>}
-                <PanelPager count={tokenViews.length} index={tokenView} labels={tokenViews} onChange={setTokenView} what="token view" />
-              </>
+            tabs={
+              <PanelTabs
+                what="token view"
+                tabs={tokenViews.map((label, index) => ({
+                  label,
+                  active: tokenView === index,
+                  onSelect: () => setTokenView(index),
+                }))}
+              />
             }
+            action={loading ? <span className="text-[11px] text-[var(--quiet)]">Loading…</span> : null}
           >
             {!report ? <p className="px-4 py-12 text-center text-sm text-[var(--muted)]">Loading…</p>
               : tokenView === 0
                 ? <TokenChart timeline={report.timeline} axis={current.axis} days={current.days} />
                 : tokenView === 1
-                  ? <ModelTokenChart timeline={report.model_timeline} axis={current.axis} />
+                  ? <ModelTokenChart timeline={report.model_timeline} axis={current.axis} names={names} />
                   : <>
                       <p className="px-4 pt-3 text-[11px] text-[var(--quiet)]">
                         {formatTokens(report.taste_total_tokens)} tokens over {report.taste_runs === 1 ? "1 run" : `${report.taste_runs} runs`} since {report.since}.
                       </p>
-                      <ModelTokenChart timeline={report.taste_timeline} axis={current.axis} />
+                      <ModelTokenChart timeline={report.taste_timeline} axis={current.axis} names={names} />
                     </>}
           </Panel>
         </div>
 
         <div className="mt-3 grid gap-3 lg:grid-cols-2">
-          <Panel title="Activity">
-            {report ? <ActivityChart report={report} /> : <p className="px-4 py-12 text-center text-sm text-[var(--muted)]">Loading…</p>}
+          {/* What the agent did, which no other panel answers. The old three bars
+              here repeated the cards above and counted a message role the app
+              never writes, so the panel is now the tool calls themselves. */}
+          <Panel title="Tools">
+            {report
+              ? <ToolBars tools={report.tools} empty="No tool calls in this period." />
+              : <p className="px-4 py-12 text-center text-sm text-[var(--muted)]">Loading…</p>}
           </Panel>
           <Panel
-            title={modelGroup ? `Models · ${modelGroup.label}` : "Models"}
-            action={
-              <PanelPager
-                count={groups.length}
-                index={Math.min(modelView, groups.length - 1)}
-                labels={groups.map((group) => group.label)}
-                onChange={setModelView}
+            title="Models"
+            tabs={
+              <PanelTabs
                 what="model view"
+                tabs={groups.map((group, index) => ({
+                  label: group.label,
+                  active: modelIndex === index,
+                  onSelect: () => setModelView(index),
+                }))}
               />
             }
           >
-            {report ? <ModelTable group={modelGroup} /> : <p className="px-4 py-12 text-center text-sm text-[var(--muted)]">Loading…</p>}
+            {report ? <ModelTable group={modelGroup} names={names} /> : <p className="px-4 py-12 text-center text-sm text-[var(--muted)]">Loading…</p>}
           </Panel>
         </div>
 

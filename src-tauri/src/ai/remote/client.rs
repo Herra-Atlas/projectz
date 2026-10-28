@@ -145,21 +145,23 @@ mod tests {
     /// A reply that ran a tool is billed for both rounds. The context at the
     /// answer (7,000) is what the charts plot; the spend (12,000) is what the
     /// `used_*` totals carry, and the two must not collapse into one another.
+    /// `context_tokens` keeps the conversation *before* the tool round, which is
+    /// what the next request will actually contain.
     #[test]
     fn used_tokens_add_up_across_a_reply_while_prompt_tokens_keep_the_last() {
-        let mut usage = json!({"prompt_tokens": 5000, "completion_tokens": 40});
-        accumulate_usage(
+        let mut usage = Value::Null;
+        merge_round_usage(
             &mut usage,
             &json!({"prompt_tokens": 5000, "completion_tokens": 40}),
         );
         // The second round after the tool result, merged last-wins as the loop does.
-        usage["prompt_tokens"] = json!(7000);
-        accumulate_usage(
+        merge_round_usage(
             &mut usage,
             &json!({"prompt_tokens": 7000, "completion_tokens": 60}),
         );
 
         assert_eq!(usage["prompt_tokens"], 7000);
+        assert_eq!(usage["context_tokens"], 5000);
         assert_eq!(usage["used_prompt_tokens"], 12000);
         assert_eq!(usage["used_completion_tokens"], 100);
     }
@@ -228,7 +230,12 @@ pub async fn stream_chat(
     limits: crate::ai::types::RunLimits,
     context_window: Option<u64>,
     local_context_window: Option<u64>,
-    previous_prompt_tokens: Option<u64>,
+    // How full the context was when the previous reply's first request was sent.
+    // The reply's first round, not its last: the last round of a tool-using reply
+    // carries results that are never stored, so it describes a request this turn
+    // will not make. Deciding from it compacted conversations that had not grown,
+    // and a compaction is a cache miss for every token it rewrites.
+    previous_context_tokens: Option<u64>,
     // Whether a spawned sub-agent may itself spawn. `false` for a sub-agent's own
     // run, which is what keeps delegation one level deep.
     allow_subagents: bool,
@@ -282,20 +289,27 @@ pub async fn stream_chat(
         (((window as f64) * compression.target) as usize).max(1)
     });
     let passes =
-        crate::ai::compact::should_compress(compression, previous_prompt_tokens, context_window);
+        crate::ai::compact::should_compress(compression, previous_context_tokens, context_window);
     if passes {
         let outcome = crate::ai::compact::apply(&mut conversation, compression, target_tokens);
-        // Tell the transcript. The user asked to see this the way a finished
-        // sub-agent is shown, rather than discovering later that context moved.
-        on_event(ChatEvent {
-            run_id: run_id.to_string(),
-            session_id: None,
-            sequence: 0,
-            kind: "compaction".into(),
-            text: Some(crate::ai::compact::notice().to_string()),
-            error: None,
-            metrics: None,
-        });
+        // A pass that changed nothing is not news. A chat transcript carries no
+        // `tool` messages to stub, so a pass can legitimately reach this point
+        // with the request untouched -- and the notice used to be appended anyway,
+        // adding a hidden turn to every later request that said nothing happened.
+        let changed = outcome.removed > 0 || !outcome.dropped.is_empty();
+        if changed {
+            // Tell the transcript. The user asked to see this the way a finished
+            // sub-agent is shown, rather than discovering later that context moved.
+            on_event(ChatEvent {
+                run_id: run_id.to_string(),
+                session_id: None,
+                sequence: 0,
+                kind: "compaction".into(),
+                text: Some(crate::ai::compact::notice().to_string()),
+                error: None,
+                metrics: None,
+            });
+        }
         // The summary is the only depth that costs a model call, and it runs only
         // when elision and the drop both left the request above the target. The
         // estimate losing to the *summariser's own output* is fine: whatever comes
@@ -703,9 +717,19 @@ async fn summarise_dropped(
 /// round it made, because a tool round re-sends the whole conversation and that
 /// second input is real spend the last-wins figure discards. Kept as one function
 /// because the final wrap-up call needs exactly the same merge.
+///
+/// `context_tokens` is the exception to the exception: it is the **first** round's
+/// input, recorded once and never overwritten. That is the size of the conversation
+/// the reply started from -- which is the only figure compaction may be decided
+/// from, because this reply's own tool rounds are never stored and so are not in
+/// the next request. Deciding from the last round made a tool-heavy reply look like
+/// a nearly-full window and trimmed a conversation that had not grown.
 fn merge_round_usage(usage: &mut Value, round: &Value) {
     if usage.is_null() {
         *usage = round.clone();
+        if let (Some(target), Some(start)) = (usage.as_object_mut(), round.get("prompt_tokens")) {
+            target.insert("context_tokens".to_string(), start.clone());
+        }
     } else if let (Some(target), Some(values)) = (usage.as_object_mut(), round.as_object()) {
         // Later rounds carry the final answer's throughput, so they win.
         for (key, value) in values {
@@ -730,6 +754,11 @@ fn merge_round_usage(usage: &mut Value, round: &Value) {
 /// never sends usage yields no `used_*` keys at all rather than a misleading zero.
 /// The frontend reads their absence as "unknown" and falls back to the
 /// last-wins figure, which is exact for a reply that made a single request.
+///
+/// `requests` is counted here rather than read from the provider, because nobody
+/// reports it: one call to this function *is* one request to the model, whatever
+/// the body said. A reply that ran three tools made four requests, and that is
+/// the number the statistics page shows.
 fn accumulate_usage(usage: &mut Value, round: &Value) {
     let Some(target) = usage.as_object_mut() else {
         return;
@@ -743,6 +772,8 @@ fn accumulate_usage(usage: &mut Value, round: &Value) {
             target.insert(total.to_string(), json!(running + value));
         }
     }
+    let requests = target.get("requests").and_then(Value::as_u64).unwrap_or(0);
+    target.insert("requests".to_string(), json!(requests + 1));
 }
 
 /// The `role: "tool"` message answering one call.

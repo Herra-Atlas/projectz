@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open as openFile } from "@tauri-apps/plugin-dialog";
 import { AlertTriangle, ChevronRight } from "lucide-react";
 import { SettingRow, SettingsSection, Toggle } from "./SettingsSection";
+import Select from "./Select";
 import type { Notify } from "../features/notifications/types";
 import { syncArgument, type ArgumentSpec } from "../features/models/arguments";
 import { SCALE_STEPS, scaleToValue, valueToScale } from "../features/models/contextScale";
@@ -1089,16 +1090,14 @@ function SelectRow({
       label={label}
       description={hint}
       control={
-        <select
+        <Select
           value={value}
-          onChange={(event) => onChange(event.target.value)}
-          aria-label={label}
-          className="h-9 w-28 shrink-0 rounded-md border border-[var(--line)] bg-[var(--rail)] px-2 text-xs text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
-        >
-          {options.map((option) => (
-            <option key={option.value} value={option.value} title={option.hint}>{option.label}</option>
-          ))}
-        </select>
+          options={options}
+          onChange={onChange}
+          label={label}
+          size="sm"
+          className="w-32 shrink-0"
+        />
       }
     />
   );

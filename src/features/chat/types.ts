@@ -232,11 +232,29 @@ export type ChatMessage = {
     /**
      * The context at the reply's answer, i.e. its final round only.
      *
-     * This is what the context ring and the per-reply charts plot: how full the
-     * window was when the answer was written. It is not what the reply spent --
-     * see `used_prompt_tokens` for that.
+     * This is what the context ring plots: how full the window was when the
+     * answer was written. It is not what the reply spent -- see
+     * `used_prompt_tokens` for that -- and it is not the conversation's size,
+     * because a tool round's results are counted here and are never stored.
      */
     prompt_tokens?: number;
+    /**
+     * The size of the conversation when the reply's **first** request was sent.
+     *
+     * Written by the backend as the reply starts, so it excludes the reply's own
+     * tool rounds. That is the figure the session charts plot (a turn can only
+     * grow it) and the one compaction is decided from -- deciding from the last
+     * round would trim a conversation because one of its replies ran a tool.
+     * Absent on replies saved before this was recorded; those fall back to
+     * `prompt_tokens`.
+     */
+    context_tokens?: number;
+    /**
+     * Prompt tokens the provider served from its own prompt cache, for the round
+     * that reported it. `NULL`/absent means the provider said nothing, which is
+     * not the same fact as caching nothing.
+     */
+    cached_tokens?: number;
     /**
      * Every request's input and output for the reply, added up.
      *
@@ -247,6 +265,14 @@ export type ChatMessage = {
      */
     used_prompt_tokens?: number;
     used_completion_tokens?: number;
+    /**
+     * Calls made to the model for this reply, tool rounds included.
+     *
+     * Counted by the backend loop rather than reported by the provider. Absent
+     * on replies saved before it existed; one reply is at least one request, so
+     * the statistics read a missing count as 1.
+     */
+    requests?: number;
   };
 };
 

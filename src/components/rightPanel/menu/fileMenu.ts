@@ -1,4 +1,4 @@
-import { Copy, Eye, FilePlus, FolderPlus, Pencil, Trash2 } from "lucide-react";
+import { Copy, Eye, FilePlus, FolderOpen, FolderPlus, Pencil, Trash2 } from "lucide-react";
 import type { TreeEntry } from "../../../features/rightPanel/useFileTree";
 import type { ContextMenuItem } from "./ContextMenu";
 
@@ -7,6 +7,8 @@ type FileMenuHandlers = {
   onView: (entry: TreeEntry) => void;
   /** The entry's absolute path, put on the clipboard. */
   onCopyPath: (entry: TreeEntry) => void;
+  /** The entry revealed in the OS file manager, with its row selected there. */
+  onReveal: (entry: TreeEntry) => void;
   onRename: (entry: TreeEntry) => void;
   onDelete: (entry: TreeEntry) => void;
   /** The folder to create inside, or null for the workspace root. */
@@ -20,8 +22,8 @@ type FileMenuHandlers = {
  * One builder for all three targets -- a file, a folder, and the blank space
  * under the tree -- because it is one menu and only the applicable rows differ:
  *
- * - a file   -> View, Copy path, Rename, Delete
- * - a folder -> Create file, Create folder, Copy path, Rename, Delete
+ * - a file   -> View, Copy path, Open in Explorer, Rename, Delete
+ * - a folder -> Create file, Create folder, Copy path, Open in Explorer, Rename, Delete
  * - the space -> Create file, Create folder
  *
  * `target` is null for the blank space, which *means the workspace root*: there
@@ -44,9 +46,12 @@ export function buildFileMenuItems(target: TreeEntry | null, handlers: FileMenuH
   }
 
   // Only a real row can be acted on; the blank space is not a thing. Copy path
-  // leads this group because it is the one action that changes nothing.
+  // leads this group because it is the one action that changes nothing, and
+  // "Open in Explorer" sits directly under it: both answer "where is this file
+  // on my machine?" -- one as text to paste, one as the folder itself.
   if (target) {
     items.push({ id: "copy-path", label: "Copy path", icon: Copy, separated: items.length > 0, onSelect: () => handlers.onCopyPath(target) });
+    items.push({ id: "reveal", label: "Open in Explorer", icon: FolderOpen, onSelect: () => handlers.onReveal(target) });
     items.push({ id: "rename", label: "Rename", icon: Pencil, onSelect: () => handlers.onRename(target) });
     items.push({ id: "delete", label: "Delete", icon: Trash2, tone: "danger", onSelect: () => handlers.onDelete(target) });
   }

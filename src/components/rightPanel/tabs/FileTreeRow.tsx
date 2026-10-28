@@ -12,9 +12,18 @@ type FileTreeRowProps = {
   childrenOf: (path: string) => TreeEntry[] | undefined;
   loadingPath: string | null;
   onToggle: (path: string) => void;
-  onOpenFile: (entry: TreeEntry) => void;
+  /**
+   * A click on the row's name: opens the file, or expands the folder.
+   *
+   * The event comes along because Ctrl/Cmd-click means *select* rather than
+   * *open* -- the row does not decide that, the view that owns the selection
+   * does.
+   */
+  onActivate: (entry: TreeEntry, event: MouseEvent) => void;
   /** Right-click, raised to the tab so one menu serves the whole tree. */
   onContextMenu: (entry: TreeEntry, event: MouseEvent) => void;
+  /** The rows that are selected, for the highlight and for what a drag carries. */
+  selection: ReadonlySet<string>;
   /** The one in-progress rename or create, or null when nothing is being named. */
   edit: FileEdit | null;
   onCommitEdit: (name: string) => void;
@@ -40,7 +49,7 @@ function FileIcon({ name }: { name: string }) {
  * marks itself with `data-entry-path` and reports the press; `FilesTab` decides
  * what the pointer is over and what a drop means.
  */
-export default function FileTreeRow({ entry, depth, isExpanded, childrenOf, loadingPath, onToggle, onOpenFile, onContextMenu, edit, onCommitEdit, onCancelEdit, drag }: FileTreeRowProps) {
+export default function FileTreeRow({ entry, depth, isExpanded, childrenOf, loadingPath, onToggle, onActivate, onContextMenu, selection, edit, onCommitEdit, onCancelEdit, drag }: FileTreeRowProps) {
   const expanded = entry.isDir && isExpanded(entry.path);
   const children = expanded ? childrenOf(entry.path) : undefined;
   const isLoading = loadingPath === entry.path;
@@ -48,7 +57,8 @@ export default function FileTreeRow({ entry, depth, isExpanded, childrenOf, load
   // A create lands as the first child of its parent, so the row that *is* that
   // parent draws the field -- which is also why the parent has to be expanded.
   const creatingHere = edit?.kind === "create" && edit.parent === entry.path;
-  const dragging = drag.source === entry.path;
+  const dragging = drag.sources.includes(entry.path);
+  const selected = selection.has(entry.path);
   // A folder lights up while a draggable is over it, but only when the drop would
   // actually be accepted; an unreachable target must not look like a live one.
   const dropping = entry.isDir && drag.target === entry.path;
@@ -69,11 +79,15 @@ export default function FileTreeRow({ entry, depth, isExpanded, childrenOf, load
         // drop may land on.
         data-entry-path={entry.path}
         data-entry-dir={entry.isDir ? "true" : undefined}
-        className={`group flex min-h-7 w-full items-center gap-1 rounded-md pr-2 text-[13px] text-[var(--text)] transition-[background-color,opacity] hover:bg-[var(--raised)] ${dragging ? "opacity-40" : ""} ${dropping ? "bg-[color-mix(in_srgb,var(--accent)_12%,transparent)] ring-1 ring-inset ring-[var(--accent)]" : ""}`}
+        className={`group flex min-h-7 w-full items-center gap-1 rounded-md pr-2 text-[13px] text-[var(--text)] transition-[background-color,opacity] hover:bg-[var(--raised)] ${selected && !dropping ? "bg-[color-mix(in_srgb,var(--accent)_12%,transparent)]" : ""} ${dragging ? "opacity-40" : ""} ${dropping ? "bg-[color-mix(in_srgb,var(--accent)_12%,transparent)] ring-1 ring-inset ring-[var(--accent)]" : ""}`}
         onContextMenu={(event) => onContextMenu(entry, event)}
         // Not draggable while its name is being typed: a press in the field is for
         // editing, and the hook also ignores presses that land in an input.
-        onPointerDown={renaming ? undefined : (event) => drag.onPointerDown(entry, event)}
+        //
+        // A press on a row that is part of a selection carries the whole
+        // selection; a press on anything else carries only the row under the
+        // pointer, which is the gesture for "move this one".
+        onPointerDown={renaming ? undefined : (event) => drag.onPointerDown(entry, event, selected && selection.size > 1 ? Array.from(selection) : undefined)}
       >
         {entry.isDir ? (
           <button
@@ -102,7 +116,7 @@ export default function FileTreeRow({ entry, depth, isExpanded, childrenOf, load
         ) : (
           <button
             type="button"
-            onClick={() => (entry.isDir ? onToggle(entry.path) : onOpenFile(entry))}
+            onClick={(event) => onActivate(entry, event)}
             className="flex min-w-0 flex-1 items-center gap-1.5 py-1 text-left focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--accent)]"
           >
             {icon}
@@ -133,8 +147,9 @@ export default function FileTreeRow({ entry, depth, isExpanded, childrenOf, load
           childrenOf={childrenOf}
           loadingPath={loadingPath}
           onToggle={onToggle}
-          onOpenFile={onOpenFile}
+          onActivate={onActivate}
           onContextMenu={onContextMenu}
+          selection={selection}
           edit={edit}
           onCommitEdit={onCommitEdit}
           onCancelEdit={onCancelEdit}
