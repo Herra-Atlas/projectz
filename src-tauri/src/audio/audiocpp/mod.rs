@@ -409,6 +409,13 @@ pub async fn stop(purpose: Purpose, app: &tauri::AppHandle) {
     );
 }
 
+/// How many shapes one press may try.
+///
+/// The ladder has three answers -- session options, the spawn environment, no
+/// wiring at all -- plus the request that succeeds after the last correction. A
+/// refusal past that is the engine's real answer, not another rung to guess.
+const NEGOTIATION_ATTEMPTS: usize = 4;
+
 /// The voice list synthesizes with its model resolvable by the audio engine.
 ///
 /// A `Model` is stored as a `path` string in settings, so the one that carries
@@ -429,22 +436,27 @@ pub async fn synthesize(
     ensure_started_for(Purpose::Speech, app, database).await?;
     // The slug the config gave this file is what the server listens for.
     let id = model_for_request(&selected.slug(), Purpose::Speech);
-    let request = settings::request_options(database, &path, &selected.family);
-    match client::speech(Purpose::Speech, &id, text, speed, request).await {
-        Ok((pcm, rate)) => {
-            remember_rate(path, rate).await;
-            Ok((pcm, rate))
-        }
-        Err(message) => {
-            negotiate(app, database, selected, message).await?;
-            // One negotiation is the whole second chance: the server restarted
-            // with the corrected shape, and the identical call goes out again.
-            let request = settings::request_options(database, &path, &selected.family);
-            let (pcm, rate) = client::speech(Purpose::Speech, &id, text, speed, request).await?;
-            remember_rate(path, rate).await;
-            Ok((pcm, rate))
+    let mut refusal: Option<String> = None;
+    // One press walks the whole ladder. It used to stop at the first retry,
+    // which meant a fresh Kokoro install spent its only second chance proving
+    // that session keys are refused and surfaced *that* error -- the actual fix
+    // (the environment) was left for a second press. A rung that is not
+    // recognised returns `Err` from `negotiate`, so this loop only continues
+    // when the server was restarted with a different shape.
+    for _ in 0..NEGOTIATION_ATTEMPTS {
+        let request = settings::request_options(database, &path, &selected.family);
+        match client::speech(Purpose::Speech, &id, text, speed, request).await {
+            Ok((pcm, rate)) => {
+                remember_rate(path, rate).await;
+                return Ok((pcm, rate));
+            }
+            Err(message) => {
+                negotiate(app, database, selected, message.clone()).await?;
+                refusal = Some(message);
+            }
         }
     }
+    Err(refusal.unwrap_or_else(|| "The speech engine did not answer.".to_string()))
 }
 
 /// One refusal, one correct answer, one restart.
@@ -457,9 +469,9 @@ pub async fn synthesize(
 /// babysit, the runtime *negotiates* down a ladder -- session options, then
 /// the spawn environment, then nothing -- each known refusal being the server
 /// naming what it wants. The trait is recorded, so the next start is right
-/// before the process even begins, and the identical request is retried once
-/// against the corrected server. One negotiation per call; anything else in
-/// the message is the real error.
+/// before the process even begins. `synthesize` calls this again after every
+/// restart, so the whole ladder is available to one press; anything else in the
+/// message is the real error and is returned unchanged.
 async fn negotiate(
     app: &tauri::AppHandle,
     database: &Database,
@@ -467,8 +479,9 @@ async fn negotiate(
     message: String,
 ) -> Result<(), String> {
     let family = selected.family.as_str();
+    let learned = settings::espeak_trait(database, family);
     if message.contains("Could not load eSpeak-ng")
-        && settings::espeak_trait(database, family) != Some(settings::EspeakTrait::Session)
+        && learned != Some(settings::EspeakTrait::Session)
     {
         // The family wants eSpeak and did not get it. Without an install the
         // fix is the user's; with one, the session shape is the first guess.
@@ -478,33 +491,36 @@ async fn negotiate(
             ));
         }
         settings::learn_session(database, family)?;
-        stop(Purpose::Speech, app).await;
-        ensure_started_for(Purpose::Speech, app, database).await?;
+        restart(app, database).await?;
         return Ok(());
     }
-    let unknown_session = message.contains("session option") && message.contains("unknown");
-    if unknown_session
-        && settings::espeak_trait(database, family) == Some(settings::EspeakTrait::Session)
-    {
-        // The namespaced keys were refused: the family takes its eSpeak some
-        // other way. One step down the ladder is the environment -- the shape
-        // Kokoro's own G2P reads.
-        settings::learn_env(database, family)?;
-        stop(Purpose::Speech, app).await;
-        ensure_started_for(Purpose::Speech, app, database).await?;
-        return Ok(());
-    }
-    if unknown_session
-        && settings::espeak_trait(database, family) == Some(settings::EspeakTrait::Env)
-    {
-        // Even an env family should not be receiving keys; if the spec gave
-        // them names the engine does not take, that wiring goes too.
-        settings::learn_env_clear(database, family);
-        stop(Purpose::Speech, app).await;
-        ensure_started_for(Purpose::Speech, app, database).await?;
+    // Only eSpeak's own option is ours to correct: a user-typed option this
+    // engine refuses is the user's to fix, and treating it as a rung would strip
+    // correct eSpeak wiring while chasing it.
+    let unknown_espeak = message.contains("session option")
+        && message.contains("unknown")
+        && message.contains("espeak");
+    if unknown_espeak {
+        if learned == Some(settings::EspeakTrait::Env) {
+            // Even an env family should not be receiving keys; if the spec gave
+            // them names the engine does not take, that wiring goes too.
+            settings::learn_env_clear(database, family);
+        } else {
+            // The namespaced keys were refused -- either because a previous
+            // press learned them, or because the spec named them. One step down
+            // the ladder is the environment, the shape Kokoro's own G2P reads.
+            settings::learn_env(database, family)?;
+        }
+        restart(app, database).await?;
         return Ok(());
     }
     Err(message)
+}
+
+/// Stops the speech server and starts it again from the corrected record.
+async fn restart(app: &tauri::AppHandle, database: &Database) -> Result<(), String> {
+    stop(Purpose::Speech, app).await;
+    ensure_started_for(Purpose::Speech, app, database).await
 }
 
 /// The id the running server's config gave a model.

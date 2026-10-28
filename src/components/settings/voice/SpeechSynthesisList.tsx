@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Check, Download, Settings2, Trash2, Volume2 } from "lucide-react";
+import { emit } from "@tauri-apps/api/event";
+import { Check, Download, LoaderCircle, Settings2, Trash2, Volume2 } from "lucide-react";
 
+import { useBuiltinEngines } from "../../../features/audio/useBuiltinEngines";
 import { formatBytes } from "../../../features/downloads/format";
 import type { Notify } from "../../../features/notifications/types";
 import type { TtsSettings, VoiceEntry } from "../../../features/tts/types";
@@ -26,16 +28,24 @@ import { ANCHOR_ATTRIBUTE } from "../../SettingsSection";
 export function SpeechSynthesisList({
   onDownload,
   onVoiceSettings,
+  onOpenEngines,
   notify,
 }: {
   /** The download page each engine installs from. */
   onDownload: (engine: "tts" | "audio") => void;
   /** One voice's settings, named by its model path and the engine that runs it. */
   onVoiceSettings: (voice: string, engine: string) => void;
+  /** The Audio engine page, for an engine whose install is not one pinned build. */
+  onOpenEngines: () => void;
   notify: Notify;
 }) {
   const [voices, setVoices] = useState<VoiceEntry[] | null>(null);
   const [settings, setSettings] = useState<TtsSettings | null>(null);
+  // A voice cannot speak before its engine exists, so the header's action is
+  // chosen by the folder probe rather than always being "Download voice". That
+  // button used to be unconditional, which offered a Piper voice to a machine
+  // with no `piper.exe` and no way to notice.
+  const engines = useBuiltinEngines((message) => notify("error", message));
 
   const refresh = useCallback(async () => {
     try {
@@ -66,6 +76,10 @@ export function SpeechSynthesisList({
     setSettings({ ...settings, voice: voice.id });
     try {
       await invoke("tts_select_voice", { voice: voice.id });
+      // The chat page is a sibling and stays mounted, so its Read button has to
+      // be told the voice it was waiting for now exists. Not awaited: a failed
+      // broadcast must not undo a selection that was already stored.
+      void emit("tts-voice-changed").catch(() => undefined);
     } catch (reason) {
       setSettings(previous);
       notify("error", `The voice could not be saved: ${String(reason)}`);
@@ -84,6 +98,7 @@ export function SpeechSynthesisList({
       // Re-read both: deleting the selected voice moves the selection back to the
       // built-in one, and the tick has to show where it actually went.
       await refresh();
+      void emit("tts-voice-changed").catch(() => undefined);
       notify("success", `${voice.name} deleted`);
     } catch (reason) {
       notify("error", `The voice could not be deleted: ${String(reason)}`);
@@ -93,25 +108,51 @@ export function SpeechSynthesisList({
   const selected = settings?.voice ?? null;
   const piper = (voices ?? []).filter((voice) => voice.engine === "piper");
   const audiocpp = (voices ?? []).filter((voice) => voice.engine === "audiocpp");
+  const enginesKnown = engines.engines !== null;
+  const piperInstalled = engines.installed("piper");
+  const audiocppInstalled = engines.installed("audiocpp");
+  /** "Install engine", or the fraction while that install runs. */
+  const installLabel = (id: string) =>
+    engines.installing === id
+      ? engines.progress === null
+        ? "Starting"
+        : `${Math.round(engines.progress * 100)}%`
+      : "Install engine";
 
   return (
     <article>
       <EngineHeader
         title="Piper"
         subtitle={
-          voices === null ? (
+          !enginesKnown || voices === null ? (
             <span className="inline-block h-3 w-32 animate-pulse rounded bg-[var(--raised)]" />
+          ) : !piperInstalled ? (
+            // A voice is a file `piper.exe` reads; offering one before the
+            // engine exists is an install that cannot speak.
+            "Engine not installed"
           ) : `${piper.length === 0 ? "No voices" : piper.length === 1 ? "1 voice" : `${piper.length} voices`}`
         }
         download={
-          <button
-            type="button"
-            onClick={() => onDownload("tts")}
-            className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-md border border-[var(--line)] px-2.5 text-[12px] text-[var(--text)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
-          >
-            <Download size={13} />
-            <span>Download voice</span>
-          </button>
+          !enginesKnown ? null : piperInstalled ? (
+            <HeaderAction
+              onClick={() => onDownload("tts")}
+              icon={<Download size={13} />}
+              label="Download voice"
+            />
+          ) : (
+            <HeaderAction
+              onClick={() => engines.install("piper")}
+              icon={
+                engines.installing === "piper" ? (
+                  <LoaderCircle size={13} className="animate-spin" />
+                ) : (
+                  <Download size={13} />
+                )
+              }
+              label={installLabel("piper")}
+              disabled={engines.installing !== null}
+            />
+          )
         }
       />
       <VoiceList
@@ -129,19 +170,24 @@ export function SpeechSynthesisList({
       <EngineHeader
         title="audio.cpp"
         subtitle={
-          voices === null ? (
+          !enginesKnown || voices === null ? (
             <span className="inline-block h-3 w-32 animate-pulse rounded bg-[var(--raised)]" />
+          ) : !audiocppInstalled ? (
+            "Engine not installed"
           ) : `${audiocpp.length === 0 ? "No voices" : audiocpp.length === 1 ? "1 voice" : `${audiocpp.length} voices`}`
         }
         download={
-          <button
-            type="button"
-            onClick={() => onDownload("audio")}
-            className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-md border border-[var(--line)] px-2.5 text-[12px] text-[var(--text)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
-          >
-            <Download size={13} />
-            <span>Download voice</span>
-          </button>
+          !enginesKnown ? null : audiocppInstalled ? (
+            <HeaderAction
+              onClick={() => onDownload("audio")}
+              icon={<Download size={13} />}
+              label="Download voice"
+            />
+          ) : (
+            // audio.cpp installs from a live release catalog rather than one
+            // pinned build, so its own page owns the choice of release.
+            <HeaderAction onClick={onOpenEngines} icon={<Settings2 size={13} />} label="Install engine" />
+          )
         }
       />
       <VoiceList
@@ -178,6 +224,37 @@ function EngineHeader({
       </div>
       {download}
     </div>
+  );
+}
+
+/**
+ * The one button an engine header offers.
+ *
+ * A header has a single action, and which one it is depends on the folder: an
+ * absent engine needs installing, an installed one needs voices. Sharing the
+ * drawing keeps those two states from growing two different pill styles.
+ */
+function HeaderAction({
+  onClick,
+  icon,
+  label,
+  disabled = false,
+}: {
+  onClick: () => void;
+  icon: React.ReactNode;
+  label: string;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-md border border-[var(--line)] px-2.5 text-[12px] text-[var(--text)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] disabled:opacity-50"
+    >
+      {icon}
+      <span>{label}</span>
+    </button>
   );
 }
 

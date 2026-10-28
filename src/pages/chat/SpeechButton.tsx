@@ -20,16 +20,30 @@ export function SpeechButton({
   active,
   phase,
   disabled,
+  disabledReason,
   onPress,
 }: {
   active: boolean;
   /** Null unless this message is the one being read. */
   phase: SpeechPhase | null;
   disabled: boolean;
+  /**
+   * Why there is nothing to read with, when there is nothing.
+   *
+   * A dim button with no explanation is the one state a reader cannot act on:
+   * the reason is already known to the backend ("Piper is not installed",
+   * "The voice is missing"), so the tooltip is where it belongs.
+   */
+  disabledReason?: string | null;
   onPress: () => void;
 }) {
   const playing = active && phase === "playing";
   const preparing = active && phase === "synthesizing";
+  const title = active
+    ? "Stop reading"
+    : disabled && disabledReason
+      ? disabledReason
+      : "Read aloud";
   return (
     <button
       type="button"
@@ -37,7 +51,7 @@ export function SpeechButton({
       disabled={disabled}
       aria-pressed={active}
       aria-label={active ? "Stop reading" : "Read aloud"}
-      title={active ? "Stop reading" : "Read aloud"}
+      title={title}
       className={`inline-flex min-h-8 items-center gap-1 rounded px-1.5 hover:bg-[var(--raised)] hover:text-[var(--text)] disabled:opacity-40 ${active ? "text-[var(--accent)]" : ""}`}
     >
       {playing ? (

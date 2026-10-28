@@ -265,13 +265,26 @@ export default function ChatPage({ endpointId, model, localModelId, session, ses
   /**
    * The replies retries replaced, by message index, so they can be paged back to.
    *
-   * Session-scoped and deliberately not persisted: the transcript keeps one reply
-   * per turn, and only that one is ever sent to the model. The alternatives are
-   * pages the reader can flip through while this conversation is open.
+   * Scoped to the conversation that produced them: an index means a turn only
+   * inside one transcript, so the set is dropped when another conversation opens.
+   * Deliberately not persisted -- the transcript keeps one reply per turn, and
+   * only that one is ever sent to the model. The alternatives are pages the
+   * reader can flip through while this conversation is open.
    */
   const [variantSets, setVariantSets] = useState<
     Record<number, { items: ChatMessage[]; active: number }>
   >({});
+  /** The conversation `variantSets` belongs to, so a switch can drop it. */
+  const variantSessionRef = useRef<string | null>(null);
+  /**
+   * The slots a retry is waiting to fill.
+   *
+   * Only a retry may add a page. A transcript replaced by a load, a session
+   * switch or a channel's saved turn is the same reply read again, not another
+   * answer -- and treating those as pages is what made every conversation that
+   * landed a reply at the same index count towards one "5/5" nobody retried.
+   */
+  const retryingSlotsRef = useRef<Set<number>>(new Set());
   const [input, setInput] = useState("");
   const [draggingFiles, setDraggingFiles] = useState(false);
   const [running, setRunning] = useState(false);
@@ -279,23 +292,28 @@ export default function ChatPage({ endpointId, model, localModelId, session, ses
   // as the newest page is what makes "2/2" appear without the retry path having
   // to know when a reply finished. Skipped while a run is going, because a
   // streaming message is replaced object by object and each replacement would
-  // become a page of its own.
+  // become a page of its own. Only a slot a retry asked for is considered.
   useEffect(() => {
-    if (running) return;
+    if (running || retryingSlotsRef.current.size === 0) return;
+    const adopted = new Map<number, ChatMessage>();
+    for (const index of retryingSlotsRef.current) {
+      const set = variantSets[index];
+      const current = messagesRef.current[index];
+      if (!set || !current || current.role !== "assistant" || set.items.includes(current)) continue;
+      adopted.set(index, current);
+    }
+    if (adopted.size === 0) return;
+    for (const index of adopted.keys()) retryingSlotsRef.current.delete(index);
     setVariantSets((previous) => {
-      let changed = false;
       const next = { ...previous };
-      for (const key of Object.keys(previous)) {
-        const index = Number(key);
+      for (const [index, current] of adopted) {
         const set = previous[index];
-        const current = messagesRef.current[index];
-        if (!set || !current || set.items.includes(current)) continue;
+        if (!set || set.items.includes(current)) continue;
         next[index] = { items: [...set.items, current], active: set.items.length };
-        changed = true;
       }
-      return changed ? next : previous;
+      return next;
     });
-  }, [messages, running]);
+  }, [messages, running, variantSets]);
   const [streamText, setStreamText] = useState("");
   const [streamReasoning, setStreamReasoning] = useState("");
   // The steps behind the reply now streaming, in the order they happened. Held
@@ -523,6 +541,10 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     resetStreamActivity();
     setSearching(false);
     setRunning(false);
+    // A run that ended while it was waiting out an attempt has nothing left to
+    // count down. The listener's clear cannot be relied on here: a run this page
+    // adopted may already be gone from its map.
+    setRetryWait(null);
   }, [resetStreamActivity]);
   const listenerReadyRef = useRef<Promise<void>>(Promise.resolve());
   const onActivityRef = useRef(onActivity);
@@ -575,6 +597,17 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     // would misreport the on-screen conversation to the backend.
     const nextId = activeId ?? session?.id ?? null;
     sessionIdRef.current = nextId;
+    // An index is a turn only inside one transcript. Reply pages and a retry
+    // countdown both belong to the conversation that produced them, so a switch
+    // drops them here rather than carrying "3/3" and a stalled banner into the
+    // next chat. Keyed on the id, not on `session.messages`, because a saved
+    // transcript replacing the same conversation is not a switch.
+    if (variantSessionRef.current !== nextId) {
+      variantSessionRef.current = nextId;
+      retryingSlotsRef.current.clear();
+      setVariantSets({});
+      setRetryWait(null);
+    }
     // Cleared only when a conversation is genuinely open or genuinely closed.
     // During the fetch `session` is null while `nextId` is set, and clearing here
     // would empty the transcript for as long as the load takes -- showing the
@@ -1860,6 +1893,11 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     else if (sessionId) onActivityRef.current(sessionId, null);
     setPendingApprovals([]);
     setPendingQuestions([]);
+    // The stop is the end of the reply, including a wait between attempts. The
+    // backend's `stopped` event cannot clear this for a user-pressed stop: this
+    // handler has already removed the run, so the listener drops the event at
+    // its lookup and the composer would keep counting a retry that is over.
+    setRetryWait(null);
     if (sessionId === sessionIdRef.current) {
       runIdRef.current = "";
       setRunning(false);
@@ -1910,6 +1948,10 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     // and there was no way back to compare the two.
     const replaced = messages[assistantIndex];
     if (replaced) {
+      // The only place a page is ever created, and the only place a slot is
+      // marked for adoption: the fresh reply this retry produces becomes the
+      // newest page when it lands.
+      retryingSlotsRef.current.add(assistantIndex);
       setVariantSets((previous) => {
         const set = previous[assistantIndex];
         if (set?.items.includes(replaced)) return previous;
@@ -1917,6 +1959,9 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         return { ...previous, [assistantIndex]: { items, active: items.length - 1 } };
       });
     }
+    // Whatever the previous attempt counted down belongs to the reply being
+    // replaced, not to this one.
+    setRetryWait(null);
     sessionIdRef.current = sessionId;
     onFirstSend();
     void startOrQueueChat(conversation, sessionId, [], []);
@@ -2253,8 +2298,14 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
                       out rather than drawn — an old card in a new layout is worse
                       than no card, and the search is still recorded in the reply's
                       own activity steps. */}
-            {messages.filter((message) => message.role === "user" || message.role === "assistant").map((message, index) => (
-              message.hidden ? (
+            {messages.map((message, index) => {
+              if (message.role !== "user" && message.role !== "assistant") return null;
+              // The transcript's own index, not the position in a filtered list:
+              // a retry pages by slot, and an old `tool` row must not shift what
+              // "the reply at this turn" means. The message key is the reply's
+              // Read control, so an index that disagreed with the stored one
+              // also lost Stop on a reply that was being read.
+              return message.hidden ? (
                 // A background sub-agent's report. Drawn as a centred notice, not a
                 // message from either side: the report itself lives on the `sub_agent`
                 // tool row inside the reply that spawned it, and this only marks that
@@ -2300,6 +2351,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
                           active={speech.speaking === `assistant-${index}`}
                           phase={speech.speaking === `assistant-${index}` ? speech.phase : null}
                           disabled={!speech.voice?.available || !message.content.trim()}
+                          disabledReason={speech.voice?.reason}
                           onPress={() => speech.toggle(`assistant-${index}`, message.content)}
                         />
                         {variantSets[index] && variantSets[index].items.length > 1 && (
@@ -2343,8 +2395,8 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
                   </> : <PathText text={userTextOnly(message.content)} root={workspaceRoot} />}
                 </div>
               </article>
-              )
-            ))}
+              );
+            })}
             {(streamText || streamActivity.length > 0) && <article className="flex justify-start"><div className="max-w-[78%] break-words py-1 text-[14px] leading-7">
               <ActivityPanel steps={streamActivity} live={running} renderMarkdown={renderMarkdown} />
               {streamText && <div className="markdown-content">{renderMarkdown(streamText)}</div>}

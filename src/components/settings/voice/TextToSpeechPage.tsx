@@ -17,12 +17,15 @@ import { SpeechSynthesisList } from "./SpeechSynthesisList";
 export function TextToSpeechPage({
   onDownload,
   onVoiceSettings,
+  onOpenEngines,
   notify,
 }: {
   /** The download page each engine's voices install from. */
   onDownload: (engine: "tts" | "audio") => void;
   /** One voice's settings, named by its model path and the engine that runs it. */
   onVoiceSettings: (voice: string, engine: string) => void;
+  /** The Audio engine page, where an engine that is not installed is installed. */
+  onOpenEngines: () => void;
   notify: Notify;
 }) {
   const [settings, setSettings] = useState<TtsSettings | null>(null);
@@ -77,7 +80,12 @@ export function TextToSpeechPage({
           Text to speech
         </h2>
       </SettingsPageTitle>
-      <SpeechSynthesisList onDownload={onDownload} onVoiceSettings={onVoiceSettings} notify={notify} />
+      <SpeechSynthesisList
+        onDownload={onDownload}
+        onVoiceSettings={onVoiceSettings}
+        onOpenEngines={onOpenEngines}
+        notify={notify}
+      />
 
       <SettingsSection title="Speed">
         <SettingRow

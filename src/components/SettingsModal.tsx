@@ -1175,7 +1175,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
                 onCreateVoice={() => setPage({ view: "voiceEnroll" })}
                 notify={notify}
               />
-              : page.view === "tts" ? <TextToSpeechPage onDownload={(engine) => setPage({ view: "download", kind: engine, group: engine === "audio" ? "speech" : undefined })} onVoiceSettings={(voice, engine) => setPage(engine === "audiocpp" ? { view: "audioModel", model: voice } : { view: "ttsVoice", voice })} notify={notify} />
+              : page.view === "tts" ? <TextToSpeechPage onDownload={(engine) => setPage({ view: "download", kind: engine, group: engine === "audio" ? "speech" : undefined })} onVoiceSettings={(voice, engine) => setPage(engine === "audiocpp" ? { view: "audioModel", model: voice } : { view: "ttsVoice", voice })} onOpenEngines={() => setPage({ view: "engines" })} notify={notify} />
               : page.view === "voiceEnroll" ? <VoiceEnrollPage notify={notify} onBack={goBack} />
               : page.view === "audio" ? <AudioEnginePage notify={notify} />
               : page.view === "audioModels" ? <AudioModelsPage onDownload={() => setPage({ view: "download", kind: "audio" })} onModelSettings={(model) => setPage({ view: "audioModel", model })} notify={notify} />

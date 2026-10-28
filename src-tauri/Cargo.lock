@@ -4320,7 +4320,7 @@ dependencies = [
 
 [[package]]
 name = "projectz"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "ash",
  "base64 0.22.1",

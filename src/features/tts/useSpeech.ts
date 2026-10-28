@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 import { playPcm, stopPlayback, unlockAudio } from "./player";
 import type { TtsSettings, VoiceInfo } from "./types";
@@ -24,6 +25,15 @@ export type Speech = {
   toggle: (key: string, text: string) => void;
   /** Stops the voice at once. */
   stop: () => void;
+  /**
+   * Re-asks the backend whether there is a voice to read with.
+   *
+   * The chat page is mounted for the life of the app while Settings is a
+   * sibling, so a voice chosen after the page opened would otherwise leave the
+   * Read button dim until a restart. This is the one fact that must follow the
+   * settings record rather than the page's mount.
+   */
+  refresh: () => Promise<void>;
 };
 
 /**
@@ -136,21 +146,39 @@ export function useSpeech(onError: (message: string) => void): Speech {
   const generation = useRef(0);
   const busy = useRef(false);
 
+  const refresh = useCallback(async () => {
+    try {
+      setVoice(await invoke<VoiceInfo>("tts_voice"));
+    } catch {
+      // Unreachable in practice -- the command answers with `available: false`
+      // rather than failing -- so a read failure only means the button keeps its
+      // previous answer until the next change.
+    }
+  }, []);
+
+  // The voice is a fact about the settings record, not about this mount: a voice
+  // chosen, downloaded or deleted while the chat is open has to reach the Read
+  // button without a restart. Focus covers a change made outside the app (a
+  // voice folder copied in), the two events cover every in-app door, and the
+  // mount read seeds the first paint.
   useEffect(() => {
+    void refresh();
     let live = true;
-    invoke<VoiceInfo>("tts_voice")
-      .then((next) => {
-        if (live) setVoice(next);
-      })
-      .catch(() => {
-        // Unreachable in practice -- the command answers with `available: false`
-        // rather than failing -- so a read failure only means the button stays
-        // disabled until the next open.
-      });
+    const stops: Array<() => void> = [];
+    const track = (stop: () => void) => {
+      if (live) stops.push(stop);
+      else stop();
+    };
+    void listen("tts-voice-changed", () => void refresh()).then(track);
+    void listen("downloads-installed", () => void refresh()).then(track);
+    const onFocus = () => void refresh();
+    window.addEventListener("focus", onFocus);
     return () => {
       live = false;
+      stops.forEach((stop) => stop());
+      window.removeEventListener("focus", onFocus);
     };
-  }, []);
+  }, [refresh]);
 
   /**
    * Opens the output device on the first gesture.
@@ -276,5 +304,5 @@ export function useSpeech(onError: (message: string) => void): Speech {
     [onError, stop],
   );
 
-  return { voice, speaking, phase, toggle, stop };
+  return { voice, speaking, phase, toggle, stop, refresh };
 }
