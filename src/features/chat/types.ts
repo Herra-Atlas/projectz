@@ -256,6 +256,15 @@ export type ChatMessage = {
      */
     cached_tokens?: number;
     /**
+     * The cache figure for the same **first** request `context_tokens` measures.
+     *
+     * `cached_tokens` is the final round's, and a tool round inflates that prompt
+     * with results that are never stored -- so the two on one chart drew a peak
+     * the next turn could not repeat and read as a collapsing context. This pair
+     * describes one request, which is the only way they can be compared.
+     */
+    context_cached_tokens?: number;
+    /**
      * Every request's input and output for the reply, added up.
      *
      * A reply that ran a tool sends the conversation again for its answer, so the

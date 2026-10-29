@@ -31,6 +31,7 @@ mod prompt;
 mod stats;
 pub(crate) mod transcript;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -220,11 +221,28 @@ async fn run_agent(task: AgentTask) {
     // event closure by clone, and into each other through the sink.
     let events = Arc::new(Mutex::new(Vec::<Stamped>::new()));
     let collected = Arc::clone(&events);
+    // What an attempt produced, so a failed one may be retried only when it
+    // changed nothing. A run that already streamed an answer or called a tool is
+    // final: replaying it could duplicate output or repeat a write. Reset before
+    // each attempt, exactly as the parent's own ladder does.
+    let produced = Arc::new(AtomicUsize::new(0));
+    let tool_calls = Arc::new(AtomicUsize::new(0));
+    let produced_counter = Arc::clone(&produced);
+    let tool_counter = Arc::clone(&tool_calls);
     let on_event: Arc<dyn Fn(ChatEvent) + Send + Sync> = Arc::new({
         let emit = Arc::clone(&run.emit);
         let parent_run_id = run.run_id.clone();
         let agent_run_id = agent_id.clone();
         move |event: ChatEvent| {
+            match event.kind.as_str() {
+                "delta" => {
+                    produced_counter.fetch_add(1, Ordering::Relaxed);
+                }
+                "tool_call" => {
+                    tool_counter.fetch_add(1, Ordering::Relaxed);
+                }
+                _ => {}
+            }
             if event.kind == "tool_approval" {
                 // An approval has to reach the user or the run parks forever, so
                 // it is forwarded live -- under the *parent's* run id, since the
@@ -266,6 +284,26 @@ async fn run_agent(task: AgentTask) {
         content: prompt::instruction(kind, &label, &prompt),
     }];
 
+    // Written before the run rather than after it. The transcript used to be saved
+    // only when the loop returned, so an agent whose process ended -- the app quit,
+    // a restart -- left no row at all: the panel had nothing to show, and even the
+    // task it had been given was gone. The finished run saves the same id, and the
+    // turn is upserted with the reply appended.
+    if let Some(database) = context.database.as_ref() {
+        let started = transcript::build_started(
+            &agent_id,
+            &label,
+            &prompt,
+            run.session_id.as_deref(),
+            &model,
+            &endpoint.id,
+            &started_at,
+        );
+        if let Err(error) = database.save_chat_session(&started) {
+            tracing::warn!(agent_id, %error, "a sub-agent's start could not be saved");
+        }
+    }
+
     let context_window = if endpoint.id == crate::ai::local::LOCAL_ENDPOINT_ID {
         run.local_context_window
     } else {
@@ -277,68 +315,123 @@ async fn run_agent(task: AgentTask) {
             .and_then(|context| u64::try_from(context).ok())
     };
 
-    let result = stream_chat(
-        &endpoint,
-        &model,
-        &messages,
-        &[],
-        // A delegated run answers its parent, not the channel. Channel wording and
-        // delivery belong to the turn the user is actually reading. The general
-        // instructions, however, follow the same door as the parent: replacing
-        // them for Telegram must not leak them back through a delegated task.
-        None,
-        run.suppress_general_instructions,
-        None,
-        // The configured effort wins; the parent's is the fallback. Resolved
-        // here rather than by the runtime because the whole override is one
-        // string the parent already carries.
-        run.limits
-            .subagent_effort
-            .clone()
-            .unwrap_or_else(|| run.reasoning.clone()),
-        run.web_search_enabled,
-        // Always Agent: a sub-agent exists to do things. The spawn tool itself is
-        // withheld (the `false` below), which is what keeps delegation one level
-        // deep.
-        ToolMode::Agent,
-        run.enable_reasoning_control,
-        &agent_id,
-        // The parent's session scopes the cache, so a write the sub-agent makes
-        // invalidates its parent's earlier cached reads rather than leaving them
-        // to answer with pre-edit content.
-        run.session_id.as_deref(),
-        context.database.as_ref(),
-        // The narrowed gate for a read-only kind, or the parent's own for a
-        // general one. Either way the pending-prompt map is shared, so an
-        // approval still reaches the same answer command.
-        approval,
-        Arc::clone(&context.cancelled),
-        // A sub-agent's own run has no sub-agent default: it cannot spawn, so
-        // there is nothing for the value to configure.
-        None,
-        // Nor a vision model: a sub-agent has no reason to open an image, and
-        // withholding it keeps the preference resolved in one place.
-        None,
-        // The parent's compression knobs, so a long delegated run compresses the
-        // way the conversation that started it does.
-        run.compression,
-        // The sub-agent's own ceiling is the *sub-agent* one, not the parent
-        // reply's; the parallel cap has no meaning inside an agent that cannot
-        // spawn.
-        crate::ai::types::RunLimits {
-            rounds: run.limits.subagent_rounds,
-            subagent_rounds: run.limits.subagent_rounds,
-            subagent_parallel: run.limits.subagent_parallel,
-            subagent_effort: run.limits.subagent_effort.clone(),
-        },
-        context_window,
-        run.local_context_window,
-        None,
-        false,
-        on_event,
-        on_search,
-    )
-    .await;
+    // The same ladder the parent run applies, for the same reason: a delegated
+    // run that failed without producing a token or calling a tool changed nothing,
+    // so it can be asked again; one that already answered or acted is final. It
+    // used to fail on the first transient error -- "The agent did not finish:
+    // Empty response from remote" with no attempt to recover -- because the ladder
+    // lived only in the runtime, and a sub-agent calls `stream_chat` directly.
+    let mut retries = 0usize;
+    let result = loop {
+        produced.store(0, Ordering::Relaxed);
+        tool_calls.store(0, Ordering::Relaxed);
+        let attempt = stream_chat(
+            &endpoint,
+            &model,
+            &messages,
+            &[],
+            // A delegated run answers its parent, not the channel. Channel wording and
+            // delivery belong to the turn the user is actually reading. The general
+            // instructions, however, follow the same door as the parent: replacing
+            // them for Telegram must not leak them back through a delegated task.
+            None,
+            run.suppress_general_instructions,
+            None,
+            // The configured effort wins; the parent's is the fallback. Resolved
+            // here rather than by the runtime because the whole override is one
+            // string the parent already carries.
+            run.limits
+                .subagent_effort
+                .clone()
+                .unwrap_or_else(|| run.reasoning.clone()),
+            run.web_search_enabled,
+            // Always Agent: a sub-agent exists to do things. The spawn tool itself is
+            // withheld (the `false` below), which is what keeps delegation one level
+            // deep.
+            ToolMode::Agent,
+            run.enable_reasoning_control,
+            &agent_id,
+            // The parent's session scopes the cache, so a write the sub-agent makes
+            // invalidates its parent's earlier cached reads rather than leaving them
+            // to answer with pre-edit content.
+            run.session_id.as_deref(),
+            context.database.as_ref(),
+            // The narrowed gate for a read-only kind, or the parent's own for a
+            // general one. Either way the pending-prompt map is shared, so an
+            // approval still reaches the same answer command.
+            approval.clone(),
+            Arc::clone(&context.cancelled),
+            // A sub-agent's own run has no sub-agent default: it cannot spawn, so
+            // there is nothing for the value to configure.
+            None,
+            // Nor a vision model: a sub-agent has no reason to open an image, and
+            // withholding it keeps the preference resolved in one place.
+            None,
+            // The parent's compression knobs, so a long delegated run compresses the
+            // way the conversation that started it does.
+            run.compression,
+            // The sub-agent's own ceiling is the *sub-agent* one, not the parent
+            // reply's; the parallel cap has no meaning inside an agent that cannot
+            // spawn.
+            crate::ai::types::RunLimits {
+                rounds: run.limits.subagent_rounds,
+                subagent_rounds: run.limits.subagent_rounds,
+                subagent_parallel: run.limits.subagent_parallel,
+                subagent_effort: run.limits.subagent_effort.clone(),
+            },
+            context_window,
+            run.local_context_window,
+            None,
+            false,
+            Arc::clone(&on_event),
+            Arc::clone(&on_search),
+        )
+        .await;
+        match attempt {
+            Err(reason) => {
+                let Some((next, delay)) = crate::ai::runtime::retry_step(
+                    &reason,
+                    retries,
+                    produced.load(Ordering::Relaxed),
+                    tool_calls.load(Ordering::Relaxed),
+                ) else {
+                    break Err(reason);
+                };
+                retries = next;
+                tracing::info!(
+                    agent_id = %agent_id,
+                    attempt = retries,
+                    delay,
+                    %reason,
+                    "retrying a sub-agent that changed nothing"
+                );
+                // Under the agent's own run id: the panel is the surface watching
+                // this run, and the parent's listener keys on its own id.
+                on_event(ChatEvent {
+                    run_id: agent_id.clone(),
+                    session_id: run.session_id.clone(),
+                    sequence: 0,
+                    kind: "retrying".into(),
+                    text: Some(reason.clone()),
+                    error: None,
+                    metrics: Some(serde_json::json!({
+                        "attempt": retries,
+                        "attempts": crate::ai::RETRY_DELAYS_SECONDS.len(),
+                        "delay_seconds": delay,
+                        "error": reason,
+                    })),
+                });
+                if crate::ai::runtime::wait_before_retry(delay, &context.cancelled).await {
+                    // A stop during the wait is the user ending the run, not a
+                    // failure: the same shape a cancelled `stream_chat` returns, so
+                    // no "did not finish" report is sent for work nobody cancelled
+                    // but the user.
+                    break Ok((String::new(), Value::Null));
+                }
+            }
+            other => break other,
+        }
+    };
 
     // What gets stored. A failure is written as a reply too, so a sub-agent that
     // died is visible in the panel rather than an empty tab.

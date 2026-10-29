@@ -388,6 +388,22 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
    * conversations does not carry one session's plan onto another's screen.
    */
   const [todoList, setTodoList] = useState<{ sessionId: string | null; items: TodoEntry[] } | null>(null);
+  /**
+   * Drops one step from the agent's checklist.
+   *
+   * Two places have to agree: the strip's state, and `session.<id>.todo`, which
+   * is the list `todo` reads back on its next call. The completed step in the
+   * transcript is a record of what the agent did and is deliberately left alone
+   * -- this is the plan as it stands now, not a rewrite of history.
+   */
+  const removeTodoItem = (index: number) => {
+    if (!todoList) return;
+    const items = todoList.items.filter((_, position) => position !== index);
+    setTodoList(items.length > 0 ? { ...todoList, items } : null);
+    if (!todoList.sessionId) return;
+    void invoke("database_set_setting", { key: `session.${todoList.sessionId}.todo`, value: items })
+      .catch(() => onNotify("error", "Could not save the checklist."));
+  };
   const [contextLimit, setContextLimit] = useState<number | null>(null);
   // What the selected model's provider says it supports. Null until it has been
   // read, and every field inside it may still be unknown.
@@ -487,6 +503,10 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   const runIdRef = useRef("");
   const requestStartedAtRef = useRef(0);
   const generationStartedAtRef = useRef(0);
+  // When the run on screen began, for the activity panel's live clock. Separate
+  // from `requestStartedAtRef` because that one is a `performance.now()` figure
+  // used for metrics, while every step stamp and the panel's tick are `Date.now()`.
+  const liveStartedAtRef = useRef(0);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
   const [selection, setSelection] = useState<SelectedText | null>(null);
   // The shared record Settings writes. Startup primes it, so the greeting draws
@@ -660,6 +680,9 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     // The context figure this run has already reported, so switching away and back
     // mid-reply does not drop the ring to the previous reply's size.
     setLivePromptTokens(run?.promptTokens ?? null);
+    // The live panel's clock resumes where the run started, not where the reader
+    // came back to it.
+    liveStartedAtRef.current = run?.startedAt ?? 0;
     setRunning(Boolean(run));
   }, [activeId, session?.id, session?.messages, sessionLoading]);
 
@@ -1020,6 +1043,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           providerLabel: event.metrics?.provider,
           requestStartedAt: 0,
           generationStartedAt: 0,
+          startedAt: Date.now(),
           localModel: false,
           isReasoning: false,
           external: true,
@@ -1035,6 +1059,11 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         setSearching(false);
         setRunning(true);
         setLivePromptTokens(null);
+        // The live panel's clock starts here, as a `Date.now()` reading -- the
+        // step stamps are `Date.now()` too, while `requestStartedAt` is
+        // `performance.now()`. Mixing the two would make the header count from a
+        // number decades away.
+        liveStartedAtRef.current = Date.now();
         onActivityRef.current(sessionId, "streaming");
         return external;
       };
@@ -1124,6 +1153,9 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         // agent works rather than waiting for the reply to end and reporting a
         // figure that is already out of date.
         run.promptTokens = payload.metrics.prompt_tokens;
+        // Kept whole, because a failed run has no `completed` event to carry the
+        // spend it already incurred: this is what the failed reply stores.
+        run.usage = { ...(run.usage ?? {}), ...payload.metrics };
         if (isActive) setLivePromptTokens(payload.metrics.prompt_tokens);
       } else if (payload.kind === "status") {
         // Set once, on the first `thinking` of a run. Every later round emits the
@@ -1293,6 +1325,9 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         // charts and the cache figure are right before a reload, not after one.
         const contextTokens = payload.metrics?.context_tokens;
         const cachedTokens = payload.metrics?.cached_tokens;
+        // The cache figure for the same first request `context_tokens` measures,
+        // which is the only pair the context chart may plot together.
+        const contextCachedTokens = payload.metrics?.context_cached_tokens;
         // The reply's spend across every round it made, larger than `promptTokens`
         // whenever a tool ran. Absent from a provider that reports no usage, and
         // then the stored message keeps only the last round's figure.
@@ -1322,7 +1357,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         // A reply that landed where the user was not looking gets the sound; one
         // on screen has said everything a chime could.
         playAlertIfUnseen("response", isActive);
-        const next = [...run.baseMessages, { role: "assistant" as const, content: response, reasoning: run.reasoning || undefined, ...(run.activity.length > 0 ? { activity: run.activity } : {}), modelId: run.modelLabel, providerId: run.providerLabel, metrics: { prompt_seconds: promptSeconds, generation_seconds: generationSeconds, elapsed_seconds: elapsedSeconds, tokens_per_second: generationTokensPerSecond, generation_rate_estimated: payload.metrics?.generation_tokens_per_second == null, completion_tokens: completionTokens, ...(promptTokens !== undefined ? { prompt_tokens: promptTokens } : {}), ...(contextTokens !== undefined ? { context_tokens: contextTokens } : {}), ...(cachedTokens !== undefined ? { cached_tokens: cachedTokens } : {}), ...(usedPromptTokens !== undefined ? { used_prompt_tokens: usedPromptTokens } : {}), ...(usedCompletionTokens !== undefined ? { used_completion_tokens: usedCompletionTokens } : {}), ...(requests !== undefined ? { requests } : {}), ...(promptEvalTokensPerSecond !== undefined ? { prompt_eval_tokens_per_second: promptEvalTokensPerSecond } : {}) } }];
+        const next = [...run.baseMessages, { role: "assistant" as const, content: response, reasoning: run.reasoning || undefined, ...(run.activity.length > 0 ? { activity: run.activity } : {}), modelId: run.modelLabel, providerId: run.providerLabel, metrics: { prompt_seconds: promptSeconds, generation_seconds: generationSeconds, elapsed_seconds: elapsedSeconds, tokens_per_second: generationTokensPerSecond, generation_rate_estimated: payload.metrics?.generation_tokens_per_second == null, completion_tokens: completionTokens, ...(promptTokens !== undefined ? { prompt_tokens: promptTokens } : {}), ...(contextTokens !== undefined ? { context_tokens: contextTokens } : {}), ...(cachedTokens !== undefined ? { cached_tokens: cachedTokens } : {}), ...(contextCachedTokens !== undefined ? { context_cached_tokens: contextCachedTokens } : {}), ...(usedPromptTokens !== undefined ? { used_prompt_tokens: usedPromptTokens } : {}), ...(usedCompletionTokens !== undefined ? { used_completion_tokens: usedCompletionTokens } : {}), ...(requests !== undefined ? { requests } : {}), ...(promptEvalTokensPerSecond !== undefined ? { prompt_eval_tokens_per_second: promptEvalTokensPerSecond } : {}) } }];
         onActivityRef.current(run.sessionId, isActive ? null : "done");
         onMessagesChangeRef.current(run.sessionId, next);
         if (isActive) {
@@ -1415,7 +1450,36 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           }
           return;
         }
-        const next = [...run.baseMessages, { role: "assistant" as const, content: run.text, reasoning: run.reasoning || undefined, ...(run.activity.length > 0 ? { activity: run.activity } : {}), modelId: run.modelLabel, providerId: run.providerLabel }];
+        // A failed reply is not a free one. The `completed` event is what normally
+        // carries the figures, and a run that dies never sends it -- so the spend
+        // already reported by its `usage` events is stored here. Without this a
+        // reply that took twenty-two steps was saved with metrics `null` and the
+        // statistics counted its tokens as zero.
+        const failedAt = performance.now();
+        const startedAt = run.requestStartedAt || failedAt;
+        const promptSeconds = Math.max(0, (run.generationStartedAt || failedAt) - startedAt) / 1000;
+        const generationSeconds = Math.max(0.001, (run.generationStartedAt ? failedAt - run.generationStartedAt : failedAt - startedAt) / 1000);
+        const elapsedSeconds = Math.max(0, failedAt - startedAt) / 1000;
+        const usage = run.usage;
+        const metrics = usage && {
+          prompt_seconds: promptSeconds,
+          generation_seconds: generationSeconds,
+          elapsed_seconds: elapsedSeconds,
+          // No rate: the reply never produced an answer, so a tokens-per-second
+          // figure would describe a completion that does not exist. Marked
+          // estimated so the session's measured average leaves it out.
+          tokens_per_second: 0,
+          generation_rate_estimated: true,
+          ...(usage.completion_tokens !== undefined ? { completion_tokens: usage.completion_tokens } : {}),
+          ...(usage.prompt_tokens !== undefined ? { prompt_tokens: usage.prompt_tokens } : {}),
+          ...(usage.context_tokens !== undefined ? { context_tokens: usage.context_tokens } : {}),
+          ...(usage.cached_tokens !== undefined ? { cached_tokens: usage.cached_tokens } : {}),
+          ...(usage.context_cached_tokens !== undefined ? { context_cached_tokens: usage.context_cached_tokens } : {}),
+          ...(usage.used_prompt_tokens !== undefined ? { used_prompt_tokens: usage.used_prompt_tokens } : {}),
+          ...(usage.used_completion_tokens !== undefined ? { used_completion_tokens: usage.used_completion_tokens } : {}),
+          ...(usage.requests !== undefined ? { requests: usage.requests } : {}),
+        };
+        const next = [...run.baseMessages, { role: "assistant" as const, content: run.text, reasoning: run.reasoning || undefined, ...(run.activity.length > 0 ? { activity: run.activity } : {}), modelId: run.modelLabel, providerId: run.providerLabel, ...(metrics ? { metrics } : {}) }];
         onActivityRef.current(run.sessionId, isActive ? null : "error");
         onMessagesChangeRef.current(run.sessionId, next);
         if (isActive) {
@@ -1512,6 +1576,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     const modelLabel = localModelId || model;
     const providerLabel = endpointId || undefined;
     const sessionTitle = session?.id === sessionId ? session?.title ?? "" : "";
+    const startedAt = Date.now();
     backgroundRunsRef.current.set(runId, {
       sessionId,
       baseMessages: requestMessages,
@@ -1523,6 +1588,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       providerLabel,
       requestStartedAt: 0,
       generationStartedAt: 0,
+      startedAt,
       localModel: Boolean(localModelId),
       isReasoning: false,
     });
@@ -1534,6 +1600,10 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     // was made.
     requestStartedAtRef.current = 0;
     generationStartedAtRef.current = 0;
+    // The panel's live clock starts when the send does, not at the first token:
+    // the wait for the provider is time the user spends waiting too, and it is
+    // what "Working for" is claiming to measure.
+    liveStartedAtRef.current = startedAt;
     streamTextRef.current = "";
     streamReasoningRef.current = "";
     setStreamText("");
@@ -2317,7 +2387,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
                 </div>
               ) : (
               <article key={`${index}-${message.role}`} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
-                <div className={`group max-w-[85%] break-words text-[14px] leading-7 sm:max-w-[78%] ${message.role === "user" ? "whitespace-pre-wrap rounded-2xl rounded-br-md bg-[var(--raised)] px-4 py-3 text-[var(--text)]" : "py-1 text-[var(--text)]"}`}>
+                <div className={`group min-w-0 max-w-[85%] break-words text-[14px] leading-7 sm:max-w-[78%] ${message.role === "user" ? "whitespace-pre-wrap rounded-2xl rounded-br-md bg-[var(--raised)] px-4 py-3 text-[var(--text)]" : "py-1 text-[var(--text)]"}`}>
                   {message.role === "assistant" ? <>
                     {/* The panel supersedes the old inline reasoning block. A thought
                         that ran before a tool call and one that ran after it are
@@ -2397,8 +2467,8 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
               </article>
               );
             })}
-            {(streamText || streamActivity.length > 0) && <article className="flex justify-start"><div className="max-w-[78%] break-words py-1 text-[14px] leading-7">
-              <ActivityPanel steps={streamActivity} live={running} renderMarkdown={renderMarkdown} />
+            {(streamText || streamActivity.length > 0) && <article className="flex justify-start"><div className="min-w-0 max-w-[78%] break-words py-1 text-[14px] leading-7">
+              <ActivityPanel steps={streamActivity} live={running} renderMarkdown={renderMarkdown} startedAt={liveStartedAtRef.current} />
               {streamText && <div className="markdown-content">{renderMarkdown(streamText)}</div>}
               {/* Live as well as stored: the files a run has already written are
                   the interesting part of a run in progress, and waiting for it to
@@ -2433,7 +2503,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
               exactly as it was. The gap is one `mb` because it belongs to the
               transcript above, not to the control below. */}
           {todoList && todoList.sessionId === (session?.id ?? null) && todoList.items.length > 0 && (
-            <TodoStrip items={todoList.items} />
+            <TodoStrip items={todoList.items} onDelete={removeTodoItem} />
           )}
           {visibleApprovals.length > 0 && (
             <div className="mb-2">

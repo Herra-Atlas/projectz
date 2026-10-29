@@ -107,9 +107,12 @@ export function ReplyRateChart({ stats }: { stats: SessionStats }) {
  * the final round drew a peak the next turn could never repeat and made an
  * ordinary tool call look like the context collapsing.
  *
- * The cached line is what the provider said it already had. It tracks the input
- * closely when the prefix is stable, which is the shape of a conversation whose
- * cache is working.
+ * The cached line is what the provider said it already had for that **same**
+ * first request. It tracks the context closely when the prefix is stable, which
+ * is the shape of a conversation whose cache is working. It is deliberately not
+ * the final round's figure: a tool round inflates its prompt with results that
+ * are never stored, so plotting that beside the starting context drew a spike
+ * the next turn could not repeat -- and read as the context collapsing.
  */
 export function ContextChart({ stats }: { stats: SessionStats }) {
   if (stats.context.length === 0) return <ChartEmpty />;

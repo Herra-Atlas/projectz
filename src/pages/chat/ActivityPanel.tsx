@@ -38,6 +38,16 @@ type ActivityPanelProps = {
    * figure yet and the elapsed clock is used instead.
    */
   totalSeconds?: number;
+  /**
+   * When the run being shown began, as a `Date.now()` reading.
+   *
+   * The live clock counts from here rather than from the earliest step: every
+   * close path deletes a step's `startedAt`, so after the first step finished the
+   * only start left was the one currently open, and the header read the *closed*
+   * step sum instead -- which advances only when another step closes. That is why
+   * "Working for" sat still while the model thought and jumped when a tool ran.
+   */
+  startedAt?: number;
 };
 
 /**
@@ -54,7 +64,7 @@ type ActivityPanelProps = {
  * `startedAt` on each running step are enough to derive it here, and a run that
  * has finished shows fixed figures from the backend instead.
  */
-export default function ActivityPanel({ steps, live, renderMarkdown, totalSeconds }: ActivityPanelProps) {
+export default function ActivityPanel({ steps, live, renderMarkdown, totalSeconds, startedAt }: ActivityPanelProps) {
   const [open, setOpen] = useState(false);
   // Open by default while the work is happening, so a slow run shows what it is
   // doing rather than a collapsed line counting up. Closed once it is done, which
@@ -68,12 +78,12 @@ export default function ActivityPanel({ steps, live, renderMarkdown, totalSecond
 
   const settled = useMemo(() => closeSuperseded(mergeRepeatedThoughts(steps)), [steps]);
   const rows = useMemo(() => buildRows(settled), [settled]);
-  const totals = usePanelTotals(settled, live, totalSeconds);
+  const totals = usePanelTotals(settled, live, totalSeconds, startedAt);
 
   if (steps.length === 0) return null;
 
   return (
-    <section className="mb-3 max-w-2xl" aria-label="Reasoning and tools">
+    <section className="mb-3 min-w-0 max-w-2xl overflow-hidden" aria-label="Reasoning and tools">
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
@@ -289,7 +299,11 @@ function ToolRow({ steps, live }: { steps: ToolStep[]; live: boolean }) {
   const figures = (
     <>
       {outcome.text && (
-        <span className={`shrink-0 text-[var(--quiet)] ${outcome.failed ? "text-[var(--danger)]" : ""}`}>
+        // Shrinks and truncates like the detail above it. It used to be
+        // `shrink-0`, so its width was its content's -- a long command's first
+        // line or a file's created path pushed the row past the bubble and the
+        // transcript grew a horizontal scrollbar.
+        <span className={`min-w-0 truncate text-[var(--quiet)] ${outcome.failed ? "text-[var(--danger)]" : ""}`}>
           {outcome.text}
         </span>
       )}
@@ -349,7 +363,7 @@ function ToolRow({ steps, live }: { steps: ToolStep[]; live: boolean }) {
                   <span className="shrink-0 text-[var(--muted)]">{step.label}</span>
                   <span className="min-w-0 truncate text-[var(--quiet)]">{step.detail}</span>
                   {step.cached && <span className="shrink-0 text-[var(--quiet)]">cached</span>}
-                  {step.failed && <span className="shrink-0 text-[var(--danger)]">{step.outcome}</span>}
+                  {step.failed && <span className="min-w-0 max-w-[40%] truncate text-[var(--danger)]">{step.outcome}</span>}
                 </li>
               ))}
             </ul>
@@ -662,10 +676,12 @@ function groupOutcome(steps: ToolStep[]): { text: string; failed: boolean } {
  *
  * Two fallbacks, in order of how much they can be trusted:
  *
- * - **Live, no measured figure yet.** The wall clock from the earliest step that
- *   began, so a run in progress still moves. Undercounts the wait before the first
- *   step, which is the honest direction to err in: a panel that counts up from the
- *   first thing that happened cannot overstate it.
+ * - **Live, no measured figure yet.** The wall clock from the moment the run
+ *   started, so the header counts up every second whether the model is thinking,
+ *   streaming or reading. Counting from the earliest *live* step instead was the
+ *   bug: closing a step deletes its start, so the only start left was the one
+ *   currently open, and `Math.max(summed, elapsed)` then printed the closed step
+ *   sum -- a number that only moves when a step closes.
  * - **Nothing to sum.** A reply whose every step is closed and which has no
  *   measured total falls back to the step sum rather than reporting nothing,
  *   because a header reading "Worked for" with no figure is worse than a rough
@@ -685,6 +701,7 @@ function usePanelTotals(
   steps: ActivityStep[],
   live: boolean,
   totalSeconds?: number,
+  startedAt?: number,
 ): { seconds: number; toolCount: number } {
   const now = useTick(live);
   let toolCount = 0;
@@ -699,11 +716,15 @@ function usePanelTotals(
   if (totalSeconds !== undefined) return { seconds: totalSeconds, toolCount };
   if (!live) return { seconds: summed, toolCount };
 
-  // Running, so nothing is measured yet. Count from the first step that has
-  // begun rather than from zero: a panel showing "0s" for a run that has been
-  // going for eight seconds looks broken, whereas starting at the first step
-  // only undercounts the untimed moment before it. A note is skipped because it
-  // never had a start -- it is text, not work.
+  // The run's own start, when the caller has one. This is the whole figure while
+  // live: it includes the wait before the first step and does not reset when a
+  // step closes.
+  if (startedAt !== undefined && startedAt > 0) {
+    return { seconds: Math.max(0, (now - startedAt) / 1000), toolCount };
+  }
+
+  // No anchor (a run adopted under an older shape): start from the first step that
+  // has begun rather than from zero, so the header is not stuck at "0s".
   const started = steps
     .filter((step) => step.kind !== "note")
     .map((step) => step.startedAt)

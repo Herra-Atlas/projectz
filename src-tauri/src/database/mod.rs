@@ -27,7 +27,7 @@ pub struct Database {
 /// both refer to this, so adding a migration is one edit here plus one in
 /// `migrate`. Before this existed, each new migration silently broke a test that
 /// had hardcoded the old number.
-pub const LATEST_SCHEMA_VERSION: i64 = 18;
+pub const LATEST_SCHEMA_VERSION: i64 = 19;
 
 /// The current time as UTC ISO-8601, the format every timestamp uses.
 ///
@@ -618,9 +618,17 @@ impl Database {
         let mut cached_total: Option<i64> = None;
         if let Some(messages) = messages {
             for message in messages.iter() {
-                prompt_total += message["metrics"]["prompt_tokens"].as_i64().unwrap_or(0);
-                completion_total += message["metrics"]["completion_tokens"]
+                // The reply's spend, not its last round's context. A tool-using
+                // reply re-sends the whole conversation on every round, so the
+                // final round's figure is a fraction of what was billed -- and the
+                // statistics page sums this rollup for its token totals.
+                prompt_total += message["metrics"]["used_prompt_tokens"]
                     .as_i64()
+                    .or_else(|| message["metrics"]["prompt_tokens"].as_i64())
+                    .unwrap_or(0);
+                completion_total += message["metrics"]["used_completion_tokens"]
+                    .as_i64()
+                    .or_else(|| message["metrics"]["completion_tokens"].as_i64())
                     .unwrap_or(0);
                 if let Some(cached) = message["metrics"]["cached_tokens"].as_i64() {
                     cached_total = Some(cached);
@@ -680,6 +688,11 @@ impl Database {
                 // provider cached nothing" are different facts, and only the
                 // first one should average into a hit-rate figure.
                 let cached_tokens = message["metrics"]["cached_tokens"].as_i64();
+                // The reply's whole spend, beside the final round's figure above.
+                // Written as columns so the statistics aggregates read integers
+                // instead of parsing one JSON blob per reply.
+                let used_prompt_tokens = message["metrics"]["used_prompt_tokens"].as_i64();
+                let used_completion_tokens = message["metrics"]["used_completion_tokens"].as_i64();
                 let generation_seconds = message["metrics"]["generation_seconds"].as_f64();
                 let prompt_seconds = message["metrics"]["prompt_seconds"].as_f64();
                 let rate_estimated = message["metrics"]["generation_rate_estimated"].as_bool();
@@ -703,7 +716,7 @@ impl Database {
                         json(&stored)
                     })
                     .transpose()?;
-                tx.execute("INSERT INTO messages (id,session_id,ordinal,role,content,created_at,model_id,provider_id,metrics_json,prompt_tokens,completion_tokens,cached_tokens,ttft_ms,total_latency_ms,reasoning,tool_json,generation_seconds,prompt_seconds,generation_rate_estimated,activity_json,hidden) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21) ON CONFLICT(id) DO UPDATE SET content=excluded.content,model_id=excluded.model_id,provider_id=excluded.provider_id,metrics_json=excluded.metrics_json,prompt_tokens=excluded.prompt_tokens,completion_tokens=excluded.completion_tokens,cached_tokens=excluded.cached_tokens,ttft_ms=excluded.ttft_ms,total_latency_ms=excluded.total_latency_ms,reasoning=excluded.reasoning,tool_json=excluded.tool_json,generation_seconds=excluded.generation_seconds,prompt_seconds=excluded.prompt_seconds,generation_rate_estimated=excluded.generation_rate_estimated,activity_json=excluded.activity_json,hidden=excluded.hidden", params![
+                tx.execute("INSERT INTO messages (id,session_id,ordinal,role,content,created_at,model_id,provider_id,metrics_json,prompt_tokens,completion_tokens,cached_tokens,ttft_ms,total_latency_ms,reasoning,tool_json,generation_seconds,prompt_seconds,generation_rate_estimated,activity_json,hidden,used_prompt_tokens,used_completion_tokens) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23) ON CONFLICT(id) DO UPDATE SET content=excluded.content,model_id=excluded.model_id,provider_id=excluded.provider_id,metrics_json=excluded.metrics_json,prompt_tokens=excluded.prompt_tokens,completion_tokens=excluded.completion_tokens,cached_tokens=excluded.cached_tokens,ttft_ms=excluded.ttft_ms,total_latency_ms=excluded.total_latency_ms,reasoning=excluded.reasoning,tool_json=excluded.tool_json,generation_seconds=excluded.generation_seconds,prompt_seconds=excluded.prompt_seconds,generation_rate_estimated=excluded.generation_rate_estimated,activity_json=excluded.activity_json,hidden=excluded.hidden,used_prompt_tokens=excluded.used_prompt_tokens,used_completion_tokens=excluded.used_completion_tokens", params![
                     format!("{id}:{index}"),
                     id,
                     index as i64,
@@ -729,6 +742,8 @@ impl Database {
                     activity,
                     // Stored as 0/1; absent on any message that predates this.
                     message["hidden"].as_bool().unwrap_or(false),
+                    used_prompt_tokens,
+                    used_completion_tokens,
                 ]).map_err(|error| error.to_string())?;
             }
             // A conversation can shrink (a cleared or edited transcript). Rows
@@ -1654,6 +1669,56 @@ fn migrate(connection: &mut Connection) -> Result<(), String> {
              PRAGMA user_version={LATEST_SCHEMA_VERSION};"
         ))
         .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+    }
+    // What each reply *spent*, beside the last round's context.
+    //
+    // `messages.prompt_tokens` is the reply's final request, and a tool-using
+    // reply re-sends the whole conversation on every round -- so that figure is a
+    // fraction of what was billed. The spend has been recorded in `metrics_json`
+    // all along (`used_prompt_tokens` / `used_completion_tokens`), but every
+    // aggregate read the column and the statistics page therefore undercounted by
+    // the number of tool rounds. These two columns make the real figure readable
+    // as an integer, and the session rollup is recomputed from it so the
+    // Conversations table and the headline cannot disagree.
+    if version < 19 {
+        let tx = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        // Guarded like the `hidden` migration: re-running against a database that
+        // already has the column must be a no-op rather than a failed ALTER.
+        for column in ["used_prompt_tokens", "used_completion_tokens"] {
+            let has_column: i64 = tx
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name='{column}'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if has_column == 0 {
+                tx.execute_batch(&format!(
+                    "ALTER TABLE messages ADD COLUMN {column} INTEGER;"
+                ))
+                .map_err(|error| error.to_string())?;
+            }
+        }
+        tx.execute_batch(
+            "UPDATE messages SET used_prompt_tokens = CAST(json_extract(metrics_json,'$.used_prompt_tokens') AS INTEGER)
+                WHERE used_prompt_tokens IS NULL AND metrics_json IS NOT NULL AND json_valid(metrics_json);
+             UPDATE messages SET used_completion_tokens = CAST(json_extract(metrics_json,'$.used_completion_tokens') AS INTEGER)
+                WHERE used_completion_tokens IS NULL AND metrics_json IS NOT NULL AND json_valid(metrics_json);
+             -- The rollup is the spend too, with the same fallback for a row that
+             -- never reported one: an old single-request reply is exact, and an
+             -- old tool-heavy one stays as undercounted as it always was.
+             UPDATE sessions SET
+                 prompt_tokens = (SELECT COALESCE(SUM(COALESCE(used_prompt_tokens, prompt_tokens)), 0) FROM messages WHERE session_id = sessions.id),
+                 completion_tokens = (SELECT COALESCE(SUM(COALESCE(used_completion_tokens, completion_tokens)), 0) FROM messages WHERE session_id = sessions.id);",
+        )
+        .map_err(|error| error.to_string())?;
+        tx.execute_batch(&format!("PRAGMA user_version={LATEST_SCHEMA_VERSION};"))
+            .map_err(|error| error.to_string())?;
         tx.commit().map_err(|error| error.to_string())?;
     }
     Ok(())

@@ -84,6 +84,38 @@ mod tests {
         assert_eq!(usage["used_completion_tokens"], 12);
     }
 
+    /// The cache figure a chart may compare with the context is the first round's,
+    /// for the same reason `context_tokens` is: the last round's prompt carries
+    /// tool results that are never stored, so plotting it beside the starting
+    /// context drew a peak the next turn could not repeat.
+    #[test]
+    fn the_first_rounds_cache_figure_is_kept_when_later_rounds_overwrite_the_rest() {
+        let mut usage = Value::Null;
+        merge_round_usage(
+            &mut usage,
+            &json!({"prompt_tokens": 100, "cached_tokens": 90, "completion_tokens": 5}),
+        );
+        merge_round_usage(
+            &mut usage,
+            &json!({"prompt_tokens": 400, "cached_tokens": 380, "completion_tokens": 7}),
+        );
+        assert_eq!(usage["context_tokens"], 100);
+        assert_eq!(usage["context_cached_tokens"], 90);
+        // The last-wins pair still describes the final request, which is what the
+        // cache-hit rate is a ratio of.
+        assert_eq!(usage["prompt_tokens"], 400);
+        assert_eq!(usage["cached_tokens"], 380);
+    }
+
+    /// A provider that reported no cache figure leaves the key absent rather than
+    /// claiming nothing was cached.
+    #[test]
+    fn no_reported_cache_figure_stays_absent() {
+        let mut usage = Value::Null;
+        merge_round_usage(&mut usage, &json!({"prompt_tokens": 100}));
+        assert!(usage.get("context_cached_tokens").is_none());
+    }
+
     /// A level the provider listed goes out byte for byte. Providers spell these
     /// differently — `none` on one, `off` on another — so any mapping here is a
     /// guess that fails with HTTP 400 on the next provider.
@@ -412,6 +444,12 @@ pub async fn stream_chat(
         // approaching the window, and the answer's own figure does not exist until
         // the reply is over -- by which point it is too late to be useful.
         if let Some(prompt_tokens) = round_usage.get("prompt_tokens").and_then(Value::as_u64) {
+            // The merged figures, not only the round's prompt. A reply that dies
+            // mid-run has no `completed` event to carry them, and the frontend
+            // stores what the last of these said on the failed reply -- without
+            // them a 22-step run cost nothing in the statistics.
+            let mut metrics = usage.clone();
+            metrics["prompt_tokens"] = json!(prompt_tokens);
             on_event(ChatEvent {
                 run_id: run_id.to_string(),
                 session_id: None,
@@ -419,7 +457,7 @@ pub async fn stream_chat(
                 kind: "usage".into(),
                 text: None,
                 error: None,
-                metrics: Some(json!({ "prompt_tokens": prompt_tokens })),
+                metrics: Some(metrics),
             });
         }
 
@@ -721,11 +759,22 @@ async fn summarise_dropped(
 /// from, because this reply's own tool rounds are never stored and so are not in
 /// the next request. Deciding from the last round made a tool-heavy reply look like
 /// a nearly-full window and trimmed a conversation that had not grown.
+///
+/// `context_cached_tokens` is recorded the same way, from the same first round, so
+/// the two can be read together. `cached_tokens` is last-wins and therefore belongs
+/// to the final round, whose prompt is inflated by results that are never stored --
+/// plotting it beside `context_tokens` drew a spike the next turn could not repeat,
+/// and made a working cache look like a collapsing context.
 fn merge_round_usage(usage: &mut Value, round: &Value) {
     if usage.is_null() {
         *usage = round.clone();
-        if let (Some(target), Some(start)) = (usage.as_object_mut(), round.get("prompt_tokens")) {
-            target.insert("context_tokens".to_string(), start.clone());
+        if let Some(target) = usage.as_object_mut() {
+            if let Some(start) = round.get("prompt_tokens") {
+                target.insert("context_tokens".to_string(), start.clone());
+            }
+            if let Some(cached) = round.get("cached_tokens") {
+                target.insert("context_cached_tokens".to_string(), cached.clone());
+            }
         }
     } else if let (Some(target), Some(values)) = (usage.as_object_mut(), round.as_object()) {
         // Later rounds carry the final answer's throughput, so they win.

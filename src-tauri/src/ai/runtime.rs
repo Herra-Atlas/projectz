@@ -832,14 +832,16 @@ impl AiRuntime {
             )
             .await;
             match attempt {
-                Err(reason)
-                    if reason != crate::ai::STOPPED
-                        && retries < RETRY_DELAYS_SECONDS.len()
-                        && produced.load(std::sync::atomic::Ordering::Relaxed) == 0
-                        && tool_calls.load(std::sync::atomic::Ordering::Relaxed) == 0 =>
-                {
-                    let delay = RETRY_DELAYS_SECONDS[retries];
-                    retries += 1;
+                Err(reason) => {
+                    let Some((next, delay)) = retry_step(
+                        &reason,
+                        retries,
+                        produced.load(std::sync::atomic::Ordering::Relaxed),
+                        tool_calls.load(std::sync::atomic::Ordering::Relaxed),
+                    ) else {
+                        break Err(reason);
+                    };
+                    retries = next;
                     tracing::info!(run_id = %run_id, attempt = retries, delay, %reason, "retrying a reply that changed nothing");
                     on_event(ChatEvent {
                         run_id: run_id_clone.clone(),
@@ -932,11 +934,39 @@ impl AiRuntime {
     }
 }
 
+/// Whether a failed attempt may be retried, and after how long.
+///
+/// `None` means the failure is final. The rule is the one in
+/// [`crate::ai::RETRY_DELAYS_SECONDS`]: only work that changed nothing may be
+/// re-sent, because a reply that streamed a token or ran a tool has already made
+/// a change a replay would duplicate. A stop is never a failure to retry.
+///
+/// Shared with a sub-agent's own run, which calls `stream_chat` directly and so
+/// gets no ladder unless it applies this itself. One decision means the two can
+/// never drift about what "changed nothing" means.
+pub(crate) fn retry_step(
+    reason: &str,
+    retries: usize,
+    produced: usize,
+    tool_calls: usize,
+) -> Option<(usize, u64)> {
+    let delays = crate::ai::RETRY_DELAYS_SECONDS;
+    (reason != crate::ai::STOPPED && retries < delays.len() && produced == 0 && tool_calls == 0)
+        .then(|| (retries + 1, delays[retries]))
+}
+
 /// Waits before a retry, waking early if the run was stopped.
 ///
 /// Polled in short slices rather than one long sleep, so pressing Stop during a
 /// seven-second wait ends the reply at once instead of parking it first.
-async fn wait_before_retry(seconds: u64, cancelled: &Arc<std::sync::atomic::AtomicBool>) -> bool {
+///
+/// `pub(crate)` because a sub-agent applies the same ladder to its own run; the
+/// wait and its stop check are one behaviour, and a second implementation would
+/// be a second place for it to drift.
+pub(crate) async fn wait_before_retry(
+    seconds: u64,
+    cancelled: &Arc<std::sync::atomic::AtomicBool>,
+) -> bool {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(seconds);
     loop {
         if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
@@ -953,6 +983,26 @@ async fn wait_before_retry(seconds: u64, cancelled: &Arc<std::sync::atomic::Atom
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ladder's decision, on its own. Only an attempt that changed nothing is
+    /// offered another try: a streamed token or a tool call is work a replay would
+    /// duplicate, and a stop is the user ending the run rather than a failure.
+    #[test]
+    fn a_retry_is_offered_only_after_an_attempt_that_changed_nothing() {
+        assert_eq!(
+            retry_step("boom", 0, 0, 0),
+            Some((1, RETRY_DELAYS_SECONDS[0]))
+        );
+        assert_eq!(
+            retry_step("boom", 1, 0, 0),
+            Some((2, RETRY_DELAYS_SECONDS[1]))
+        );
+        assert_eq!(retry_step("boom", 0, 1, 0), None, "the answer had begun");
+        assert_eq!(retry_step("boom", 0, 0, 1), None, "a tool had run");
+        assert_eq!(retry_step(crate::ai::STOPPED, 0, 0, 0), None);
+        // The ladder ends after its last delay rather than spinning.
+        assert_eq!(retry_step("boom", RETRY_DELAYS_SECONDS.len(), 0, 0), None);
+    }
 
     /// Runtime backed by a throwaway database, with no local model loaded.
     /// `label` keeps each test on its own file so they can run in parallel.

@@ -52,6 +52,8 @@ export type AiEvent = {
         the loop rather than reported by the provider. */
     requests?: number;
     cached_tokens?: number;
+    /** The cache figure for the same first request `context_tokens` measures. */
+    context_cached_tokens?: number;
     prompt_eval_tokens_per_second?: number;
     generation_tokens_per_second?: number;
     index?: number;
@@ -184,6 +186,16 @@ export type BackgroundRun = {
   requestStartedAt: number;
   generationStartedAt: number;
   /**
+   * When the run began, as a `Date.now()` reading.
+   *
+   * The activity panel's live header counts from this, and it rides on the run so
+   * switching conversations and coming back restores the same clock rather than
+   * starting from the moment the user returned. Separate from
+   * `requestStartedAt`, which is `performance.now()` and only serves the stored
+   * metrics.
+   */
+  startedAt: number;
+  /**
    * The prompt size the provider last reported for a round of this run.
    *
    * On the run rather than only in state because a run keeps going while the user
@@ -193,6 +205,16 @@ export type BackgroundRun = {
    * sends none.
    */
   promptTokens?: number;
+  /**
+   * The last merged usage the provider reported for this run.
+   *
+   * A finished reply carries its figures on the `completed` event, but a run that
+   * fails mid-way has no such event -- so without keeping the last `usage` event
+   * the work it already did would be stored as having cost nothing. Undefined
+   * until a round reports usage, which is the case for a provider that reports
+   * none.
+   */
+  usage?: AiEvent["metrics"];
   completionId?: string;
   localModel: boolean;
   isReasoning: boolean;

@@ -1,9 +1,8 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ChartNoAxesColumn, ChartSpline, Check, ChevronLeft, ChevronRight, CircleDot, Clock, Database, MessageSquareText, MoreHorizontal, Pin, Pencil, Send, Settings2, Trash2, X } from "lucide-react";
+import { ChartNoAxesColumn, ChartSpline, Check, ChevronLeft, ChevronRight, CircleDot, Clock, Database, LoaderCircle, MessageSquareText, MoreHorizontal, Pin, Pencil, Send, Settings2, Trash2, X } from "lucide-react";
 import type { ChatSessionHeader, SessionActivity, SessionRunStatus } from "../features/chat/types";
 import { SESSION_DOT_COLORS, SESSION_DOT_DEFAULT, SESSION_DOT_DONE, SESSION_DOT_ERROR } from "../features/chat/types";
-import LiveSpinner from "./LiveSpinner";
 import ProjectZCrown from "./ProjectZCrown";
 
 const MENU_WIDTH = 200;
@@ -319,7 +318,11 @@ export default function Sidebar({
         </button>}
         <div className="relative shrink-0">
           {isLive && !menuOpen ? <>
-            <span role="status" aria-label="AI is writing" title="AI is writing" className="grid size-8 place-items-center text-[var(--muted)] group-hover:hidden group-focus-within:hidden"><LiveSpinner gradientId={`pz-spin-${session.id}`} /></span>
+            {/* The same spinner the activity panel uses for "Thought for":
+                `LoaderCircle` with `animate-spin`. The old `LiveSpinner` was a
+                gradient-stroked dashed ring, which at 18px read as a blurry
+                smear rather than a turning arc. */}
+            <span role="status" aria-label="AI is writing" title="AI is writing" className="grid size-8 place-items-center text-[var(--quiet)] group-hover:hidden group-focus-within:hidden"><LoaderCircle size={14} className="animate-spin" /></span>
             <button ref={(el) => { if (el) anchorButtons.current.set(session.id, el); else anchorButtons.current.delete(session.id); }} type="button" onClick={() => toggleMenu(session.id)} aria-label={`Actions for ${session.title}`} aria-expanded={false} title="Session actions" className="hidden size-8 place-items-center rounded-md text-[var(--quiet)] hover:bg-[var(--page)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-[var(--accent)] group-hover:grid group-focus-within:grid">
               <MoreHorizontal size={16} />
             </button>

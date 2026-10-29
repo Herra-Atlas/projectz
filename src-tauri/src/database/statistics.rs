@@ -182,6 +182,19 @@ const MODEL_SERIES_LIMIT: usize = 6;
 const REPLY_REQUESTS: &str =
     "COALESCE(CAST(json_extract(metrics_json,'$.requests') AS INTEGER), 1)";
 
+/// What a reply **spent** on input, falling back to its last round for rows
+/// written before the spend was recorded.
+///
+/// `prompt_tokens` is the final round's figure. A tool-using reply re-sends the
+/// whole conversation on every round, so the sum is several times the last one --
+/// and it is the figure a "total tokens" card means. The columns are written
+/// beside `prompt_tokens` from the same metrics (see `save_chat_session`), so an
+/// aggregate reads integers rather than parsing a JSON blob per row.
+const REPLY_PROMPT_TOKENS: &str = "COALESCE(used_prompt_tokens, prompt_tokens)";
+
+/// The output half of the same question.
+const REPLY_COMPLETION_TOKENS: &str = "COALESCE(used_completion_tokens, completion_tokens)";
+
 /// Counts a column that may be NULL, treating NULL as zero so a conversation
 /// that never reported tokens contributes a zero rather than dropping out.
 fn sum_or_zero(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<i64> {
@@ -230,8 +243,8 @@ fn previous_usage(
                      COALESCE(SUM(role = 'user'), 0),
                      COALESCE(SUM(role = 'assistant'), 0),
                      COALESCE(SUM(role = 'tool'), 0),
-                     COALESCE(SUM(prompt_tokens), 0),
-                     COALESCE(SUM(completion_tokens), 0),
+                     COALESCE(SUM({REPLY_PROMPT_TOKENS}), 0),
+                     COALESCE(SUM({REPLY_COMPLETION_TOKENS}), 0),
                      COALESCE(SUM(CASE WHEN role = 'assistant' THEN {REPLY_REQUESTS} ELSE 0 END), 0),
                      COALESCE(SUM(cached_tokens), 0),
                      COALESCE(SUM(CASE WHEN cached_tokens IS NOT NULL THEN prompt_tokens ELSE 0 END), 0),
@@ -310,12 +323,15 @@ fn previous_usage(
 /// construction rather than by two calculations agreeing.
 ///
 /// Almost every figure is read from a real column. `save_chat_session` writes
-/// the per-reply metrics into `messages.prompt_tokens` / `completion_tokens` and
-/// maintains `sessions.prompt_tokens` / `completion_tokens` as a rollup, so each
-/// aggregate is a numeric sum SQLite can serve from the `created_at` index. Two
-/// exceptions read JSON, both for figures that have no column: `requests` (the
-/// run's own count of calls, see `REPLY_REQUESTS`) and the tool calls in
-/// `activity_json`, which are steps inside a reply rather than turns.
+/// each reply's spend into `messages.used_prompt_tokens` /
+/// `messages.used_completion_tokens` (and its last round into `prompt_tokens` /
+/// `completion_tokens`) and maintains the same spend on the `sessions` rollup, so
+/// each aggregate is a numeric sum SQLite can serve from the `created_at` index.
+/// The spend, not the last round's context, is what a token total means: a
+/// tool-using reply re-sends the conversation on every round. Two exceptions read
+/// JSON, both for figures that have no column: `requests` (the run's own count of
+/// calls, see `REPLY_REQUESTS`) and the tool calls in `activity_json`, which are
+/// steps inside a reply rather than turns.
 pub fn build_report(
     connection: &Connection,
     since: &str,
@@ -356,8 +372,8 @@ pub fn build_report(
     let (prompt_tokens, completion_tokens, requests) = connection
         .query_row(
             &format!(
-                "SELECT COALESCE(SUM(prompt_tokens), 0),
-                        COALESCE(SUM(completion_tokens), 0),
+                "SELECT COALESCE(SUM({REPLY_PROMPT_TOKENS}), 0),
+                        COALESCE(SUM({REPLY_COMPLETION_TOKENS}), 0),
                         COALESCE(SUM(CASE WHEN role = 'assistant' THEN {REPLY_REQUESTS} ELSE 0 END), 0)
                  FROM messages WHERE substr(created_at,1,10) >= ?1"
             ),
@@ -381,11 +397,11 @@ pub fn build_report(
     let mut timeline_statement = connection
         .prepare(&format!(
             "SELECT {bucket_sql} AS bucket,
-                    COALESCE(SUM(prompt_tokens), 0),
-                    COALESCE(SUM(completion_tokens), 0),
+                    COALESCE(SUM({REPLY_PROMPT_TOKENS}), 0),
+                    COALESCE(SUM({REPLY_COMPLETION_TOKENS}), 0),
                     COALESCE(SUM(CASE WHEN role = 'assistant' THEN {REPLY_REQUESTS} ELSE 0 END), 0)
              FROM messages
-             WHERE substr(created_at,1,10) >= ?1 AND completion_tokens IS NOT NULL
+             WHERE substr(created_at,1,10) >= ?1 AND {REPLY_COMPLETION_TOKENS} IS NOT NULL
              GROUP BY bucket ORDER BY bucket ASC"
         ))
         .map_err(|error| error.to_string())?;
@@ -463,8 +479,8 @@ pub fn build_report(
         .prepare(&format!(
             "SELECT model_id, COALESCE(provider_id, ''), COUNT(*),
                     COALESCE(SUM({REPLY_REQUESTS}), 0),
-                    COALESCE(SUM(prompt_tokens), 0),
-                    COALESCE(SUM(completion_tokens), 0)
+                    COALESCE(SUM({REPLY_PROMPT_TOKENS}), 0),
+                    COALESCE(SUM({REPLY_COMPLETION_TOKENS}), 0)
              FROM messages
              WHERE substr(created_at,1,10) >= ?1 AND model_id IS NOT NULL AND role = 'assistant'
              GROUP BY model_id, provider_id
@@ -497,19 +513,19 @@ pub fn build_report(
         .prepare(&format!(
             "SELECT {bucket_sql} AS bucket, model_id, COALESCE(provider_id, ''),
                     COALESCE(SUM({REPLY_REQUESTS}), 0),
-                    COALESCE(SUM(prompt_tokens), 0),
-                    COALESCE(SUM(completion_tokens), 0)
+                    COALESCE(SUM({REPLY_PROMPT_TOKENS}), 0),
+                    COALESCE(SUM({REPLY_COMPLETION_TOKENS}), 0)
              FROM messages
              WHERE substr(created_at,1,10) >= ?1
                    AND model_id IS NOT NULL
                    AND role = 'assistant'
-                   AND completion_tokens IS NOT NULL
+                   AND {REPLY_COMPLETION_TOKENS} IS NOT NULL
                    AND model_id IN (
                        SELECT model_id FROM messages
                        WHERE substr(created_at,1,10) >= ?1
                              AND model_id IS NOT NULL AND role = 'assistant'
                        GROUP BY model_id
-                       ORDER BY SUM(COALESCE(completion_tokens, 0)) DESC
+                       ORDER BY SUM(COALESCE({REPLY_COMPLETION_TOKENS}, 0)) DESC
                        LIMIT {model_series_limit}
                    )
              GROUP BY bucket, model_id, provider_id
@@ -695,8 +711,8 @@ mod tests {
     use rusqlite::params;
 
     /// Schema covering only what the report queries touch, matching the real
-    /// columns `save_chat_session` writes: per-reply token counts on
-    /// `messages`, and the rollup on `sessions`.
+    /// columns `save_chat_session` writes: per-reply token counts and the reply's
+    /// spend on `messages`, and the rollup on `sessions`.
     fn fixture() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
         connection
@@ -717,6 +733,11 @@ mod tests {
                      provider_id TEXT,
                      prompt_tokens INTEGER,
                      completion_tokens INTEGER,
+                     -- What the reply spent across every tool round. Nullable so a
+                     -- row written before the column existed falls back to the
+                     -- last round's figure above.
+                     used_prompt_tokens INTEGER,
+                     used_completion_tokens INTEGER,
                      -- Nullable with no default on purpose: NULL is how a row
                      -- records that the provider reported no cache figure, and a
                      -- default of 0 would turn an unknown into a fact. See
@@ -1038,6 +1059,50 @@ mod tests {
         assert_eq!(report.prompt_tokens, 160);
         assert_eq!(report.completion_tokens, 60);
         assert_eq!(report.total_tokens, 220);
+    }
+
+    /// The reply's *spend* is the sum of every round it made, and the columns
+    /// `prompt_tokens` / `completion_tokens` hold only its last one. A report that
+    /// read those counted a tool-using reply as a fraction of what it cost, which
+    /// is why a long agent conversation showed 1.2M against millions actually
+    /// spent.
+    #[test]
+    fn totals_prefer_the_reply_spend_over_its_last_round() {
+        let connection = fixture();
+        insert_session(&connection, "s1", "First", "2026-10-01T10:00:00.000Z");
+        insert_message(
+            &connection,
+            "m1",
+            "s1",
+            "assistant",
+            "2026-10-01T10:00:05.000Z",
+            Some("gpt"),
+            Some("openai"),
+            Some(200),
+            Some(40),
+        );
+        connection
+            .execute(
+                "UPDATE messages SET used_prompt_tokens=1200, used_completion_tokens=140 WHERE id='m1'",
+                [],
+            )
+            .unwrap();
+
+        let report = build_report(
+            &connection,
+            "2026-10-01",
+            None,
+            "30d",
+            "substr(created_at,1,10)",
+        )
+        .unwrap();
+
+        assert_eq!(report.prompt_tokens, 1200);
+        assert_eq!(report.completion_tokens, 140);
+        assert_eq!(report.total_tokens, 1340);
+        // The per-model and per-day series must read the same figure as the card.
+        assert_eq!(report.models[0].prompt_tokens, 1200);
+        assert_eq!(report.timeline[0].prompt_tokens, 1200);
     }
 
     #[test]

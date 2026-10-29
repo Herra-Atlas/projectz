@@ -76,7 +76,8 @@ export type ContextPoint = {
       so a drop is a trim rather than an ordinary turn. */
   contextTokens: number;
   completionTokens: number;
-  /** What the provider reported reading from its cache for this reply. */
+  /** The provider's cache figure for that same first request, so the two are
+      comparable. Absent on replies saved before it was recorded. */
   cachedTokens: number | null;
 };
 
@@ -220,7 +221,13 @@ export function computeSessionStats(session: ChatSession): SessionStats {
           index: stats.assistantMessages,
           contextTokens,
           completionTokens,
-          cachedTokens: metrics.cached_tokens ?? null,
+          // The first round's cache figure, not the last round's: a tool round
+          // inflates its prompt with results that are never stored, so the two
+          // series must describe the same request or the chart shows a peak the
+          // next turn cannot repeat. An old reply has only the last-round figure,
+          // and mixing the two is what made a working cache look like a
+          // collapsing context.
+          cachedTokens: metrics.context_cached_tokens ?? null,
         });
       }
     }

@@ -110,6 +110,39 @@ pub fn build_run(record: RunRecord<'_>) -> Value {
     })
 }
 
+/// The row written the moment a sub-agent starts.
+///
+/// `build_run` is written when the loop returns, so a run whose process ended --
+/// the app quit, the machine restarted, the window was closed -- left no record
+/// at all: the task was gone and the panel had nothing to show, not even that an
+/// agent had been asked. This writes the turn up front. The finished run saves the
+/// same id, and the transcript is upserted in place with the reply appended.
+pub fn build_started(
+    id: &str,
+    label: &str,
+    prompt: &str,
+    parent_session: Option<&str>,
+    model: &str,
+    provider: &str,
+    started_at: &str,
+) -> Value {
+    json!({
+        "id": id,
+        "title": if label.is_empty() { title_from(prompt) } else { label.to_string() },
+        "createdAt": started_at,
+        "updatedAt": utc_now(),
+        "kind": "subagent",
+        "parentSessionId": parent_session,
+        "modelId": model,
+        "providerId": provider,
+        // Present for the same reason `build_run` carries it: saving a session
+        // rebuilds the metadata blob from these keys, and an absent one reads
+        // back as the default rather than as what it was.
+        "mode": "agent",
+        "messages": [{ "role": "user", "content": prompt }],
+    })
+}
+
 /// A short title from a task when no label was given.
 fn title_from(prompt: &str) -> String {
     let first = prompt.lines().next().unwrap_or_default().trim();
@@ -120,7 +153,6 @@ fn title_from(prompt: &str) -> String {
         trimmed
     }
 }
-
 /// Folds the event stream into the activity steps the panel renders.
 ///
 /// Shared with the job runner, which has no frontend to assemble them: a scheduled
