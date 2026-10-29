@@ -269,8 +269,8 @@ pub(crate) fn platform_command(command: &str) -> Command {
 
 /// Everything that makes a command a *script* rather than a program and flags.
 const SHELL_SYNTAX: &[char] = &[
-    ';', '&', '|', '<', '>', '"', '\'', '`', '$', '*', '?', '(', ')', '{', '}', '[', ']', '#', '\n',
-    '\r',
+    ';', '&', '|', '<', '>', '"', '\'', '`', '$', '*', '?', '(', ')', '{', '}', '[', ']', '#',
+    '\n', '\r',
 ];
 
 /// The command as a direct spawn, when it is only a program and its arguments.

@@ -193,3 +193,63 @@ fn a_scalar_of_every_width_leaves_the_reader_in_step() {
     assert_eq!(shape.head_count_kv, 16);
     assert_eq!(shape.layer_count, 24);
 }
+
+/// The capabilities a model's files declare are read from their own keys.
+///
+/// The two halves live in different files in practice -- the encoders in the
+/// projector, the audio-out marker in the chat template -- but one header can
+/// state both, and the reader must take them without confusing a bool for a
+/// scalar (a bool is one byte; reading it as a u32 misaligns everything after).
+#[test]
+fn capabilities_are_read_from_the_encoders_and_the_template() {
+    fn string(bytes: &mut Vec<u8>, value: &str) {
+        bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(value.as_bytes());
+    }
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"GGUF");
+    bytes.extend_from_slice(&3u32.to_le_bytes());
+    bytes.extend_from_slice(&0u64.to_le_bytes());
+    bytes.extend_from_slice(&3u64.to_le_bytes());
+
+    string(&mut bytes, "clip.has_vision_encoder");
+    bytes.extend_from_slice(&7u32.to_le_bytes());
+    bytes.push(1);
+    string(&mut bytes, "clip.has_audio_encoder");
+    bytes.extend_from_slice(&7u32.to_le_bytes());
+    bytes.push(1);
+    string(&mut bytes, "tokenizer.chat_template");
+    bytes.extend_from_slice(&8u32.to_le_bytes());
+    string(&mut bytes, "{{ '<|audio_out|>' }}<|im_end|>");
+
+    let capabilities = read_capabilities_from_bytes(&bytes).expect("header was read");
+    assert_eq!(capabilities.sees_images, Some(true));
+    assert_eq!(capabilities.hears_audio, Some(true));
+    assert_eq!(capabilities.speaks, Some(true));
+}
+
+/// A template with no audio-output marker is a model that cannot speak.
+///
+/// `Some(false)` rather than `None`: the file answered the question, and the
+/// answer is no. Collapsing those two is what lets a badge claim a capability
+/// nothing ever checked.
+#[test]
+fn a_template_without_audio_out_means_no_speech() {
+    fn string(bytes: &mut Vec<u8>, value: &str) {
+        bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(value.as_bytes());
+    }
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"GGUF");
+    bytes.extend_from_slice(&3u32.to_le_bytes());
+    bytes.extend_from_slice(&0u64.to_le_bytes());
+    bytes.extend_from_slice(&1u64.to_le_bytes());
+    string(&mut bytes, "tokenizer.chat_template");
+    bytes.extend_from_slice(&8u32.to_le_bytes());
+    string(&mut bytes, "{{ messages }}");
+
+    let capabilities = read_capabilities_from_bytes(&bytes).expect("header was read");
+    assert_eq!(capabilities.speaks, Some(false));
+    assert_eq!(capabilities.hears_audio, None);
+    assert_eq!(capabilities.sees_images, None);
+}

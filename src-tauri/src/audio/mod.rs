@@ -23,6 +23,7 @@
 
 pub mod audiocpp;
 pub mod engines;
+pub mod speech;
 pub mod stt;
 pub mod tts;
 pub mod voice;

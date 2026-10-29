@@ -41,22 +41,26 @@ pub struct TreeEntry {
 
 /// The `.gguf` files a repository offers.
 ///
-/// Projectors are left out: an `mmproj` is a companion to a vision model, not a
-/// model to load on its own, and listing it beside the weights would offer a file
-/// that cannot be run. It still installs -- a later download of the same
-/// repository writes into the same folder.
+/// Projectors are listed, in a group of their own. They are not models to load
+/// alone, but they are the half of a multimodal model that carries the vision and
+/// audio encoders -- and a page that hid them meant a model could be downloaded
+/// that had no way to see or hear anything, with no door in the app to the file
+/// that fixes it. They install beside the weights, which is what lets the model
+/// find its own projector afterwards.
 pub fn gguf_files(repo: &str, tree: &[TreeEntry]) -> Vec<DownloadFile> {
     tree.iter()
         .filter(|entry| entry.entry_type == "file")
         .filter(|entry| entry.path.to_ascii_lowercase().ends_with(".gguf"))
-        .filter(|entry| !entry.path.to_ascii_lowercase().contains("mmproj"))
-        .map(|entry| DownloadFile {
-            repo: repo.to_string(),
-            path: entry.path.clone(),
-            name: file_name(&entry.path).to_string(),
-            size: entry.size,
-            note: quantisation(&entry.path).unwrap_or_default(),
-            group: None,
+        .map(|entry| {
+            let projector = entry.path.to_ascii_lowercase().contains("mmproj");
+            DownloadFile {
+                repo: repo.to_string(),
+                path: entry.path.clone(),
+                name: file_name(&entry.path).to_string(),
+                size: entry.size,
+                note: quantisation(&entry.path).unwrap_or_default(),
+                group: projector.then(|| "Projector".to_string()),
+            }
         })
         .collect()
 }
@@ -313,16 +317,31 @@ mod tests {
         }
     }
 
+    /// A projector is offered, in a group of its own.
+    ///
+    /// It is not a model to load alone, but it is the half that carries the
+    /// vision and audio encoders: hiding it left a multimodal model with no way
+    /// to get the file that makes it see or hear, and no door anywhere else in
+    /// the app. The group is what keeps it out of the list of things to run.
     #[test]
-    fn a_projector_is_not_offered_as_a_model() {
+    fn a_projector_is_offered_beside_the_model_it_belongs_to() {
         let tree = vec![
             file("tiny-Q4_K_M.gguf", 10),
             file("mmproj-tiny-f16.gguf", 5),
         ];
         let files = gguf_files("acme/tiny", &tree);
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].name, "tiny-Q4_K_M.gguf");
-        assert_eq!(files[0].note, "Q4_K_M");
+        assert_eq!(files.len(), 2);
+        let model = files
+            .iter()
+            .find(|file| file.name == "tiny-Q4_K_M.gguf")
+            .expect("the weights are listed");
+        assert_eq!(model.note, "Q4_K_M");
+        assert_eq!(model.group, None);
+        let projector = files
+            .iter()
+            .find(|file| file.name == "mmproj-tiny-f16.gguf")
+            .expect("the projector is listed");
+        assert_eq!(projector.group.as_deref(), Some("Projector"));
     }
 
     #[test]

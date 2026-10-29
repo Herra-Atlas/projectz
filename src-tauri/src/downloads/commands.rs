@@ -390,17 +390,32 @@ fn spawn(
                     .map(|meta| meta.len())
                     .unwrap_or(0);
                 jobs.progress(&id, size, Some(size));
-                jobs.state(&id, JobState::Done, None);
-                // A downloaded GGUF is not a model this app offers until it is
-                // registered, and one the user has to find again by hand is a
-                // download that looks like it did nothing.
+                // Registered before the job is marked done, and both before the
+                // event: the page re-reads the library when it hears
+                // `downloads-installed`, and a row written after that read is a
+                // row the user does not see until the next restart.
                 if kind == Kind::Llama {
                     use tauri::Manager;
                     let runtime = app.state::<crate::ai::runtime::AiRuntime>();
-                    let _ = runtime
-                        .local_models()
-                        .add(destination.display().to_string());
+                    // A projector is not a model: it is the part that lets one
+                    // read images or hear audio, and listing it in the library
+                    // would offer the user a file that cannot be loaded.
+                    if !is_projector(&destination) {
+                        if let Err(error) = runtime
+                            .local_models()
+                            .add(destination.display().to_string())
+                        {
+                            jobs.state(&id, JobState::Failed, Some(error));
+                            let _ = app.emit("downloads-state", jobs.list());
+                            return;
+                        }
+                    }
+                    // Whichever half arrived second, the pair is now on disk and
+                    // the model should be able to see or hear without the user
+                    // hunting for a projector in a file picker.
+                    attach_projector(&runtime, &destination);
                 }
+                jobs.state(&id, JobState::Done, None);
                 let _ = app.emit("downloads-installed", kind);
             }
             Ok(Ending::Paused) => jobs.state(&id, JobState::Paused, None),
@@ -409,4 +424,106 @@ fn spawn(
         }
         let _ = app.emit("downloads-state", jobs.list());
     });
+}
+
+/// Points a model at the projector that landed beside it.
+///
+/// The two files are downloaded separately -- they are separate rows, with
+/// separate sizes and separate quantisations -- so either may arrive first. Both
+/// orders end the same way: after any `.gguf` install, a model in that folder
+/// with no projector configured is given the sibling whose name says it is one,
+/// when their stems agree.
+///
+/// Only an empty setting is filled. A projector the user chose by hand is a
+/// decision, and a download must not quietly replace it.
+fn attach_projector(runtime: &crate::ai::runtime::AiRuntime, installed: &std::path::Path) {
+    let manager = runtime.local_models();
+    let Some(folder) = installed.parent() else {
+        return;
+    };
+    let candidates: Vec<std::path::PathBuf> = std::fs::read_dir(folder)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| is_projector(path))
+                .collect()
+        })
+        .unwrap_or_default();
+    if candidates.is_empty() {
+        return;
+    }
+
+    // Normalised on both sides before comparing: a stored model path is the
+    // canonical Windows form (`\\?\C:\...`) while the folder here comes from the
+    // models root in plain form. Compared raw they never matched, so the projector
+    // was never attached and the download looked like it did nothing.
+    let folder = crate::ai::local::memory::normalise_windows_path(&folder.to_string_lossy());
+
+    for model in manager.list() {
+        let model_path = crate::ai::local::memory::normalise_windows_path(&model.path);
+        // Only this folder: a projector is a companion to the weights beside it,
+        // and a same-named file elsewhere is a different download.
+        if model_path.parent() != Some(folder.as_path()) || is_projector(&model_path) {
+            continue;
+        }
+        let mut settings = manager.runtime_settings(&model.id);
+        if settings
+            .mmproj
+            .as_deref()
+            .is_some_and(|path| !path.trim().is_empty())
+        {
+            continue;
+        }
+        let stem = projector_stem(&model_path);
+        let Some(projector) = candidates
+            .iter()
+            .find(|candidate| projector_stem(candidate) == stem)
+        else {
+            continue;
+        };
+        settings.mmproj = Some(projector.display().to_string());
+        let _ = manager.save_runtime_settings(&model.id, settings);
+    }
+}
+
+fn is_projector(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.to_ascii_lowercase().starts_with("mmproj"))
+}
+
+/// The part of a GGUF's name before its quantisation.
+///
+/// `mmproj-LFM3-Audio-2B-Q8_0` and `LFM3-Audio-2B-Q4_K_M` are one pair, and the
+/// only part they share is the model's own name. Cutting at the first segment
+/// that reads as a quantisation is what leaves that name behind; comparing full
+/// file names would match nothing, since the two halves are quantised differently
+/// more often than not.
+fn projector_stem(path: &std::path::Path) -> String {
+    let name = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let name = name.strip_prefix("mmproj-").unwrap_or(name);
+    let mut stem = Vec::new();
+    for segment in name.split('-') {
+        if looks_like_quantisation(segment) {
+            break;
+        }
+        stem.push(segment);
+    }
+    let joined = stem.join("-");
+    if joined.is_empty() {
+        name.to_string()
+    } else {
+        joined
+    }
+}
+
+fn looks_like_quantisation(segment: &str) -> bool {
+    let segment = segment.to_ascii_uppercase();
+    matches!(segment.as_str(), "F16" | "BF16" | "F32" | "MXFP4")
+        || segment.starts_with('Q')
+        || segment.starts_with("IQ")
 }

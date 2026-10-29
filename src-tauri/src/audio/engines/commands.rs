@@ -35,7 +35,7 @@ pub struct EngineRow {
 /// "what can it run" is half an answer.
 #[tauri::command]
 pub async fn audio_engines_builtin() -> Vec<EngineRow> {
-    let piper_voices = voices::list()
+    let piper_voices = voices::list(None)
         .await
         .into_iter()
         .filter(|voice| voice.engine == "piper")
@@ -54,7 +54,9 @@ pub async fn audio_engines_builtin() -> Vec<EngineRow> {
             name: "Whisper & Parakeet".to_string(),
             version: whisper::RELEASE_TAG.to_string(),
             installed: whisper::is_installed(),
-            assets: models::list().len(),
+            // The whisper engine's own assets, so the count names the folder it
+            // installs into rather than every recogniser the app can run.
+            assets: models::list(None).len(),
             kind: "fixed".to_string(),
         },
         EngineRow {

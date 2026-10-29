@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { emit } from "@tauri-apps/api/event";
+import { listen, emit } from "@tauri-apps/api/event";
 import { Check, Download, LoaderCircle, Settings2, Trash2, Volume2 } from "lucide-react";
 
 import { useBuiltinEngines } from "../../../features/audio/useBuiltinEngines";
@@ -67,6 +67,24 @@ export function SpeechSynthesisList({
     void refresh();
   }, [refresh]);
 
+  // A speech model becomes the voice the moment it loads, which happens on the
+  // chat page or from the microphone. Without this the page would keep saying the
+  // previous voice is chosen until it was closed and reopened.
+  useEffect(() => {
+    let live = true;
+    let stop: (() => void) | undefined;
+    void listen("tts-voice-changed", () => {
+      if (live) void refresh();
+    }).then((unlisten) => {
+      if (live) stop = unlisten;
+      else unlisten();
+    });
+    return () => {
+      live = false;
+      stop?.();
+    };
+  }, [refresh]);
+
   const choose = async (voice: VoiceEntry) => {
     if (settings === null) return;
     if (settings.voice === voice.id) return;
@@ -108,6 +126,7 @@ export function SpeechSynthesisList({
   const selected = settings?.voice ?? null;
   const piper = (voices ?? []).filter((voice) => voice.engine === "piper");
   const audiocpp = (voices ?? []).filter((voice) => voice.engine === "audiocpp");
+  const speech = (voices ?? []).filter((voice) => voice.engine === "llamacpp");
   const enginesKnown = engines.engines !== null;
   const piperInstalled = engines.installed("piper");
   const audiocppInstalled = engines.installed("audiocpp");
@@ -199,6 +218,35 @@ export function SpeechSynthesisList({
         anchor="tts.voicesAudiocpp"
         empty="No audio.cpp voices yet. Download one from the audio.cpp models page."
       />
+
+      {/* A speech model is one GGUF that speaks in every language it knows, so
+          its row is the model rather than a voice file. It is drawn only while
+          the model is loaded: a speech model is a voice when it is ready, and a
+          row that started a 2 GB process on a click would be a trap. It carries
+          no delete here -- the file belongs to the model library. */}
+      {speech.some((voice) => voice.loaded) && (
+        <>
+          <EngineHeader
+            title="llama.cpp"
+            subtitle={`${speech.length === 1 ? "1 model" : `${speech.length} models`} · loaded`}
+            download={
+              <HeaderAction
+                onClick={onOpenEngines}
+                icon={<Settings2 size={13} />}
+                label="Model library"
+              />
+            }
+          />
+          <VoiceList
+            voices={speech}
+            selected={selected}
+            onChoose={choose}
+            onSettings={(voice) => onVoiceSettings(voice, "llamacpp")}
+            anchor="tts.voicesLlama"
+            empty=""
+          />
+        </>
+      )}
     </article>
   );
 }
@@ -271,7 +319,8 @@ function VoiceList({
   voices: VoiceEntry[];
   selected: string | null;
   onChoose: (voice: VoiceEntry) => void;
-  onRemove: (voice: VoiceEntry) => void;
+  /** Omitted for a model-library voice, which is deleted on the page that owns it. */
+  onRemove?: (voice: VoiceEntry) => void;
   onSettings: (voice: string) => void;
   anchor: string;
   empty: string;
@@ -316,14 +365,16 @@ function VoiceList({
             >
               <Settings2 size={14} />
             </button>
-            <HoldToDelete
-              onConfirm={() => void onRemove(voice)}
-              label={`Delete ${voice.name}`}
-              title="Delete voice"
-              className="grid size-8 shrink-0 place-items-center rounded-md text-[var(--quiet)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--danger)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
-            >
-              <Trash2 size={14} />
-            </HoldToDelete>
+            {onRemove && (
+              <HoldToDelete
+                onConfirm={() => void onRemove(voice)}
+                label={`Delete ${voice.name}`}
+                title="Delete voice"
+                className="grid size-8 shrink-0 place-items-center rounded-md text-[var(--quiet)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--danger)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+              >
+                <Trash2 size={14} />
+              </HoldToDelete>
+            )}
           </div>
         );
       })}

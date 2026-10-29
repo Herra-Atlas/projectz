@@ -82,8 +82,7 @@ pub const DELETE_FILE: ToolSpec = ToolSpec {
     command_argument: None,
     execute: |arguments, context| {
         super::blocking(move || {
-            super::file::require_workspace()
-                .and_then(|root| delete_file(arguments, root, &context))
+            super::file::require_workspace().and_then(|root| delete_file(arguments, root, &context))
         })
     },
 };

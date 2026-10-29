@@ -331,6 +331,12 @@ impl Database {
                     // when that does, so a persisted copy would be a second
                     // thing to keep in step.
                     engine_id: None,
+                    // Read from the weights and the projector by `inspect`, and
+                    // deliberately not persisted: moving or replacing either file
+                    // changes the answer.
+                    sees_images: None,
+                    hears_audio: None,
+                    speaks: None,
                 })
             })
             .map_err(|error| error.to_string())?;

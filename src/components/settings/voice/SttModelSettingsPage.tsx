@@ -82,7 +82,14 @@ export function SttModelSettingsPage({
         <h2 className="text-[17px] font-semibold tracking-tight">{entry?.name ?? "Recognition model"}</h2>
         {entry && (
           <span className="text-xs text-[var(--quiet)]">
-            {parakeet ? "Parakeet" : "Whisper"} · {(entry.size / 1_048_576).toFixed(0)} MB
+            {entry.engine === "llamacpp"
+              ? "llama.cpp"
+              : parakeet
+                ? "Parakeet"
+                : entry.engine === "audiocpp"
+                  ? "audio.cpp"
+                  : "Whisper"}{" "}
+            · {(entry.size / 1_048_576).toFixed(0)} MB
           </span>
         )}
       </SettingsPageTitle>

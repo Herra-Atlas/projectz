@@ -30,7 +30,7 @@ pub async fn samples(
         return Err("Nothing was heard. Hold the microphone a little longer.".to_string());
     }
     let settings = models::settings(database);
-    let selected = models::resolve(&settings)?;
+    let selected = models::resolve(Some(app), &settings)?;
     let language = settings.language_for(&selected.path()).map(str::to_string);
 
     let text = match selected {
@@ -67,6 +67,16 @@ pub async fn samples(
             let wav = whisper::write_wav(&samples)?;
             let outcome = audiocpp::transcribe(&model, &wav, app, database).await;
             // Either way the temp file has done its job and must not survive.
+            let _ = std::fs::remove_file(&wav);
+            outcome?
+        }
+        Selected::Llamacpp(model) => {
+            // The same temp WAV the other server-bound engine uses: the speech
+            // model takes a file's bytes as an `input_audio` part, and the
+            // recorder hands back samples rather than a container.
+            let wav = whisper::write_wav(&samples)?;
+            let outcome =
+                crate::audio::speech::transcribe(app, &model, &wav, language.as_deref()).await;
             let _ = std::fs::remove_file(&wav);
             outcome?
         }

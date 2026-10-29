@@ -54,6 +54,19 @@ const MIN_CHUNK = 40;
 const MAX_CHUNK = 240;
 
 /**
+ * The bounds a generated voice is chunked at.
+ *
+ * A 2B speech model produces audio autoregressively: the wait before the first
+ * sound is proportional to how much text it was given. A 240-character sentence
+ * is a comfortable chunk for Piper, which answers in milliseconds, and twenty
+ * seconds of silent waiting for this one. Small pieces start sooner and cost only
+ * a few more requests.
+ */
+const GENERATED_BOUNDS = { min: 18, max: 90 };
+
+export type SpeechChunking = { min: number; max: number };
+
+/**
  * Splits cleaned speech into pieces worth one synthesis each.
  *
  * Sentence endings first, then two corrections: a very short piece ("Yes.",
@@ -62,7 +75,10 @@ const MAX_CHUNK = 240;
  * single request waits on a paragraph. A piece with no letters or digits at all
  * is dropped -- punctuation alone has nothing to say.
  */
-export function splitSpeech(text: string): string[] {
+export function splitSpeech(
+  text: string,
+  bounds: SpeechChunking = { min: MIN_CHUNK, max: MAX_CHUNK },
+): string[] {
   const sentences: string[] = [];
   let start = 0;
   for (let index = 0; index < text.length; index += 1) {
@@ -81,8 +97,8 @@ export function splitSpeech(text: string): string[] {
   const merged: string[] = [];
   for (const sentence of sentences) {
     const previous = merged[merged.length - 1];
-    const short = sentence.length < MIN_CHUNK || (previous !== undefined && previous.length < MIN_CHUNK);
-    if (previous !== undefined && short && previous.length + sentence.length + 1 <= MAX_CHUNK) {
+    const short = sentence.length < bounds.min || (previous !== undefined && previous.length < bounds.min);
+    if (previous !== undefined && short && previous.length + sentence.length + 1 <= bounds.max) {
       merged[merged.length - 1] = `${previous} ${sentence}`;
     } else {
       merged.push(sentence);
@@ -90,17 +106,17 @@ export function splitSpeech(text: string): string[] {
   }
 
   return merged
-    .flatMap((chunk) => (chunk.length <= MAX_CHUNK ? [chunk] : splitLong(chunk)))
+    .flatMap((chunk) => (chunk.length <= bounds.max ? [chunk] : splitLong(chunk, bounds.max)))
     .filter((chunk) => /[A-Za-z0-9]/.test(chunk));
 }
 
 /** One overlong sentence, cut at the last break before the limit. */
-function splitLong(chunk: string): string[] {
+function splitLong(chunk: string, limit: number): string[] {
   const parts: string[] = [];
   let rest = chunk;
-  while (rest.length > MAX_CHUNK) {
+  while (rest.length > limit) {
     let cut = -1;
-    for (let index = MAX_CHUNK; index > MAX_CHUNK / 2; index -= 1) {
+    for (let index = limit; index > limit / 2; index -= 1) {
       if (",;: ".includes(rest[index])) {
         cut = index;
         break;
@@ -250,7 +266,11 @@ export function useSpeech(onError: (message: string) => void): Speech {
           if (!script.trim()) throw new Error("There is nothing to read under the current skip settings.");
 
           let rate = current.sampleRate;
-          const chunks = settings?.streamSpeech === false ? [script] : splitSpeech(script);
+          // A generated voice is chunked smaller, so the first sound arrives
+          // after a clause rather than after a paragraph. Everything else is
+          // chunked at the sentence.
+          const bounds = current.engine === "llamacpp" ? GENERATED_BOUNDS : undefined;
+          const chunks = settings?.streamSpeech === false ? [script] : splitSpeech(script, bounds);
           if (chunks.length === 0) throw new Error("There is nothing to read under the current skip settings.");
 
           const synthesize = (chunk: string) =>

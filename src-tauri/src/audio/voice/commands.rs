@@ -66,7 +66,11 @@ pub async fn voice_enroll_clip(database: State<'_, Arc<Database>>) -> Result<Sta
     let samples = tauri::async_runtime::spawn_blocking(move || {
         // No `AppHandle`, so this recording never announces itself to the
         // composer: enrolling a voice must not start or end a dictation.
-        let session = crate::audio::stt::capture::start(device.as_deref(), None)?;
+        let session = crate::audio::stt::capture::start(
+            device.as_deref(),
+            None,
+            crate::audio::stt::capture::DEFAULT_SILENCE,
+        )?;
         // Waits on the recording's own ending rather than on a fixed duration:
         // a short sentence returns in seconds instead of in the cap.
         let deadline = std::time::Instant::now() + CLIP;

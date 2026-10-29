@@ -203,8 +203,7 @@ pub const EDIT_LINES: ToolSpec = ToolSpec {
     command_argument: None,
     execute: |arguments, context| {
         super::blocking(move || {
-            super::file::require_workspace()
-                .and_then(|root| edit_lines(arguments, root, &context))
+            super::file::require_workspace().and_then(|root| edit_lines(arguments, root, &context))
         })
     },
 };

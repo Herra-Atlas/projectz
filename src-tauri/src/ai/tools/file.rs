@@ -263,9 +263,7 @@ pub const LIST_DIR: ToolSpec = ToolSpec {
     command_argument: None,
     execute: |arguments, context| {
         let _ = &context;
-        super::blocking(move || {
-            require_workspace().and_then(|root| list_dir(arguments, root))
-        })
+        super::blocking(move || require_workspace().and_then(|root| list_dir(arguments, root)))
     },
 };
 

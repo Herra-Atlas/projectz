@@ -1,4 +1,4 @@
-import { ImageIcon } from "lucide-react";
+import { Ear, ImageIcon, Volume2 } from "lucide-react";
 import type { LocalModel } from "../../features/models/types";
 import { compactContext } from "./ModelBadges";
 
@@ -7,6 +7,48 @@ type LocalModelBadgesProps = {
   /** Whether this model has a projector configured, from `useLocalProjectors`. */
   hasProjector: boolean;
 };
+
+/**
+ * The modalities a model's own files declare, as marks with no numbers in them.
+ *
+ * Kept apart from `LocalModelBadges` because the settings row already prints the
+ * quantisation and context as text, and drawing them twice on one row is noise.
+ * This is the half that says what the model can do; that is the half that says
+ * how big it is.
+ *
+ * Only a `true` flag is drawn. A file that did not say -- `null` -- gets no mark,
+ * because a greyed icon reads as "cannot" when it means "not asked", and the
+ * whole point of reading the flags was to stop guessing in either direction.
+ */
+export function LocalModelCapabilityMarks({ model }: { model: LocalModel }) {
+  const sees = model.sees_images === true;
+  const hears = model.hears_audio === true;
+  const speaks = model.speaks === true;
+  if (!sees && !hears && !speaks) return null;
+
+  return (
+    <span className="flex shrink-0 items-center gap-1.5 text-[var(--quiet)]">
+      {sees && (
+        <span className="inline-flex items-center" title="Reads images — its projector declares a vision encoder">
+          <ImageIcon size={12} aria-hidden="true" />
+          <span className="sr-only">Reads images</span>
+        </span>
+      )}
+      {hears && (
+        <span className="inline-flex items-center" title="Hears audio — its projector declares an audio encoder">
+          <Ear size={12} aria-hidden="true" />
+          <span className="sr-only">Hears audio</span>
+        </span>
+      )}
+      {speaks && (
+        <span className="inline-flex items-center" title="Speaks — its chat template can emit audio">
+          <Volume2 size={12} aria-hidden="true" />
+          <span className="sr-only">Speaks</span>
+        </span>
+      )}
+    </span>
+  );
+}
 
 /**
  * What a local model is known to be, as small marks beside its name.

@@ -7,6 +7,7 @@ mod database;
 mod documents;
 mod downloads;
 mod jobs;
+mod keybinds;
 mod mcp;
 mod messaging;
 mod panel;
@@ -91,6 +92,14 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // Registered from `keybinds.rs` against the stored shortcut, and the
+        // press is emitted as an event rather than acted on here: the composer
+        // owns the microphone, this owns the key.
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| keybinds::on_shortcut(app, event.state))
+                .build(),
+        )
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
             let engine_dir = app_data_dir.join("engines");
@@ -261,9 +270,14 @@ pub fn run() {
                 // written back as though the user had chosen it.
                 window::attach(&window, std::sync::Arc::clone(&database));
             }
+            // Last: the database is managed and the window is up, so the OS has
+            // something to attach the accelerator to.
+            keybinds::restore(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            keybinds::keybinds_get,
+            keybinds::keybinds_set,
             commands::ai_chat,
             commands::ai_cancel_chat,
             ai::subagent::commands::ai_subagent_send,
@@ -340,6 +354,7 @@ pub fn run() {
             commands::ai_update_endpoint,
             commands::ai_test_endpoint,
             commands::ai_model_capabilities,
+            commands::ai_model_modality_set,
             commands::ai_set_model_enabled,
             commands::ai_provider_capabilities,
             commands::ai_remove_endpoint,
@@ -426,6 +441,8 @@ pub fn run() {
             audio::stt::commands::stt_select_input,
             audio::stt::commands::stt_select_model,
             audio::stt::commands::stt_set_keep_loaded,
+            audio::stt::commands::stt_set_auto_send,
+            audio::stt::commands::stt_set_silence,
             audio::stt::commands::stt_remove_model,
             audio::stt::commands::stt_model_language,
             audio::stt::commands::stt_set_language,

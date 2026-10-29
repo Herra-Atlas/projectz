@@ -55,7 +55,10 @@ const SPEECH_LEVEL: f32 = 0.02;
 /// A wake word starts the microphone without a second press, so the recording
 /// has to be able to end itself; without this it waits for the end button
 /// forever, which is exactly what it used to do.
-const SILENCE_LIMIT: Duration = Duration::from_millis(1500);
+///
+/// The default here is the fallback; the stored setting overrides it per
+/// recording, so a speaker who pauses mid-sentence can ask for more room.
+pub const DEFAULT_SILENCE: Duration = Duration::from_millis(1500);
 
 /// A recording that hears nothing at all ends here, so a wake word that fired on
 /// a noise cannot leave the microphone open.
@@ -117,7 +120,11 @@ pub fn inputs() -> (Vec<String>, Option<String>) {
 /// `app` is how the recorder tells the composer it ended by itself. A caller
 /// with no composer -- voice enrollment is the one -- passes `None`, and the
 /// recording stays silent about itself rather than starting a dictation.
-pub fn start(device: Option<&str>, app: Option<AppHandle>) -> Result<Session, String> {
+pub fn start(
+    device: Option<&str>,
+    app: Option<AppHandle>,
+    silence: Duration,
+) -> Result<Session, String> {
     let device = device.map(str::to_string);
     let (stop_tx, stop_rx) = mpsc::channel();
     let (audio_tx, audio_rx) = mpsc::channel();
@@ -125,7 +132,7 @@ pub fn start(device: Option<&str>, app: Option<AppHandle>) -> Result<Session, St
     let ended = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&ended);
     std::thread::spawn(move || {
-        let _ = audio_tx.send(record(stop_rx, ready_tx, device, app, flag));
+        let _ = audio_tx.send(record(stop_rx, ready_tx, device, app, flag, silence));
     });
     ready_rx
         .recv_timeout(Duration::from_secs(5))
@@ -143,6 +150,7 @@ fn record(
     name: Option<String>,
     app: Option<AppHandle>,
     ended: Arc<AtomicBool>,
+    silence_limit: Duration,
 ) -> Result<Vec<i16>, String> {
     let host = cpal::default_host();
     let device = open_device(&host, name.as_deref())?;
@@ -210,7 +218,7 @@ fn record(
         let elapsed = started.elapsed();
         // Before any speech, quiet means "not yet"; after it, quiet means done.
         let finished = if speech_heard {
-            quiet_for >= SILENCE_LIMIT
+            quiet_for >= silence_limit
         } else {
             elapsed >= IDLE_LIMIT
         };

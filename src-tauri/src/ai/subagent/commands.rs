@@ -228,6 +228,9 @@ mod tests {
         let spec = spec_for("run-1", "agent-1", &record, &stored(), "More");
         assert!(spec.local_model);
         assert_eq!(spec.model.as_deref(), Some("projectz-local"));
-        assert_eq!(spec.endpoint_id.as_deref(), Some(crate::ai::local::LOCAL_ENDPOINT_ID));
+        assert_eq!(
+            spec.endpoint_id.as_deref(),
+            Some(crate::ai::local::LOCAL_ENDPOINT_ID)
+        );
     }
 }

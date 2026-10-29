@@ -44,6 +44,9 @@ export type SettingsPage =
   | { view: "audioModel"; model: string }
   | { view: "general" }
   | { view: "appearance" }
+  /* Shortcuts the operating system owns. Its own page because it is the only
+     setting that acts while another program is in front. */
+  | { view: "keybinds" }
   /* What the app may interrupt for, and the sound each event makes. One page:
      the sound belongs beside the switch it belongs to, not on a page of its
      own where the two have to be kept in step by reading both. */
@@ -100,6 +103,7 @@ const PAGE_NAMES: Record<SettingsPage["view"], string> = {
   audioModel: "Audio model settings",
   general: "General",
   appearance: "Appearance",
+  keybinds: "Keybinds",
   notifications: "Notifications",
   taste: "Taste",
   mainModel: "Main model",

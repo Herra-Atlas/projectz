@@ -736,6 +736,10 @@ function AppShell() {
           titleModels={preferences.sessionTitleModels}
           onAutoTitle={chat.setAutoTitle}
           workspaceRoot={workspaces.selected}
+          // Reopening a conversation restores the folder it was working in. The
+          // picker and this go through the same writer, so the header and the
+          // tools never describe two different folders.
+          onWorkspaceSelect={(path) => { void selectWorkspace(path); }}
           defaultEffort={preferences.mainReasoning}
         />
         </>}

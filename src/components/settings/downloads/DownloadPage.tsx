@@ -120,7 +120,11 @@ export function DownloadPage({
     const narrowed =
       selected.size === 0
         ? files
-        : files.filter((file) => file.group !== undefined && selected.has(file.group));
+        // Choosing a section narrows the *sectioned* rows only. A local GGUF
+        // download has no sections at all -- its weights and its projector are
+        // ungrouped -- and dropping those here hid every row behind an empty
+        // filter, which is a page that cannot download anything.
+        : files.filter((file) => file.group === undefined || selected.has(file.group));
     return narrowed
       .slice()
       .sort((left, right) => sectionRank(left.group ?? "") - sectionRank(right.group ?? ""));

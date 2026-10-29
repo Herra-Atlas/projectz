@@ -67,6 +67,47 @@ impl ModelShape {
     }
 }
 
+/// What a model's own files say it can take and produce.
+///
+/// Read from two places, because the two halves answer different questions:
+///
+/// - **Inputs live in the projector.** An `mmproj` file declares which encoders
+///   it carries (`clip.has_vision_encoder`, `clip.has_audio_encoder`). That is a
+///   property of the file, not of a setting, so it can be answered before
+///   anything is loaded.
+/// - **Output lives in the chat template.** Nothing in a GGUF advertises "I can
+///   speak", but a model that can emits an `<|audio_out|>` marker, and its
+///   template contains that literal. Reading the template is how the fact is
+///   recovered without starting the server.
+///
+/// Every field is `Option` on purpose: `None` means the file did not say, which
+/// must never be read as "cannot". The alternative -- collapsing unknown into
+/// false -- is what made the app believe every local model could see images.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModelCapabilities {
+    pub sees_images: Option<bool>,
+    pub hears_audio: Option<bool>,
+    pub speaks: Option<bool>,
+}
+
+impl ModelCapabilities {
+    /// True once every question this reader can answer has an answer.
+    fn settled(&self) -> bool {
+        self.sees_images.is_some() && self.hears_audio.is_some() && self.speaks.is_some()
+    }
+
+    /// Keeps what is known and fills the rest in from `other`.
+    ///
+    /// Used to merge a weights file's answer with its projector's: the template
+    /// comes from one, the encoders from the other, and neither may overwrite a
+    /// fact the other established.
+    pub fn absorb(&mut self, other: ModelCapabilities) {
+        self.sees_images = self.sees_images.or(other.sees_images);
+        self.hears_audio = self.hears_audio.or(other.hears_audio);
+        self.speaks = self.speaks.or(other.speaks);
+    }
+}
+
 /// The ggml weight quantisations, at their published bytes-per-parameter.
 ///
 /// The `_K_M` and `_K_S` families mix several block types within one tensor.
@@ -366,6 +407,126 @@ pub fn read_shape_from_bytes(header: &[u8]) -> Option<ModelShape> {
     Some(shape)
 }
 
+/// Reads what a model's own files say it can take and produce.
+///
+/// Separate from [`read_shape`] because it answers a different question and
+/// pays a different cost: the shape is at the front of the metadata block, while
+/// the chat template sits behind the tokenizer's quarter of a million entries.
+/// Merging them would make every VRAM estimate walk a vocabulary.
+///
+/// Cached per path and modification stamp, so drawing a list of ten models does
+/// not re-read ten vocabularies on every render.
+pub fn read_capabilities(path: &std::path::Path) -> Option<ModelCapabilities> {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+    use std::time::UNIX_EPOCH;
+
+    static CACHE: LazyLock<Mutex<HashMap<std::path::PathBuf, (u64, u64, ModelCapabilities)>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|age| age.as_secs())
+        .unwrap_or(0);
+    let length = metadata.len();
+    if let Ok(cache) = CACHE.lock() {
+        if let Some((cached_length, cached_modified, capabilities)) = cache.get(path) {
+            if *cached_length == length && *cached_modified == modified {
+                return Some(*capabilities);
+            }
+        }
+    }
+
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut header = vec![0u8; HEADER_READ_BYTES];
+    let read = file.read(&mut header).ok()?;
+    header.truncate(read);
+    let capabilities = read_capabilities_from_bytes(&header)?;
+
+    if let Ok(mut cache) = CACHE.lock() {
+        cache.insert(path.to_path_buf(), (length, modified, capabilities));
+    }
+    Some(capabilities)
+}
+
+/// The same read, over bytes already in hand.
+///
+/// Split like `read_shape`/`read_shape_from_bytes` so a test can state a header
+/// rather than need a multi-gigabyte model on disk.
+pub fn read_capabilities_from_bytes(header: &[u8]) -> Option<ModelCapabilities> {
+    let mut cursor = Cursor::new(header);
+    if cursor.take(4)? != b"GGUF" {
+        return None;
+    }
+    let version = cursor.u32()?;
+    let tensor_count = cursor.u64()?;
+    let metadata_count = cursor.u64()?;
+    let wide_strings = version >= 3;
+    if tensor_count > 1_000_000 || metadata_count > 10_000 {
+        return None;
+    }
+
+    let mut capabilities = ModelCapabilities::default();
+    for _ in 0..metadata_count {
+        let key = cursor.string(wide_strings)?;
+        let value_type = cursor.u32()?;
+
+        // Every value is walked, whether or not its key mattered -- the same rule
+        // `read_shape` documents at length, and the reason a reader that skipped
+        // an uninteresting value drifted out of step with the next key.
+        let mut already_read = false;
+        match key.as_str() {
+            "clip.has_vision_encoder" => {
+                if let Some(value) = read_bool_value(&mut cursor, value_type) {
+                    capabilities.sees_images = Some(value);
+                    already_read = true;
+                }
+            }
+            "clip.has_audio_encoder" => {
+                if let Some(value) = read_bool_value(&mut cursor, value_type) {
+                    capabilities.hears_audio = Some(value);
+                    already_read = true;
+                }
+            }
+            "tokenizer.chat_template" => {
+                if let Some(template) = read_string_value(&mut cursor, value_type, wide_strings) {
+                    // The one honest signal for "can this model speak": its own
+                    // template renders an audio-output marker. A template that
+                    // does not cannot be asked for speech, whatever the filename
+                    // suggests.
+                    capabilities.speaks = Some(template.contains("audio_out"));
+                    already_read = true;
+                }
+            }
+            _ => {}
+        }
+        if !already_read {
+            skip_value(&mut cursor, value_type, wide_strings)?;
+        }
+        if capabilities.settled() {
+            break;
+        }
+    }
+    Some(capabilities)
+}
+
+/// Reads a `BOOL` metadata value, or `None` for any other type.
+///
+/// `read_u32_value` cannot serve this: it consumes four bytes, and a GGUF bool
+/// is exactly one. Reading it there would report a value and misalign the
+/// reader by three bytes for every flag after it.
+fn read_bool_value(cursor: &mut Cursor<'_>, value_type: u32) -> Option<bool> {
+    if value_type == 7 {
+        cursor.take(1).map(|value| value[0] != 0)
+    } else {
+        None
+    }
+}
+
 /// The part of an architecture key after its family prefix.
 ///
 /// `qwen35.attention.head_count_kv` becomes `attention.head_count_kv`, which is
@@ -415,7 +576,7 @@ fn skip_value(cursor: &mut Cursor<'_>, value_type: u32, wide_strings: bool) -> O
         7 => cursor.skip(1),
         // 10 UINT64, 11 INT64, 12 FLOAT64 -- eight.
         10 | 11 | 12 => cursor.skip(8),
-        8 => cursor.string(wide_strings).map(|_| ()),
+        8 => cursor.skip_string(wide_strings),
         // An array: a typed element type, a `u64` count, then the elements.
         9 => {
             let element_type = cursor.u32()?;
@@ -437,7 +598,7 @@ fn skip_value(cursor: &mut Cursor<'_>, value_type: u32, wide_strings: bool) -> O
             }
             for _ in 0..count {
                 if element_type == 8 {
-                    cursor.string(wide_strings)?;
+                    cursor.skip_string(wide_strings)?;
                 } else {
                     let inner_type = cursor.u32()?;
                     skip_value(cursor, inner_type, wide_strings)?;
@@ -507,6 +668,24 @@ impl<'a> Cursor<'a> {
                 slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7],
             ])
         })
+    }
+
+    /// Steps over a length-prefixed string without decoding it.
+    ///
+    /// The tokenizer is an array of a quarter of a million short strings, and the
+    /// capability read has to walk past every one of them to reach the chat
+    /// template behind it. Building a `String` per entry would allocate a quarter
+    /// of a million times to learn nothing; this reads the length and skips.
+    fn skip_string(&mut self, wide: bool) -> Option<()> {
+        let length = if wide {
+            self.u64()?
+        } else {
+            u64::from(self.u32()?)
+        } as usize;
+        if length > 1024 * 1024 {
+            return None;
+        }
+        self.skip(length)
     }
 
     /// A length-prefixed UTF-8 string.

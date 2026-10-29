@@ -71,6 +71,29 @@ pub struct LocalModel {
     /// real state -- a model with no engine simply cannot be loaded.
     #[serde(default)]
     pub engine_id: Option<String>,
+    /// Whether the model's projector declares a vision encoder.
+    ///
+    /// Read from the `mmproj` file's own metadata, not from the setting that
+    /// points at it: a projector that is configured but carries no vision tower
+    /// cannot see, and the row should say so rather than repeat the setting back.
+    /// `None` means nothing was asked -- no projector, or one this reader cannot
+    /// parse -- which is not the same answer as `false`.
+    #[serde(default)]
+    pub sees_images: Option<bool>,
+    /// Whether the projector declares an audio encoder.
+    ///
+    /// This is what makes a GGUF usable as a recognition engine: the audio tower
+    /// lives in the projector, so a file without one can never be handed a
+    /// recording however chatty its template is.
+    #[serde(default)]
+    pub hears_audio: Option<bool>,
+    /// Whether the model's own chat template renders an audio-output marker.
+    ///
+    /// The only honest signal for "this model can speak" before it is loaded:
+    /// the template either contains `<|audio_out|>` or it does not, and no amount
+    /// of wanting a voice changes that.
+    #[serde(default)]
+    pub speaks: Option<bool>,
 }
 
 fn default_present() -> bool {
@@ -84,7 +107,11 @@ impl LocalModel {
     /// read from the GGUF header. The header read is the same one the memory
     /// estimate uses, so the quantisation and context shown here are the same
     /// numbers that figure is computed from rather than a second opinion.
-    pub fn inspect(mut self) -> Self {
+    ///
+    /// `projector` is the model's configured `mmproj`, when it has one: the
+    /// encoders a model can use live in that file, so without it the input half
+    /// of the answer is unknown rather than negative.
+    pub fn inspect(mut self, projector: Option<&Path>) -> Self {
         let path = crate::ai::local::memory::normalise_windows_path(&self.path);
         self.present = path.is_file();
         if let Some(shape) = crate::ai::local::parser::read_shape(&path) {
@@ -98,6 +125,21 @@ impl LocalModel {
                 self.context_length = Some(shape.context_length as u64);
             }
         }
+        // Two files answer two different halves, and neither may overwrite the
+        // other: the template comes from the weights, the encoders from the
+        // projector. `absorb` keeps whatever was already known.
+        let mut capabilities = crate::ai::local::parser::ModelCapabilities::default();
+        if let Some(weights) = crate::ai::local::parser::read_capabilities(&path) {
+            capabilities.absorb(weights);
+        }
+        if let Some(projector) = projector {
+            if let Some(encoders) = crate::ai::local::parser::read_capabilities(projector) {
+                capabilities.absorb(encoders);
+            }
+        }
+        self.sees_images = capabilities.sees_images;
+        self.hears_audio = capabilities.hears_audio;
+        self.speaks = capabilities.speaks;
         self
     }
 }
@@ -215,9 +257,42 @@ impl LocalModelManager {
             .into_iter()
             .map(|mut model| {
                 model.engine_id = self.engine_id_for(&model.id);
-                model.inspect()
+                // The projector is read from the model's own settings, because
+                // that is the only pointer the app has to the file that carries
+                // the encoders. Owning it here means the row can say what the
+                // model hears and sees without the frontend asking a second
+                // question whose answer could disagree.
+                let projector = self.runtime_settings(&model.id).mmproj;
+                let projector = projector.filter(|path| !path.trim().is_empty());
+                model.inspect(projector.as_deref().map(Path::new))
             })
             .collect()
+    }
+
+    /// The installed models that can listen or speak.
+    ///
+    /// One question, asked of the files: a projector with an audio encoder, or a
+    /// template with an audio-output marker. A model that has neither is a text
+    /// model and is not offered as a speech engine however its name reads.
+    pub fn speech_models(&self) -> Vec<LocalModel> {
+        self.list()
+            .into_iter()
+            .filter(|model| model.hears_audio == Some(true) || model.speaks == Some(true))
+            .collect()
+    }
+
+    /// The `llama-server` this model would be started with.
+    ///
+    /// Exposed because a speech model is served by the same engine build as a
+    /// chat model, on a port of its own -- and two copies of the path rule would
+    /// be two places for "which engine" to disagree.
+    pub fn server_for(&self, model_id: &str) -> Option<PathBuf> {
+        let engine_id = self.engine_id_for(model_id)?;
+        let server = self
+            .engine_dir
+            .join(&engine_id)
+            .join(server_executable_name());
+        server.is_file().then_some(server)
     }
 
     /// Which engine a model runs with: its own engine, full stop.
@@ -294,6 +369,11 @@ impl LocalModelManager {
             context_length: None,
             // Filled in by the manager once the pin is read; never persisted.
             engine_id: None,
+            // Answered by `inspect` from the files. A freshly added row has not
+            // been read yet, and "not asked" is the truthful state until it is.
+            sees_images: None,
+            hears_audio: None,
+            speaks: None,
         };
         if self
             .list()

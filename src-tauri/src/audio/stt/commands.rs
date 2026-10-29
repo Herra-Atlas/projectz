@@ -73,16 +73,17 @@ pub struct ModelRow {
     pub repo: String,
     pub size: u64,
     pub parakeet: bool,
-    pub audio: bool,
+    /// `whisper`, `audiocpp` or `llamacpp`. The page draws one section per value.
+    pub engine: String,
     pub family: String,
 }
 
 #[tauri::command]
-pub fn stt_models() -> Result<Vec<ModelRow>, String> {
-    // One list, both engines: `models::list` already walks whisper.cpp's folder
-    // and appends audio.cpp's recognisers, so nothing is added twice here. The
-    // page groups on `audio`.
-    Ok(models::list()
+pub fn stt_models(app: AppHandle) -> Result<Vec<ModelRow>, String> {
+    // One list, every engine: `models::list` walks whisper.cpp's folder, appends
+    // audio.cpp's recognisers, and asks the app for the GGUF speech models, so
+    // nothing is added twice here.
+    Ok(models::list(Some(&app))
         .into_iter()
         .map(|model| ModelRow {
             path: model.path,
@@ -90,7 +91,7 @@ pub fn stt_models() -> Result<Vec<ModelRow>, String> {
             repo: model.repo,
             size: model.size,
             parakeet: model.parakeet,
-            audio: model.audio,
+            engine: model.engine,
             family: model.family,
         })
         .collect())
@@ -184,12 +185,45 @@ pub async fn stt_set_keep_loaded(
         // model lives inside that engine's server. "Off" has to reach it too, or
         // the weights stay resident while the switch says otherwise.
         if matches!(
-            models::resolve(&settings),
+            models::resolve(Some(&app), &settings),
             Ok(models::Selected::Audiocpp(_))
         ) {
             crate::audio::audiocpp::stop(crate::audio::audiocpp::Purpose::Speech, &app).await;
         }
+        // The GGUF speech engine is a third server, and the same switch has to
+        // reach it: leaving a 2 GB process resident after the switch says off is
+        // the lie this command exists to prevent.
+        crate::audio::speech::stop().await;
     }
+    Ok(settings)
+}
+
+/// Sends a finished transcript instead of leaving it in the draft.
+///
+/// A spell of listening ends the same way either way; this only decides whether
+/// the words are a draft or a message. Stored rather than passed with the press
+/// so the microphone behaves the same from the composer and from a shortcut.
+#[tauri::command]
+pub fn stt_set_auto_send(
+    database: State<'_, Arc<Database>>,
+    send: bool,
+) -> Result<SttSettings, String> {
+    let mut settings = models::settings(&database);
+    settings.auto_send = send;
+    models::save(&database, &settings)?;
+    Ok(settings)
+}
+
+/// How much quiet ends a recording. Bounded where it is read, not here, so the
+/// stored number is what the user chose and the bound is one rule.
+#[tauri::command]
+pub fn stt_set_silence(
+    database: State<'_, Arc<Database>>,
+    silence_ms: u32,
+) -> Result<SttSettings, String> {
+    let mut settings = models::settings(&database);
+    settings.silence_ms = silence_ms;
+    models::save(&database, &settings)?;
     Ok(settings)
 }
 
@@ -201,7 +235,11 @@ pub async fn stt_set_keep_loaded(
 /// a stored path is data, and data is not a licence to delete a file this app
 /// did not install.
 #[tauri::command]
-pub fn stt_remove_model(database: State<'_, Arc<Database>>, model: String) -> Result<(), String> {
+pub fn stt_remove_model(
+    app: AppHandle,
+    database: State<'_, Arc<Database>>,
+    model: String,
+) -> Result<(), String> {
     if audiocpp::owns_path(&model) {
         let path = std::path::Path::new(&model);
         if !path.is_file() {
@@ -209,6 +247,14 @@ pub fn stt_remove_model(database: State<'_, Arc<Database>>, model: String) -> Re
         }
         std::fs::remove_file(path)
             .map_err(|error| format!("The model could not be deleted: {error}"))?;
+    } else if crate::audio::speech::find(&app, &model).is_some() {
+        // A speech model is a registered local model, not a file this page
+        // installed: the same file is the chat library's, so deleting it here
+        // would remove a model through a page that never showed it that way.
+        return Err(
+            "A speech model is removed from Settings > Local, where it is listed with its engine."
+                .to_string(),
+        );
     } else {
         models::remove(&model)?;
     }
@@ -273,10 +319,17 @@ pub fn stt_recording_start(
     if slot.is_some() {
         return Err("The microphone is already recording.".to_string());
     }
-    let device = models::settings(&database).device;
+    // One read for both answers: the device to open and how long a pause must be
+    // before the recording ends itself.
+    let settings = models::settings(&database);
+    let device = settings.device.clone();
     // The app handle rides along so the recording can report that it ended
     // itself: the composer has no other way to know the silence was heard.
-    *slot = Some(capture::start(device.as_deref(), Some(app))?);
+    *slot = Some(capture::start(
+        device.as_deref(),
+        Some(app),
+        settings.silence(),
+    )?);
     Ok(())
 }
 

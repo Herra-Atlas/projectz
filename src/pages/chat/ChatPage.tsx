@@ -235,6 +235,15 @@ type ChatPageProps = {
    * cannot disagree about which folder is current.
    */
   workspaceRoot?: string | null;
+  /**
+   * Opens the folder a conversation was last working in.
+   *
+   * Called on a switch, through the same single writer the header picker uses.
+   * The workspace is a per-conversation property: reopening a conversation puts
+   * back the folder it was written against, rather than inheriting whichever
+   * folder was picked in some other conversation.
+   */
+  onWorkspaceSelect?: (path: string) => void;
 };
 
 /**
@@ -255,7 +264,7 @@ function playAlertIfUnseen(kind: AlertKind, isActive = true) {
   if (sound) playAlertSound(sound);
 }
 
-export default function ChatPage({ endpointId, model, localModelId, session, sessionLoading = false, activeId = null, onEnsureSession, onFirstSend, onActivity, onModelSelect, onLocalModelSelect, modelRefreshKey, onMessagesChange, onWorkingModeChange, onNotify, onNotifyAction, onClearNotification, onOpenUrl, onOpenFile, titleModels, onAutoTitle, workspaceRoot, defaultEffort }: ChatPageProps) {
+export default function ChatPage({ endpointId, model, localModelId, session, sessionLoading = false, activeId = null, onEnsureSession, onFirstSend, onActivity, onModelSelect, onLocalModelSelect, modelRefreshKey, onMessagesChange, onWorkingModeChange, onNotify, onNotifyAction, onClearNotification, onOpenUrl, onOpenFile, titleModels, onAutoTitle, workspaceRoot, onWorkspaceSelect, defaultEffort }: ChatPageProps) {
   const [messages, setMessages] = useState<ChatMessage[]>(session?.messages ?? []);
   // The latest transcript, for the run listener (a mount-time effect) to build on
   // when something arrives outside the current render -- a background sub-agent's
@@ -498,6 +507,34 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
    * moment. Bounded by conversation count, which is already in memory as headers.
    */
   const workingModesRef = useRef<Map<string, { mode: ChatMode; permission: PermissionMode }>>(new Map());
+  /**
+   * The composer, per conversation: the draft and the effort it was written at.
+   *
+   * These used to be window state, so a message typed in one conversation
+   * appeared in every other one, and an effort picked here quietly followed the
+   * user into a conversation that had never asked for it. The map covers the
+   * window between choosing a conversation and its saved composer arriving; the
+   * settings key is what survives a restart.
+   */
+  const composerSessionRef = useRef<string | null>(null);
+  const composerCacheRef = useRef<Map<string, { text: string; effort: string }>>(new Map());
+  /** The draft as it stands right now, for the save-on-switch above. */
+  const draftRef = useRef("");
+  draftRef.current = input;
+  const effortRef = useRef(EFFORT_PROVIDER_DEFAULT);
+  effortRef.current = effort;
+  const workspaceRootRef = useRef<string | null>(null);
+  workspaceRootRef.current = workspaceRoot ?? null;
+  const defaultEffortRef = useRef(defaultEffort);
+  defaultEffortRef.current = defaultEffort;
+  /**
+   * Conversations whose model has already been restored.
+   *
+   * The model lives in the app shell, so it is only touched once when a
+   * conversation opens -- a transcript arriving later must not reach over and
+   * change the picker the user is using.
+   */
+  const modelRestoredRef = useRef<Set<string>>(new Set());
   const threadRef = useRef<HTMLDivElement>(null);
   const autoFollowRef = useRef(true);
   const runIdRef = useRef("");
@@ -617,6 +654,94 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     // would misreport the on-screen conversation to the backend.
     const nextId = activeId ?? session?.id ?? null;
     sessionIdRef.current = nextId;
+    /*
+     * The composer belongs to the conversation.
+     *
+     * Everything typed here, and the effort it was being written at, is saved as
+     * the conversation is left and restored as the next one is opened -- one
+     * write per switch rather than one per keystroke. Before this, the draft and
+     * the effort were window state: text written in one conversation appeared in
+     * every other one, and an effort chosen here followed the user into a
+     * conversation that had never asked for it.
+     */
+    const composerFrom = composerSessionRef.current;
+    if (composerFrom !== nextId) {
+      if (composerFrom) {
+        const record = { text: draftRef.current, effort: effortRef.current };
+        composerCacheRef.current.set(composerFrom, record);
+        void invoke("database_set_setting", {
+          key: `session.${composerFrom}.composer`,
+          value: record,
+        }).catch(() => undefined);
+        // The folder follows the conversation too. Saved through the same writer
+        // the header uses, so the tools and the composer cannot disagree.
+        void invoke("database_set_setting", {
+          key: `session.${composerFrom}.workspace`,
+          value: workspaceRootRef.current ?? "",
+        }).catch(() => undefined);
+      }
+      composerSessionRef.current = nextId;
+      // Abbreviations were resolved against the folder that was open when the
+      // draft was typed, so they belong to that conversation's composer.
+      trimmedPathsRef.current.clear();
+      // A file chosen for one message in one conversation is not that file in
+      // another. Attachments stay where they were written.
+      restoreAttachments([]);
+
+      const cached = nextId ? composerCacheRef.current.get(nextId) : undefined;
+      if (cached) {
+        setInput(cached.text);
+        setEffort(cached.effort || EFFORT_PROVIDER_DEFAULT);
+      } else if (nextId) {
+        void invoke<{ text?: string; effort?: string } | null>("database_get_setting", {
+          key: `session.${nextId}.composer`,
+        })
+          .then((record) => {
+            // A second switch before the read lands must not write this
+            // conversation's draft over the one now on screen.
+            if (sessionIdRef.current !== nextId) return;
+            setInput(record?.text ?? "");
+            setEffort(
+              record?.effort || defaultEffortRef.current || EFFORT_PROVIDER_DEFAULT,
+            );
+          })
+          .catch(() => undefined);
+      } else {
+        setInput("");
+        setEffort(EFFORT_PROVIDER_DEFAULT);
+      }
+
+      if (nextId) {
+        void invoke<string | null>("database_get_setting", {
+          key: `session.${nextId}.workspace`,
+        })
+          .then((saved) => {
+            if (sessionIdRef.current !== nextId) return;
+            if (typeof saved === "string" && saved.trim()) onWorkspaceSelect?.(saved);
+          })
+          .catch(() => undefined);
+      }
+    }
+    /*
+     * The model a conversation was used with is restored once, when the
+     * conversation opens. It lives in the app shell, so this reaches for the
+     * existing picker path rather than keeping a second copy here -- and the
+     * "once" matters: a transcript arriving later re-runs this effect, and a
+     * restore there would undo a model the user had just chosen.
+     */
+    if (nextId && session && !modelRestoredRef.current.has(nextId)) {
+      modelRestoredRef.current.add(nextId);
+      const provider = session.providerId ?? "";
+      const chosen = session.modelId ?? "";
+      if (
+        provider &&
+        chosen &&
+        !localModelId &&
+        (provider !== endpointId || chosen !== model)
+      ) {
+        onModelSelect(provider, chosen);
+      }
+    }
     // An index is a turn only inside one transcript. Reply pages and a retry
     // countdown both belong to the conversation that produced them, so a switch
     // drops them here rather than carrying "3/3" and a stalled banner into the
@@ -1911,11 +2036,15 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   };
   dispatchRef.current = dispatch;
 
-  const send = async () => {
+  const send = async (override?: string) => {
     // Expanded first, so everything downstream -- the request, the stored message
     // and the title -- carries the path the user pasted rather than the shorthand
     // the field was showing.
-    const text = expandWorkspacePaths(input.trim(), trimmedPathsRef.current);
+    //
+    // `override` is for a transcript that is being sent without passing through
+    // the field: the draft state has not been updated yet at that moment, so
+    // reading it here would send the previous message again.
+    const text = expandWorkspacePaths((override ?? input).trim(), trimmedPathsRef.current);
     // Refused while the open conversation's transcript is still loading. Every
     // other check here is about *when* a reply may run; this one is about whether
     // the history is even known yet. Sending from an empty transcript would look
@@ -2119,6 +2248,12 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   const dictation = useDictation(
     (text) => setInput((current) => (current.trim() ? `${current.trim()} ${text}` : text)),
     (message) => onNotify("error", message),
+    // Send-on-transcribe: the words go straight out as the message, and the
+    // draft is cleared because it was never filled with them.
+    (text) => {
+      setInput("");
+      void send(text);
+    },
   );
 
   // A wake word presses the microphone, because that is what saying it meant:
@@ -2129,6 +2264,29 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   const startDictation = dictation.start;
   const startDictationRef = useRef(startDictation);
   startDictationRef.current = startDictation;
+
+  // Push to talk: the same press as the microphone button, but from anywhere --
+  // the OS owns the key, so this works with the window behind another program.
+  // A toggle rather than a start, because the shortcut has to end a recording it
+  // began; the button already works that way and the two must agree.
+  const toggleDictation = dictation.toggle;
+  const toggleDictationRef = useRef(toggleDictation);
+  toggleDictationRef.current = toggleDictation;
+  useEffect(() => {
+    let live = true;
+    let stop: (() => void) | undefined;
+    void listen("keybind-push-to-talk", () => {
+      if (!live) return;
+      toggleDictationRef.current();
+    }).then((unlisten) => {
+      if (live) stop = unlisten;
+      else unlisten();
+    });
+    return () => {
+      live = false;
+      stop?.();
+    };
+  }, []);
   useEffect(() => {
     let live = true;
     let stop: (() => void) | undefined;

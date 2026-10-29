@@ -17,6 +17,7 @@ import type { Notify } from "../../../features/notifications/types";
 import type { SttModel, SttSettings } from "../../../features/stt/types";
 import { useStt } from "../../../features/stt/useStt";
 import { HoldToDelete } from "../../HoldToDelete";
+import Select from "../../Select";
 import { ANCHOR_ATTRIBUTE, SettingRow, SettingsSection, Toggle } from "../../SettingsSection";
 
 /**
@@ -47,6 +48,8 @@ export function SpeechToTextList({
   // Kept beside `chosen` because both live in the same record, and the list is
   // the only place that reads it.
   const [keepLoaded, setKeepLoaded] = useState(false);
+  const [autoSend, setAutoSend] = useState(false);
+  const [silenceMs, setSilenceMs] = useState(1500);
 
   const load = useCallback(() => {
     void invoke<SttModel[]>("stt_models").then(setModels).catch(() => undefined);
@@ -54,6 +57,8 @@ export function SpeechToTextList({
       .then((next) => {
         setChosen(next.model);
         setKeepLoaded(next.keepLoaded);
+        setAutoSend(next.autoSend);
+        setSilenceMs(next.silenceMs);
       })
       .catch(() => undefined);
   }, []);
@@ -105,8 +110,12 @@ export function SpeechToTextList({
   // A model is chosen explicitly, or implied by being the only one installed,
   // which is what the backend does when nothing is stored.
   const active = chosen ?? models[0]?.path ?? null;
-  const whisper = models.filter((model) => !model.audio);
-  const audio = models.filter((model) => model.audio);
+  // Grouped by the engine that serves the file, which is the one fact that
+  // decides what installing more of it even means: whisper needs a pinned build,
+  // audio.cpp needs its server, and a speech GGUF needs neither.
+  const whisper = models.filter((model) => model.engine === "whisper");
+  const audio = models.filter((model) => model.engine === "audiocpp");
+  const speech = models.filter((model) => model.engine === "llamacpp");
 
   return (
     <>
@@ -227,6 +236,98 @@ export function SpeechToTextList({
           </div>
       </article>
 
+      <article>
+        <div
+          className="flex min-h-[68px] items-center gap-2 px-4 py-3"
+          {...{ [ANCHOR_ATTRIBUTE]: "stt.speech" }}
+        >
+          <span className="grid size-9 shrink-0 place-items-center rounded-md text-[var(--muted)]">
+            <AudioLines size={16} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <h3 className="truncate text-sm font-medium">llama.cpp speech models</h3>
+            <p className="truncate text-xs text-[var(--quiet)]">
+              {speech.length === 1 ? "1 model" : `${speech.length} models`}
+            </p>
+          </div>
+        </div>
+        <div
+          className="mb-3 ml-[2.75rem] border-l border-[var(--line)] py-1 pl-3"
+          {...{ [ANCHOR_ATTRIBUTE]: "stt.speechModels" }}
+        >
+          {/* No delete and no download here: the file is registered in the model
+              library, where it is installed and removed with its engine. */}
+          {speech.map((model) => (
+            <ModelRow
+              key={model.path}
+              model={model}
+              active={model.path === active}
+              onChoose={choose}
+              onSettings={onModelSettings}
+            />
+          ))}
+          {speech.length === 0 && (
+            <p className="py-2 text-xs text-[var(--quiet)]">
+              A GGUF model with an audio projector is listed here and is used instead of the
+              engines above. Add one in Settings · Local.
+            </p>
+          )}
+        </div>
+      </article>
+
+      <SettingsSection title="Dictation">
+        <SettingRow
+          anchor="stt.autoSend"
+          label="Send when I stop talking"
+          description="A finished transcript goes straight out as your message, instead of waiting in the composer for you to press send."
+          hint="Off, the words land in the draft and you can fix them first — which is what you want for anything you would not send unedited."
+          control={
+            <Toggle
+              checked={autoSend}
+              onChange={(next) => {
+                setAutoSend(next);
+                void invoke<SttSettings>("stt_set_auto_send", { send: next })
+                  .then((saved) => setAutoSend(saved.autoSend))
+                  .catch((reason: unknown) => {
+                    setAutoSend(!next);
+                    notify("error", `That could not be saved: ${String(reason)}`);
+                  });
+              }}
+              label="Send when I stop talking"
+            />
+          }
+        />
+        <SettingRow
+          anchor="stt.silence"
+          label="Wait for silence"
+          description="How long a pause ends the recording once you have started talking. A short one feels quick and cuts off thinkers; a long one waits through a mid-sentence pause."
+          control={
+            <Select
+              label="Wait for silence"
+              value={String(silenceMs)}
+              onChange={(value) => {
+                const next = Number(value);
+                setSilenceMs(next);
+                void invoke<SttSettings>("stt_set_silence", { silenceMs: next })
+                  .then((saved) => setSilenceMs(saved.silenceMs))
+                  .catch((reason: unknown) => {
+                    notify("error", `That could not be saved: ${String(reason)}`);
+                    load();
+                  });
+              }}
+              options={[
+                { value: "800", label: "0.8 s (default)" },
+                { value: "1200", label: "1.2 s" },
+                { value: "1500", label: "1.5 s" },
+                { value: "2000", label: "2 s" },
+                { value: "3000", label: "3 s" },
+                { value: "4000", label: "4 s" },
+              ]}
+            />
+          }
+        />
+      </SettingsSection>
+
       <SettingsSection title="Memory">
         <SettingRow
           anchor="stt.keepLoaded"
@@ -283,11 +384,13 @@ function ModelRow({
         <div className="min-w-0 flex-1">
           <h4 className="truncate text-xs font-medium text-[var(--muted)]">{model.name}</h4>
           <p className="truncate text-[11px] text-[var(--quiet)]">
-            {model.audio
+            {model.engine === "audiocpp"
               ? `audio.cpp · ${model.family !== "" ? model.family.replace(/_/g, " ") : "unknown"}`
-              : model.parakeet
-                ? "Parakeet"
-                : "Whisper"}{" "}
+              : model.engine === "llamacpp"
+                ? "llama.cpp · speech model"
+                : model.parakeet
+                  ? "Parakeet"
+                  : "Whisper"}{" "}
             · {formatBytes(model.size)}
           </p>
         </div>

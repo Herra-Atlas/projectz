@@ -12,6 +12,7 @@ use tracing::info;
 use crate::ai::runtime::AiRuntime;
 use crate::ai::types::ChatRequest;
 use crate::database::jobs::{Job, JobRun, NewJob};
+use crate::database::Database;
 
 /// Adds each reply's record of its tools to its text, before a send.
 ///
@@ -1317,7 +1318,97 @@ pub fn ai_model_capabilities(
     endpoint_id: String,
     model: String,
 ) -> Result<crate::ai::remote::capabilities::ModelCapabilities, String> {
-    runtime.database().model_capabilities(&endpoint_id, &model)
+    let database = runtime.database();
+    let capabilities = database.model_capabilities(&endpoint_id, &model)?;
+    Ok(apply_modality_override(
+        &database,
+        &endpoint_id,
+        &model,
+        capabilities,
+    ))
+}
+
+/// The settings key holding what the user has asserted about a model.
+///
+/// A settings record rather than a column: an assertion is about one model of
+/// one provider, it changes only when someone clicks a mark, and a schema
+/// migration for it would be a migration per idea.
+const MODALITY_KEY: &str = "app.model_modalities";
+
+fn modality_key(endpoint_id: &str, model: &str) -> String {
+    format!("{endpoint_id}:{model}")
+}
+
+fn modality_overrides(database: &Database) -> std::collections::BTreeMap<String, Vec<String>> {
+    database
+        .setting(MODALITY_KEY)
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
+}
+
+/// Replaces the reported input modalities with the user's, when they set one.
+///
+/// The provider is the first answer and the user is the last: a gateway that
+/// never lists modalities, or lists them wrongly, leaves the composer refusing
+/// a file the model actually takes. Only inputs are overridden -- an output
+/// modality is not something the app asks a model to produce.
+fn apply_modality_override(
+    database: &Database,
+    endpoint_id: &str,
+    model: &str,
+    mut capabilities: crate::ai::remote::capabilities::ModelCapabilities,
+) -> crate::ai::remote::capabilities::ModelCapabilities {
+    if let Some(modalities) = modality_overrides(database).get(&modality_key(endpoint_id, model)) {
+        capabilities.input_modalities = Some(modalities.clone());
+    }
+    capabilities
+}
+
+/// Marks a model as able to read a kind of input, or stops saying so.
+///
+/// Starts from what the provider reported when the user has not overridden the
+/// model yet, so the first click adds to the truth rather than replacing it with
+/// a list of one.
+#[tauri::command]
+pub fn ai_model_modality_set(
+    runtime: State<'_, AiRuntime>,
+    endpoint_id: String,
+    model: String,
+    modality: String,
+    on: bool,
+) -> Result<crate::ai::remote::capabilities::ModelCapabilities, String> {
+    let database = runtime.database();
+    let referenced = modality.trim().to_ascii_lowercase();
+    if referenced.is_empty() {
+        return Err("Name the kind of input to change.".to_string());
+    }
+
+    let mut overrides = modality_overrides(&database);
+    let key = modality_key(&endpoint_id, &model);
+    let mut modalities = overrides.get(&key).cloned().unwrap_or_else(|| {
+        database
+            .model_capabilities(&endpoint_id, &model)
+            .ok()
+            .and_then(|capabilities| capabilities.input_modalities)
+            .unwrap_or_default()
+    });
+    modalities.retain(|existing| !existing.eq_ignore_ascii_case(&referenced));
+    if on {
+        modalities.push(referenced);
+    }
+    overrides.insert(key, modalities);
+
+    let value = serde_json::to_value(&overrides)
+        .map_err(|error| format!("That could not be stored: {error}"))?;
+    database.set_setting(MODALITY_KEY, &value)?;
+
+    let capabilities = database.model_capabilities(&endpoint_id, &model)?;
+    Ok(apply_modality_override(
+        &database,
+        &endpoint_id,
+        &model,
+        capabilities,
+    ))
 }
 
 /// Turns one remote model on or off in the pickers.
@@ -1351,7 +1442,15 @@ pub fn ai_provider_capabilities(
     std::collections::HashMap<String, crate::ai::remote::capabilities::ModelCapabilities>,
     String,
 > {
-    runtime.database().provider_capabilities(&endpoint_id)
+    let database = runtime.database();
+    let reported = database.provider_capabilities(&endpoint_id)?;
+    Ok(reported
+        .into_iter()
+        .map(|(model, capabilities)| {
+            let merged = apply_modality_override(&database, &endpoint_id, &model, capabilities);
+            (model, merged)
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -1615,6 +1714,11 @@ pub fn local_model_load(
         serde_json::json!({"kind": "loading", "modelId": id}),
     )
     .map_err(|error| error.to_string())?;
+    // One model, one process. The chat server now owns whatever model is being
+    // loaded; a speech server left over from an earlier read is a second copy of
+    // the same weights for no reason, and speech requests will reuse the chat
+    // server when it is serving the same file.
+    tauri::async_runtime::spawn(async { crate::audio::speech::stop().await });
     match runtime.local_models().load(app.clone(), id.clone()) {
         Ok(()) => {
             // Asked for from the interface, so a scheduled run must leave it alone
@@ -1632,9 +1736,17 @@ pub fn local_model_load(
     }
 }
 
+/// Stops every local model process the app started.
+///
+/// Both of them: the chat model on 43127 and the speech model on 43124. They are
+/// separate servers, so unloading the chat one used to leave the speech one
+/// holding two gigabytes -- which is exactly what a user sees as "it did not
+/// unload, I had to kill it in Task Manager".
 #[tauri::command]
-pub fn local_model_unload(runtime: State<'_, AiRuntime>) {
+pub async fn local_model_unload(runtime: State<'_, AiRuntime>) -> Result<(), String> {
     runtime.local_models().unload();
+    crate::audio::speech::stop().await;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -9,6 +9,8 @@ export type VoiceInfo = {
   available: boolean;
   name: string;
   sampleRate: number;
+  /** `piper`, `audiocpp` or `llamacpp` — which engine will speak. */
+  engine: string;
   /** Why it cannot be used, when it cannot. */
   reason: string | null;
 };
@@ -20,8 +22,16 @@ export type VoiceEntry = {
   name: string;
   sampleRate: number;
   size: number;
-  /** `piper` or `audiocpp` — the engine a path resolves to, told by its folder. */
+  /** `piper`, `audiocpp` or `llamacpp` — the engine a path resolves to. */
   engine: string;
+  /**
+   * Whether it can speak now without a cold start.
+   *
+   * Piper is always true; the two servers are true while they are up. A speech
+   * model is offered as a voice only while loaded, so the page draws its section
+   * from this rather than listing a row that would start a 2 GB process.
+   */
+  loaded: boolean;
 };
 
 /** The stored speech settings, with the bounds the page draws against. */

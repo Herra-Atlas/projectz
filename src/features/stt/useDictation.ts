@@ -28,6 +28,12 @@ export type Dictation = {
 export function useDictation(
   onText: (text: string) => void,
   onError: (message: string) => void,
+  /**
+   * Called instead of `onText` when the user has asked transcripts to send
+   * themselves. One or the other, never both: appending to the draft and then
+   * sending it would put the words in the field and in the message.
+   */
+  onCommit?: (text: string) => void,
 ): Dictation {
   const [state, setState] = useState<DictationState>("idle");
   // Guards a double press while the first command is still in flight, which would
@@ -35,6 +41,9 @@ export function useDictation(
   const busy = useRef(false);
   const recording = useRef(false);
   recording.current = state === "recording";
+  // Read at the start of each recording rather than held in state: the setting
+  // lives in Settings, and a press is the moment it has to be current.
+  const autoSend = useRef(false);
 
   // One finish, for the press and for the backend ending a recording by itself:
   // the two paths have to leave the composer in exactly the same state.
@@ -45,14 +54,16 @@ export function useDictation(
     void invoke<string>("stt_recording_stop")
       .then((text) => {
         const trimmed = text.trim();
-        if (trimmed) onText(trimmed);
+        if (!trimmed) return;
+        if (autoSend.current && onCommit) onCommit(trimmed);
+        else onText(trimmed);
       })
       .catch((reason: unknown) => onError(String(reason)))
       .finally(() => {
         busy.current = false;
         setState("idle");
       });
-  }, [onText, onError]);
+  }, [onText, onError, onCommit]);
 
   const toggle = useCallback(() => {
     if (busy.current) return;
@@ -64,6 +75,11 @@ export function useDictation(
     if (state === "transcribing") return;
 
     busy.current = true;
+    void invoke<{ autoSend?: boolean }>("stt_settings")
+      .then((settings) => {
+        autoSend.current = settings.autoSend === true;
+      })
+      .catch(() => undefined);
     void invoke("stt_recording_start")
       .then(() => setState("recording"))
       .catch((reason: unknown) => onError(String(reason)))

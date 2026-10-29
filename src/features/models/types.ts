@@ -51,6 +51,17 @@ export type LocalModel = {
    * all, which is a real state -- such a model cannot be loaded.
    */
   engine_id?: string | null;
+  /**
+   * Modalities the model's own files declare.
+   *
+   * `sees_images` and `hears_audio` come from the projector's `clip.*` flags;
+   * `speaks` comes from an `<|audio_out|>` marker in the model's chat template.
+   * `null` or absent means the file did not say, which is not the same as "no":
+   * the backend reports what it read and nothing more.
+   */
+  sees_images?: boolean | null;
+  hears_audio?: boolean | null;
+  speaks?: boolean | null;
 };
 
 /**

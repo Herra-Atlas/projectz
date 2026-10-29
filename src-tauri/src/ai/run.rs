@@ -235,7 +235,10 @@ fn session_record(spec: &PromptRun, messages: Vec<serde_json::Value>) -> serde_j
     // The caller's own fields win over the generated ones. A sub-agent's row is
     // identified by `kind` and `parentSessionId`, and a follow-up save that did not
     // carry them would detach the run from the conversation that owns it.
-    if let (Some(record), Some(extra)) = (record.as_object_mut(), spec.metadata.as_ref().and_then(|value| value.as_object())) {
+    if let (Some(record), Some(extra)) = (
+        record.as_object_mut(),
+        spec.metadata.as_ref().and_then(|value| value.as_object()),
+    ) {
         for (key, value) in extra {
             record.insert(key.clone(), value.clone());
         }

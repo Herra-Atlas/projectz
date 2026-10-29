@@ -16,20 +16,31 @@ import type { WeatherCondition } from "../../features/weather/weather";
  * The greeting is read from the clock on render rather than held in state --
  * an empty conversation left open past midnight should not relabel itself
  * under the reader, and returning to it is a new arrival anyway. A configured
- * connection's current condition replaces the clock wording once it is known;
- * the clock form paints immediately and remains the fallback when weather is
- * unreachable.
+ * connection's weather only takes the line when it is worth taking (see
+ * `greetingFor`); the clock form paints immediately and remains the fallback
+ * when weather is unreachable.
  *
  * Who it is addressed to comes from `app.general.userName`, set in Settings →
  * General → Your name. With no name the greeting stands alone ("Good evening");
  * naming somebody the greeting did not choose for them is the one thing it must
  * not do.
  */
+/**
+ * The greeting, ranked by how much it actually says.
+ *
+ * Three tiers, most interesting first. Severe weather (a storm, rain) beats the
+ * clock because it is the thing that will shape the day. The clock comes next --
+ * late night and morning are worth naming. Everything else falls through to the
+ * plain time of day. A grey sky does not outrank the hour: "Cloudy day" was
+ * spending the one line this screen has on the least interesting fact available,
+ * and it was doing it most of the time.
+ */
 function greetingFor(hour: number, name: string, weather: WeatherCondition | null): string {
   // A name typed in a hurry (" john") still reads as itself, capitalised once.
   const trimmed = name.trim();
   const whom = trimmed ? trimmed.charAt(0).toUpperCase() + trimmed.slice(1) : "";
-  if (weather) return addressee(weatherGreeting(weather), whom);
+  const notable = weather ? weatherGreeting(weather) : null;
+  if (notable) return addressee(notable, whom);
   if (hour < 5) return addressee("Working late", whom);
   if (hour < 12) return addressee("Good morning", whom);
   if (hour < 18) return addressee("Good afternoon", whom);
@@ -42,23 +53,24 @@ function addressee(words: string, whom: string): string {
   return whom ? `${words}, ${whom}` : words;
 }
 
-/** The headline for a condition, kept in one place so the wording stays short. */
-function weatherGreeting(weather: WeatherCondition): string {
+/**
+ * The headline for a condition, or `null` when it is not worth saying.
+ *
+ * Only weather that changes what the day is like gets to interrupt the clock.
+ */
+function weatherGreeting(weather: WeatherCondition): string | null {
   switch (weather) {
     case "storm":
       return "Stormy out there";
     case "rain":
       return "Rainy day";
+    // These describe the sky rather than the day. Left to the clock.
     case "drizzle":
-      return "A drizzly day";
     case "snow":
-      return "Snowy day";
     case "fog":
-      return "Foggy out there";
     case "cloudy":
-      return "Cloudy day";
     case "clear":
-      return "Clear skies";
+      return null;
   }
 }
 

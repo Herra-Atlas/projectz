@@ -30,12 +30,13 @@ use crate::database::Database;
 /// talks about the voice that will actually speak.
 #[tauri::command]
 pub async fn tts_voice(
+    app: AppHandle,
     database: State<'_, Arc<Database>>,
     voice: Option<String>,
 ) -> Result<VoiceInfo, String> {
     let settings = TtsSettings::load(&database);
     let target = voice.or_else(|| settings.voice.clone());
-    let info = match voices::resolve(target.as_deref()).await {
+    let info = match voices::resolve(Some(&app), target.as_deref()).await {
         Ok(speaking) => speaking.info().await,
         Err(reason) => VoiceInfo::missing(reason),
     };
@@ -44,8 +45,8 @@ pub async fn tts_voice(
 
 /// Every voice the app can speak with, Piper's first.
 #[tauri::command]
-pub async fn tts_voices() -> Vec<VoiceEntry> {
-    voices::list().await
+pub async fn tts_voices(app: AppHandle) -> Vec<VoiceEntry> {
+    voices::list(Some(&app)).await
 }
 
 /// The engine-wide record: which voice, and that voice's pace.
@@ -169,16 +170,20 @@ pub fn tts_set_stream_speech(database: State<'_, Arc<Database>>, on: bool) -> Re
 /// no finished reply was ever read aloud.
 #[tauri::command]
 pub async fn tts_voice_warm(
+    app: AppHandle,
     database: State<'_, Arc<Database>>,
     voice: Option<String>,
 ) -> Result<bool, String> {
     let settings = TtsSettings::load(&database);
     let target = voice.or_else(|| settings.voice.clone());
-    match voices::resolve(target.as_deref()).await {
+    match voices::resolve(Some(&app), target.as_deref()).await {
         Ok(Speaking::Piper(_)) => Ok(true),
         Ok(Speaking::Audiocpp(_)) => {
             Ok(crate::audio::audiocpp::running(crate::audio::audiocpp::Purpose::Speech).await)
         }
+        // A speech model is a server like audio.cpp's: whether speaking now would
+        // cost a cold start is whether that server is already up.
+        Ok(Speaking::Llamacpp(_)) => Ok(crate::audio::speech::running().await),
         Err(_) => Ok(false),
     }
 }
@@ -293,7 +298,7 @@ pub async fn tts_speak(
     };
     let speed = settings.speed_for(speed_key.as_deref());
     let target = voice.or_else(|| settings.voice.clone());
-    let resolved = voices::resolve(target.as_deref()).await?;
+    let resolved = voices::resolve(Some(&app), target.as_deref()).await?;
 
     match resolved {
         Speaking::Piper(p_voice) => {
@@ -313,6 +318,14 @@ pub async fn tts_speak(
             let speed = if speed > 0.0 { speed } else { 1.0 };
             let (pcm, _rate) =
                 audiocpp::synthesize(&model, &text, Some(speed), &app, &database).await?;
+            Ok(Response::new(pcm))
+        }
+        Speaking::Llamacpp(model) => {
+            // The stored pace is not passed: the model's voice is prompt-driven
+            // and its speed is a sampling property, not a length scale. Saying
+            // nothing is honest; inventing a multiplier would be a control that
+            // looks like it works and does not.
+            let (_rate, pcm) = crate::audio::speech::speak(&app, &model, &text).await?;
             Ok(Response::new(pcm))
         }
     }

@@ -25,12 +25,15 @@ mod tests {
     use crate::ai::types::ReasoningEffort;
     use serde_json::{json, Value};
 
-    /// The retry is exactly one, so a real failure is reported rather than retried
-    /// indefinitely. The requirement is "try again once, then say it failed", and
-    /// this number is the whole of that promise.
+    /// The retry is bounded, and it is more than one because a rate limit needs
+    /// room to clear. What stops it from becoming an indefinite march is the
+    /// status filter -- only a rejection that can clear is asked again (see
+    /// `retry_tests::a_client_error_is_not_retried`), so four retries are only
+    /// ever spent on the transient side.
     #[test]
-    fn a_request_is_retried_exactly_once() {
-        assert_eq!(REQUEST_ATTEMPTS, 2);
+    fn a_request_is_retried_a_bounded_number_of_times() {
+        assert!(REQUEST_ATTEMPTS > 2);
+        assert!(REQUEST_ATTEMPTS <= 5);
     }
 
     /// The budget is stated, and the last one is an instruction to answer.
@@ -1260,17 +1263,118 @@ fn tool_status(name: &str) -> &'static str {
 /// How many times one request to the provider is attempted before its failure is
 /// final.
 ///
-/// One retry, and no more. The second attempt covers a transient fault -- a
-/// gateway that dropped the connection, a provider that answered 502 to a request
-/// it would have taken a moment later -- and past that a repeated failure is a
-/// real one, so whoever is waiting is told rather than being made to sit through a
-/// third and fourth try. The retry is applied to the *request*, never to the run:
-/// a request that failed produced no tokens and changed nothing, so re-sending it
-/// cannot duplicate output or replay a tool.
-const REQUEST_ATTEMPTS: u32 = 2;
+/// Five, but not five blind ones: only a status that can actually clear is asked
+/// again (see [`worth_retrying`]), and the waits grow between attempts. The first
+/// attempt covers a transient fault -- a gateway that dropped the connection, a
+/// provider that answered 502 to a request it would have taken a moment later --
+/// and a rate limit needs the extra room a single half-second retry never gave it.
+/// The retry is applied to the *request*, never to the run: a request that failed
+/// produced no tokens and changed nothing, so re-sending it cannot duplicate
+/// output or replay a tool.
+const REQUEST_ATTEMPTS: u32 = 5;
 
-/// How long to wait before the retry, so a moment's fault has a chance to clear.
+/// The wait before the second attempt. Each later one doubles it.
+///
+/// Half a second used to be the *whole* retry policy, which is why a 429 read as
+/// "no retry at all": a rate-limited provider was asked again immediately, said
+/// no again, and the one error the user ever saw was the second refusal.
 const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The longest the app will sit on a retry. A provider that asks for longer than
+/// this gets the error instead: a reply that waits a minute is a reply that has
+/// already failed as far as the person watching the spinner is concerned.
+const RETRY_CAP: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Whether asking again could succeed.
+///
+/// 429 is the one that matters in practice -- providers meter a budget per minute
+/// and the answer is "wait", not "give up". 408 and the 5xx family are the
+/// transient side. A 400, 401, 403 or 404 will fail identically forever, so those
+/// are handed back on the first attempt instead of pretending to retry.
+fn worth_retrying(status: u16) -> bool {
+    matches!(status, 408 | 429 | 500 | 502 | 503 | 504)
+}
+
+/// How long to wait before the next attempt, or `None` when there is no next one.
+///
+/// The provider's `Retry-After` wins whenever it sends one: it is the only party
+/// that knows when its own window reopens. Without it the delay doubles from
+/// [`RETRY_DELAY`], so a blip clears in half a second and an outage still gives up
+/// in three and a half.
+fn retry_delay(attempt: u32, retry_after: Option<&str>) -> Option<std::time::Duration> {
+    if attempt >= REQUEST_ATTEMPTS {
+        return None;
+    }
+    if let Some(asked) = retry_after.and_then(|value| value.trim().parse::<u64>().ok()) {
+        if asked > 0 {
+            return Some(std::time::Duration::from_secs(
+                asked.min(RETRY_CAP.as_secs()),
+            ));
+        }
+    }
+    let steps = attempt.saturating_sub(1).min(8);
+    let delay = RETRY_DELAY.saturating_mul(1u32 << steps);
+    Some(delay.min(RETRY_CAP))
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// A rate limit is the one rejection that says "later", so it is retried.
+    #[test]
+    fn a_rate_limit_is_worth_another_attempt() {
+        assert!(worth_retrying(429));
+        assert!(worth_retrying(503));
+        assert!(worth_retrying(408));
+    }
+
+    /// Repeating a request the provider has refused on its merits cannot help.
+    #[test]
+    fn a_client_error_is_not_retried() {
+        assert!(!worth_retrying(400));
+        assert!(!worth_retrying(401));
+        assert!(!worth_retrying(403));
+        assert!(!worth_retrying(404));
+    }
+
+    /// The waits grow, so a short blip is cheap and a longer outage still clears.
+    #[test]
+    fn the_wait_doubles_between_attempts() {
+        assert_eq!(retry_delay(1, None), Some(Duration::from_millis(500)));
+        assert_eq!(retry_delay(2, None), Some(Duration::from_millis(1000)));
+        assert_eq!(retry_delay(3, None), Some(Duration::from_secs(2)));
+        assert_eq!(retry_delay(4, None), Some(Duration::from_secs(4)));
+    }
+
+    /// There is a last attempt, and it does not sleep first.
+    #[test]
+    fn the_final_attempt_does_not_wait() {
+        assert_eq!(retry_delay(REQUEST_ATTEMPTS, None), None);
+    }
+
+    /// What the provider asks for wins: it alone knows when its window reopens.
+    #[test]
+    fn retry_after_is_honoured_and_capped() {
+        assert_eq!(retry_delay(1, Some("3")), Some(Duration::from_secs(3)));
+        assert_eq!(
+            retry_delay(1, Some("120")),
+            Some(RETRY_CAP),
+            "a minute-long wait is worse than the error"
+        );
+    }
+
+    /// A malformed or absent header falls back to the doubling, not to zero.
+    #[test]
+    fn an_unreadable_retry_after_falls_back_to_the_backoff() {
+        assert_eq!(
+            retry_delay(2, Some("soon")),
+            Some(Duration::from_millis(1000))
+        );
+        assert_eq!(retry_delay(2, Some("0")), Some(Duration::from_millis(1000)));
+    }
+}
 
 /// One connection pool for every provider request in the app.
 ///
@@ -1326,17 +1430,35 @@ async fn send_request(
             Ok(response) if response.status().is_success() => return Ok(response),
             Ok(response) => {
                 let status = response.status();
+                // Read before the body is consumed: this header is the provider
+                // telling us exactly when to come back.
+                let retry_after = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string);
                 let response_body = response.text().await.unwrap_or_default();
                 last_error = explain_failure(status, &response_body);
                 warn!(endpoint = %endpoint.name, attempt, %status, "provider rejected the request");
+                // A rejection that repeating cannot fix is handed back now -- the
+                // user reads the real reason instead of the same refusal four
+                // times over.
+                if !worth_retrying(status.as_u16()) {
+                    return Err(last_error);
+                }
+                match retry_delay(attempt, retry_after.as_deref()) {
+                    Some(delay) => tokio::time::sleep(delay).await,
+                    None => return Err(last_error),
+                }
             }
             Err(error) => {
                 last_error = format!("Request failed: {error}");
                 warn!(endpoint = %endpoint.name, attempt, %error, "chat request failed");
+                match retry_delay(attempt, None) {
+                    Some(delay) => tokio::time::sleep(delay).await,
+                    None => return Err(last_error),
+                }
             }
-        }
-        if attempt < REQUEST_ATTEMPTS {
-            tokio::time::sleep(RETRY_DELAY).await;
         }
     }
     Err(last_error)
@@ -1363,6 +1485,55 @@ struct StreamBody<'a> {
     tools: Option<&'a Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<&'static str>,
+    /// Where the bundled server stops emitting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop: Option<&'static [&'static str]>,
+}
+
+/// The marker a multimodal local model uses to switch from words to audio.
+///
+/// LFM3 Audio answers in text and then keeps going with speech tokens, which are
+/// hundreds of generation steps nobody can see: the reply looks finished while
+/// the GPU works for another half minute. The bundled server is the only place
+/// this can be stopped per request, and a stop string that never occurs costs
+/// nothing -- which is why this is sent to every local model rather than to a
+/// list of names the app would have to keep.
+const AUDIO_OUT: &[&str] = &["<|audio_out|>"];
+
+#[cfg(test)]
+mod stop_tests {
+    use super::*;
+
+    fn body(stop: Option<&'static [&'static str]>) -> StreamBody<'static> {
+        StreamBody {
+            model: "m",
+            messages: &[],
+            stream: true,
+            stream_options: StreamOptions {
+                include_usage: true,
+            },
+            reasoning_effort: None,
+            reasoning_control: stop.map(|_| true),
+            tools: None,
+            tool_choice: None,
+            stop,
+        }
+    }
+
+    /// The bundled server is told where the words end and the speech begins.
+    #[test]
+    fn a_local_request_carries_the_audio_stop() {
+        let sent = serde_json::to_value(body(Some(AUDIO_OUT))).unwrap();
+        assert_eq!(sent["stop"][0], "<|audio_out|>");
+    }
+
+    /// A provider's endpoint never sees the field: it would reject a stop string
+    /// it has no reason to know, and the marker cannot occur there anyway.
+    #[test]
+    fn a_remote_request_has_no_stop_field() {
+        let sent = serde_json::to_value(body(None)).unwrap();
+        assert!(sent.get("stop").is_none());
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -1389,11 +1560,14 @@ async fn stream_completion(
         model,
         messages,
         stream: true,
-        stream_options: StreamOptions { include_usage: true },
+        stream_options: StreamOptions {
+            include_usage: true,
+        },
         reasoning_effort: reasoning.wire_value(),
         reasoning_control: enable_reasoning_control.then_some(true),
         tools,
         tool_choice: tools.map(|_| "auto"),
+        stop: enable_reasoning_control.then_some(AUDIO_OUT),
     };
     info!(run_id, endpoint = %endpoint.name, model, messages = messages.len(), "remote stream start");
     // The one retry lives in here, so a transient provider fault on any round of

@@ -24,8 +24,13 @@ export type SttModel = {
   size: number;
   /** Parakeet is a different model family, read by a different executable. */
   parakeet: boolean;
-  /** True when the file belongs to the audio.cpp engine, under `models/audio`. */
-  audio: boolean;
+  /**
+   * Which engine serves this file: `whisper`, `audiocpp` or `llamacpp`.
+   *
+   * A string rather than a flag per engine, so a fourth engine is one more value
+   * instead of another boolean that can contradict the ones already there.
+   */
+  engine: string;
   /** The audio.cpp family the model names, empty for a whisper model. */
   family: string;
 };
@@ -42,6 +47,15 @@ export type SttSettings = {
   device: string | null;
   /** Keep the recognition model in memory between recordings. */
   keepLoaded: boolean;
+  /**
+   * Send a finished transcript as a message instead of leaving it in the draft.
+   *
+   * Read on each press rather than watched for changes, so a switch flipped in
+   * Settings applies to the next recording without an event to keep in step.
+   */
+  autoSend: boolean;
+  /** Quiet, in milliseconds, that ends a recording once speech has been heard. */
+  silenceMs: number;
 };
 
 /** Mirrors `stt::commands::Inputs`. */

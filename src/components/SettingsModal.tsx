@@ -3,12 +3,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open as openFile } from "@tauri-apps/plugin-dialog";
-import { ArrowLeft, AudioLines, Bell, BookMarked, Bot, Brain, ChevronDown, ChevronRight, CircleDot, Cpu, Disc3, Download, GripVertical, Info, Mic, MoveRight, Palette, Pencil, Plug, Plus, Scissors, Search, Server, Settings2, SlidersHorizontal, Smartphone, Sparkles, Trash2, Volume2, X, Zap } from "lucide-react";
+import { ArrowLeft, AudioLines, Bell, BookMarked, Bot, Brain, ChevronDown, ChevronRight, CircleDot, Cpu, Disc3, Download, GripVertical, Info, Keyboard, Mic, MoveRight, Palette, Pencil, Plug, Plus, Scissors, Search, Server, Settings2, SlidersHorizontal, Smartphone, Sparkles, Trash2, Volume2, X, Zap } from "lucide-react";
 import { resolveTheme, type Appearance } from "../features/appearance/appearance";
 import AccentPicker from "./appearance/AccentPicker";
 import ThemePicker from "./appearance/ThemePicker";
 import ProviderIcon from "./ProviderIcon";
-import ModelBadges from "./modelBadges/ModelBadges";
+import { LocalModelCapabilityMarks } from "./modelBadges/LocalModelBadges";
+import { ModelModalityToggle } from "./modelBadges/ModelModalityToggle";
 import EnginesSettingsPage from "./EnginesSettingsPage";
 import { engineLabel } from "./EnginePicker";
 import RuntimeSettingsPage, { type LocalRuntimeSettings } from "./RuntimeSettingsPage";
@@ -34,6 +35,7 @@ import { VoiceEnrollPage } from "./settings/voice/VoiceEnrollPage";
 import { SettingsNavGroup, navButtonClass } from "./settings/SettingsNavGroup";
 import { DownloadsPage } from "./settings/downloads/DownloadsPage";
 import { SystemPage } from "./settings/SystemPage";
+import { KeybindsPage } from "./settings/KeybindsPage";
 import { HoldToDelete } from "./HoldToDelete";
 import type { DownloadJob } from "../features/downloads/types";
 import { TtsVoiceSettingsPage } from "./settings/voice/TtsVoiceSettingsPage";
@@ -616,6 +618,39 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
     }
   };
 
+  /**
+   * A finished download registers its model in the backend, and this dialog is
+   * where that model is read.
+   *
+   * The listener used to live in the download page alone, so leaving that page
+   * while a download was still running -- which is the normal thing to do --
+   * meant the file landed, the event was emitted to nobody, and the Local page
+   * kept showing the list it had read when the dialog opened. The model appeared
+   * only after a restart. The modal is mounted the whole time, so it is the
+   * owner that can always hear this.
+   */
+  useEffect(() => {
+    let live = true;
+    let stop: (() => void) | undefined;
+    void listen<string>("downloads-installed", (event) => {
+      if (!live || event.payload !== "llama") return;
+      void refreshLocalModels();
+      // The header switcher and the job editor read the same library through a
+      // separate registry, and its key is what makes them re-read.
+      onEndpointsChanged();
+    }).then((unlisten) => {
+      if (live) stop = unlisten;
+      else unlisten();
+    });
+    return () => {
+      live = false;
+      stop?.();
+    };
+    // `refreshLocalModels` and `onEndpointsChanged` are stable for the life of the
+    // dialog; re-subscribing on every render would only risk missing a tick.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   /** The engine group under a client-space point, if the pointer is over one. */
   const engineAt = (x: number, y: number): string | null => {
     const element = document.elementFromPoint(x, y);
@@ -947,6 +982,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
                 apart says so. `mt-auto` pins it once the list fits; when the window
                 is too short, the whole nav scrolls and this comes last. */}
             <div aria-hidden="true" className="hidden sm:mt-auto sm:block sm:h-px sm:bg-[var(--line)]" />
+            <button type="button" data-settings-nav="keybinds" aria-label="Keybinds" onClick={() => setPage({ view: "keybinds" })} className={`flex min-h-9 shrink-0 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "keybinds" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Keyboard size={16} />Keybinds</button>
             <button type="button" data-settings-nav="system" aria-label="System" onClick={() => setPage({ view: "system" })} className={`flex min-h-9 shrink-0 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "system" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Info size={16} />System</button>
           </nav>
 
@@ -989,9 +1025,18 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
                         {allModels.length === 0 ? <p className="py-2 text-xs text-[var(--quiet)]">No models discovered. Test the provider to find models.</p> : <div className="divide-y divide-[var(--line)]">
                           {allModels.filter((model) => model.toLowerCase().includes((providerModelQueries[endpoint.id] ?? "").trim().toLowerCase())).map((model) => {
                             const enabled = !endpoint.disabled_models.includes(model);
-                            return <button key={model} type="button" disabled={loading} aria-pressed={enabled} onClick={() => setProviderModelEnabled(endpoint, model, !enabled)} className="flex min-h-9 w-full items-center gap-3 py-1.5 pr-2 text-left text-xs hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] disabled:opacity-50">
-                              <span className="min-w-0 flex-1 truncate text-[var(--muted)]" title={model}>{model}</span><ModelBadges capabilities={capabilitiesByModel[`${endpoint.id}:${model}`]} /><span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] ${enabled ? "text-[var(--accent)]" : "text-[var(--quiet)]"}`}>{enabled ? "Enabled" : "Disabled"}</span>
-                            </button>;
+                            const key = `${endpoint.id}:${model}`;
+                            return <div key={model} className="flex min-h-9 w-full items-center gap-3 py-1.5 pr-2 text-xs hover:bg-[var(--raised)]">
+                              <button type="button" disabled={loading} aria-pressed={enabled} onClick={() => setProviderModelEnabled(endpoint, model, !enabled)} className="flex min-w-0 flex-1 items-center gap-3 text-left focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] disabled:opacity-50">
+                                <span className="min-w-0 flex-1 truncate text-[var(--muted)]" title={model}>{model}</span>
+                              </button>
+                              {/* The marks are controls: a provider that never
+                                  listed modalities left the composer refusing a
+                                  file the model takes, and this is where the
+                                  user corrects it. */}
+                              <ModelModalityToggle endpointId={endpoint.id} model={model} capabilities={capabilitiesByModel[key]} disabled={loading} onChange={(next) => setCapabilitiesByModel((current) => ({ ...current, [key]: next }))} />
+                              <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] ${enabled ? "text-[var(--accent)]" : "text-[var(--quiet)]"}`}>{enabled ? "Enabled" : "Disabled"}</span>
+                            </div>;
                           })}
                         </div>}
                       </div>}
@@ -1150,6 +1195,12 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
                                 this where it already stats the model, so the frontend
                                 cannot disagree with the loader about what exists. */}
                             {!model.present && <span className="shrink-0 text-[11px] text-[var(--danger)]">File missing</span>}
+                            {/* What the model's own files say it can take and
+                                produce, read from the projector and the chat
+                                template -- beside the size, because the two
+                                together are the reason to pick one row over
+                                another. */}
+                            <LocalModelCapabilityMarks model={model} />
                             <span className="hidden text-[11px] text-[var(--muted)] sm:block">{formatSize(model.size_bytes)}</span>
                             <button type="button" onClick={() => { setFormError(""); setPage({ view: "model", model }); }} className="grid size-8 shrink-0 place-items-center rounded-md text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" aria-label={`Settings for ${model.name}`} title="Model settings"><Settings2 size={16} /></button>
                             <HoldToDelete onConfirm={() => void removeLocalModel(model)} label={`Remove ${model.name}`} title="Remove model from list" className="grid size-8 shrink-0 place-items-center rounded-md text-[var(--quiet)] hover:bg-[var(--raised)] hover:text-[var(--danger)]"><Trash2 size={16} /></HoldToDelete>
@@ -1175,7 +1226,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
                 onCreateVoice={() => setPage({ view: "voiceEnroll" })}
                 notify={notify}
               />
-              : page.view === "tts" ? <TextToSpeechPage onDownload={(engine) => setPage({ view: "download", kind: engine, group: engine === "audio" ? "speech" : undefined })} onVoiceSettings={(voice, engine) => setPage(engine === "audiocpp" ? { view: "audioModel", model: voice } : { view: "ttsVoice", voice })} onOpenEngines={() => setPage({ view: "engines" })} notify={notify} />
+              : page.view === "tts" ? <TextToSpeechPage onDownload={(engine) => setPage({ view: "download", kind: engine, group: engine === "audio" ? "speech" : undefined })} onVoiceSettings={(voice, engine) => setPage(engine === "audiocpp" ? { view: "audioModel", model: voice } : engine === "llamacpp" ? { view: "local" } : { view: "ttsVoice", voice })} onOpenEngines={() => setPage({ view: "engines" })} notify={notify} />
               : page.view === "voiceEnroll" ? <VoiceEnrollPage notify={notify} onBack={goBack} />
               : page.view === "audio" ? <AudioEnginePage notify={notify} />
               : page.view === "audioModels" ? <AudioModelsPage onDownload={() => setPage({ view: "download", kind: "audio" })} onModelSettings={(model) => setPage({ view: "audioModel", model })} notify={notify} />
@@ -1194,6 +1245,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
               : page.view === "sttModel" ? <SttModelSettingsPage model={page.model} notify={notify} />
               : page.view === "downloads" ? <DownloadsPage notify={notify} />
               : page.view === "system" ? <SystemPage notify={notify} />
+              : page.view === "keybinds" ? <KeybindsPage notify={notify} />
               : page.view === "model" ? <>
                 <SettingsPageTitle>
                   <h2 className="text-[17px] font-semibold tracking-tight">{page.model.name}</h2>

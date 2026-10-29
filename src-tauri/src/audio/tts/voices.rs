@@ -2,10 +2,10 @@
 //!
 //! # One place a voice comes from
 //!
-//! A voice is a file the user installed -- downloaded from the voice page or
-//! copied in from disk -- so the list is whatever is under `models/tts` (Piper
-//! voices, `.onnx` plus their `.onnx.json`) and `models/audio` (audio.cpp
-//! voices, one gguf each). Nothing is placed by the build.
+//! A voice is either a file the user installed -- `models/tts` (Piper, `.onnx`
+//! plus its `.onnx.json`) or `models/audio` (audio.cpp, one gguf each) -- or a
+//! GGUF speech model from the chat library, whose own template can emit audio.
+//! Nothing is placed by the build.
 //!
 //! # Why a voice is identified by its path
 //!
@@ -13,9 +13,9 @@
 //! name -- and the path is what an engine is given anyway. The stored setting
 //! therefore holds a path, and `resolve` refuses one that is not inside this
 //! app's own folders. Which *engine* a stored path is for is told by the folder
-//! it sits under: `models/audio` is the audio.cpp engine's territory and
-//! `models/tts` is Piper's. There is no second record that can disagree, and no
-//! file that can be resolved under the wrong engine.
+//! it sits under: `models/audio` is audio.cpp's territory, `models/tts` is
+//! Piper's, and a speech model is recognised by being one of the app's own
+//! registered models. There is no second record that can disagree.
 
 use std::path::{Path, PathBuf};
 
@@ -37,8 +37,16 @@ pub struct VoiceEntry {
     pub name: String,
     pub sample_rate: u32,
     pub size: u64,
-    /// `piper` or `audiocpp`, so the page can badge where a voice comes from.
+    /// `piper`, `audiocpp` or `llamacpp`, so the page can badge where a voice
+    /// comes from and group it without a second list.
     pub engine: String,
+    /// Whether this voice can speak right now without a cold start.
+    ///
+    /// Piper is always ready -- its process is per sentence -- and the two
+    /// servers are ready when they are up. A speech model is only offered as a
+    /// voice while it is loaded, which is why the page reads this instead of
+    /// drawing a row that would start a 2 GB process when pressed.
+    pub loaded: bool,
 }
 
 /// Every voice the app can speak with, Piper's first.
@@ -46,7 +54,12 @@ pub struct VoiceEntry {
 /// Async because the audio engine's rate is learned from a synthesis, not
 /// stated in a config: an unread list costs nothing, and a guessed rate sounds
 /// wrong rather than failing loudly.
-pub async fn list() -> Vec<VoiceEntry> {
+///
+/// `app` is what makes the GGUF speech models visible: they are registered in
+/// the chat library rather than living in a speech folder, so only the app can
+/// name them. A caller with no handle (an engine's asset count) passes `None`
+/// and sees the two folder engines.
+pub async fn list(app: Option<&tauri::AppHandle>) -> Vec<VoiceEntry> {
     let mut entries = Vec::new();
     collect(&models_root().join("tts"), &mut entries);
     for model in super::audiocpp::voices() {
@@ -57,7 +70,30 @@ pub async fn list() -> Vec<VoiceEntry> {
             sample_rate,
             size: model.size,
             engine: "audiocpp".to_string(),
+            loaded: crate::audio::audiocpp::running(crate::audio::audiocpp::Purpose::Speech).await,
         });
+    }
+    // One entry per speech model, not one per language or voice: the model is
+    // what is installed, and the voice it uses is decided by the instruction it
+    // is given rather than by a file. Listing eighteen languages as eighteen
+    // voices would invent choices nothing stores.
+    if let Some(app) = app {
+        let loaded = crate::audio::speech::loaded_model().await;
+        for model in crate::audio::speech::installed(app) {
+            if !model.speaks {
+                continue;
+            }
+            entries.push(VoiceEntry {
+                id: model.path.clone(),
+                name: model.name.clone(),
+                sample_rate: crate::audio::speech::known_rate(&model.path),
+                size: std::fs::metadata(&model.path)
+                    .map(|meta| meta.len())
+                    .unwrap_or(0),
+                engine: "llamacpp".to_string(),
+                loaded: loaded.as_deref() == Some(model.path.as_str()),
+            });
+        }
     }
     // Stable order, so a re-render does not reorder the list under the pointer.
     entries.sort_by(|left, right| {
@@ -82,15 +118,40 @@ pub fn canonical(id: Option<&str>) -> Option<String> {
 
 /// The chosen voice, resolved to whichever engine owns its folder.
 ///
-/// A selection whose file has gone fails rather than falling back, because
-/// there is nothing to fall back to: every voice is one the user installed, and
-/// a fallback would pick a *different* user's voice.
-pub async fn resolve(id: Option<&str>) -> Result<Speaking, String> {
-    let id = id.ok_or_else(|| "No voice is installed.".to_string())?;
+/// **A speech model answers when one is installed.** It is a model the user
+/// already has, so reading a reply with it must not load Piper or audio.cpp
+/// beside it -- the same rule recognition follows. `id` still names a specific
+/// voice; when it names a speech model's file that model is chosen, and when
+/// nothing is stored the first such model answers.
+///
+/// A selection whose file has gone falls back to a speech model rather than
+/// failing, for the same reason: there is a voice installed, and refusing to use
+/// it would report no voice while one is plainly there.
+pub async fn resolve(app: Option<&tauri::AppHandle>, id: Option<&str>) -> Result<Speaking, String> {
+    if let Some(app) = app {
+        if let Some(found) = id.and_then(|id| crate::audio::speech::find(app, id)) {
+            if found.speaks {
+                return Ok(Speaking::Llamacpp(found));
+            }
+        }
+    }
+    let Some(id) = id else {
+        if let Some(app) = app {
+            if let Some(model) = crate::audio::speech::speaking(app) {
+                return Ok(Speaking::Llamacpp(model));
+            }
+        }
+        return Err("No voice is installed.".to_string());
+    };
     let path = PathBuf::from(id);
     // Only files this app put here. A stored path is data, and data that names
     // an executable's neighbour is not a voice.
     if !path.is_file() || !is_managed(&path) {
+        if let Some(app) = app {
+            if let Some(model) = crate::audio::speech::speaking(app) {
+                return Ok(Speaking::Llamacpp(model));
+            }
+        }
         return Err(format!("The voice is missing. Expected {id}."));
     }
     if super::audiocpp::owns_path(id) {
@@ -99,6 +160,15 @@ pub async fn resolve(id: Option<&str>) -> Result<Speaking, String> {
             .find(|model| model.path == path)
             .ok_or_else(|| format!("The voice is missing. Expected {id}."))?;
         return Ok(Speaking::Audiocpp(model));
+    }
+    // A GGUF in the chat library is not a Piper voice and must never be handed to
+    // `piper.exe`; the only engines it can belong to are the two servers.
+    if let Some(app) = app {
+        if let Some(model) = crate::audio::speech::find(app, id) {
+            if model.speaks {
+                return Ok(Speaking::Llamacpp(model));
+            }
+        }
     }
     Ok(Speaking::Piper(super::piper::resolve_voice(&path)?))
 }
@@ -109,12 +179,14 @@ pub enum Speaking {
     Piper(super::piper::Voice),
     /// audio.cpp's server, one family and one file.
     Audiocpp(crate::audio::audiocpp::families::Model),
+    /// A GGUF speech model, served by its own `llama-server`.
+    Llamacpp(crate::audio::speech::SpeechModel),
 }
 
 impl Speaking {
     /// What the chat page is told before it offers to read anything aloud.
     ///
-    /// One shape either way, so no caller learns that two engines are behind
+    /// One shape either way, so no caller learns that three engines are behind
     /// one ask.
     pub async fn info(&self) -> VoiceInfo {
         match self {
@@ -122,12 +194,24 @@ impl Speaking {
                 available: true,
                 name: file_name(&voice.model),
                 sample_rate: voice.sample_rate,
+                engine: "piper".to_string(),
                 reason: None,
             },
             Self::Audiocpp(model) => VoiceInfo {
                 available: true,
                 name: model.name.clone(),
                 sample_rate: super::audiocpp::known_rate(&model.path.display().to_string()).await,
+                engine: "audiocpp".to_string(),
+                reason: None,
+            },
+            Self::Llamacpp(model) => VoiceInfo {
+                available: true,
+                name: model.name.clone(),
+                // Zero until the model has spoken once: the rate is not stated
+                // anywhere read before a synthesis, and the frontend treats zero
+                // as unknown rather than playing at a guessed rate.
+                sample_rate: crate::audio::speech::known_rate(&model.path),
+                engine: "llamacpp".to_string(),
                 reason: None,
             },
         }
@@ -146,6 +230,12 @@ pub struct VoiceInfo {
     pub available: bool,
     pub name: String,
     pub sample_rate: u32,
+    /// Which engine will speak: `piper`, `audiocpp` or `llamacpp`.
+    ///
+    /// Carried so the page can shape its work for the engine. A generated voice
+    /// takes seconds per sentence where Piper takes milliseconds, and the chunk
+    /// size that makes a reply start quickly is not the same for the two.
+    pub engine: String,
     /// Why it is unavailable, when it is.
     pub reason: Option<String>,
 }
@@ -158,6 +248,7 @@ impl VoiceInfo {
             available: false,
             name: String::new(),
             sample_rate: DEFAULT_SAMPLE_RATE,
+            engine: String::new(),
             reason: Some(reason),
         }
     }
@@ -234,6 +325,8 @@ fn entry_for(path: &Path) -> Option<VoiceEntry> {
         sample_rate,
         size: std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0),
         engine: "piper".to_string(),
+        // Piper holds no model between sentences, so it is ready by definition.
+        loaded: true,
     })
 }
 

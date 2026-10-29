@@ -696,8 +696,11 @@ mod tests {
     #[test]
     fn a_star_does_not_cross_a_path_separator() {
         let root = root_with(&[("src/a.rs", "needle"), ("src/deep/b.rs", "needle")]);
-        let out = grep(json!({ "pattern": "needle", "glob": "src/*.rs" }), root.clone())
-            .expect("grep");
+        let out = grep(
+            json!({ "pattern": "needle", "glob": "src/*.rs" }),
+            root.clone(),
+        )
+        .expect("grep");
         assert!(out.contains("src/a.rs"), "{out}");
         assert!(!out.contains("src/deep/b.rs"), "{out}");
         let _ = std::fs::remove_dir_all(&root);

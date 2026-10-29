@@ -5,10 +5,11 @@
 //! lives beside this in `stt/`, not inside it -- the two share a settings page
 //! and nothing else.
 //!
-//! Two engines resolve here: Piper, the one this app shipped with, through
-//! `piper.rs`'s per-sentence process; and audio.cpp, through `audiocpp.rs`'s HTTP
-//! call to its server. `voices.rs` is what tells them apart, and nothing else in
-//! this folder ever does.
+//! Two folder engines and one library model resolve here: Piper, the one this
+//! app shipped with, through `piper.rs`'s per-sentence process; audio.cpp,
+//! through `audiocpp.rs`'s HTTP call to its server; and a GGUF speech model,
+//! through `audio::speech`'s server. `voices.rs` is what tells them apart, and
+//! nothing else in this folder ever does.
 
 pub mod audiocpp;
 pub mod commands;
