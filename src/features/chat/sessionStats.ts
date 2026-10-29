@@ -158,7 +158,8 @@ export function computeSessionStats(session: ChatSession): SessionStats {
     // for one. Counted here rather than fetched again so the overview needs no
     // second query.
     for (const step of message.activity ?? []) {
-      if (step.kind !== "tool") continue;
+      // A synthetic row (the retry wait) is drawn like a call but is not one.
+      if (step.kind !== "tool" || step.synthetic) continue;
       const entry = tools.get(step.tool) ?? { tool: step.tool, calls: 0, cached: 0, failed: 0 };
       entry.calls += 1;
       if (step.cached) entry.cached += 1;

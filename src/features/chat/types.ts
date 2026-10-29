@@ -33,6 +33,12 @@ export type ToolStep = {
   seconds?: number;
   running: boolean;
   /**
+   * True for a row the app added rather than a tool the model called. The retry
+   * wait is drawn like a call because that is where the reader is already
+   * looking, but it is not a step and must never be counted as one.
+   */
+  synthetic?: boolean;
+  /**
    * True when the result came from the tool cache, or when the call never ran
    * because its arguments were malformed. Both are reported rather than hidden:
    * a repeat read costs nothing the second time and the panel should say so.

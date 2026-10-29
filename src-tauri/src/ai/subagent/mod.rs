@@ -27,12 +27,14 @@
 //! re-stamped with the parent's run id, because that is the only run the screen
 //! knows about, and the answer comes back through the shared map.
 
+pub mod commands;
 mod prompt;
 mod stats;
 pub(crate) mod transcript;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use serde_json::Value;
@@ -50,6 +52,46 @@ use transcript::{RunRecord, Stamped};
 /// was cancelled before it started. The message names the situation rather than a
 /// bare refusal, so a model that sees it can stop trying.
 const NO_RUN: &str = "Sub-agents are only available during an agent run.";
+
+/// Cancel flags for the sub-agents at work, keyed by their own id.
+///
+/// A sub-agent is started from a tool call, after the parent's `run_chat` has
+/// already built the runtime's run map, so there is no second run id to register
+/// there. The flag is process-wide because an agent id is a UUID minted here and
+/// nothing else can name one. [`cancel`] is what the Stop button reaches.
+fn cancel_flags() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
+    static FLAGS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+    FLAGS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Stops one sub-agent by its id.
+///
+/// Returns whether a run was found. A run that has already finished is not an
+/// error the user needs to see: the stop button may be pressed in the moment the
+/// report lands.
+pub fn cancel(agent_id: &str) -> bool {
+    let Some(flag) = cancel_flags()
+        .lock()
+        .ok()
+        .and_then(|flags| flags.get(agent_id).cloned())
+    else {
+        return false;
+    };
+    flag.store(true, Ordering::Relaxed);
+    true
+}
+
+fn register_cancel(agent_id: &str, flag: Arc<AtomicBool>) {
+    if let Ok(mut flags) = cancel_flags().lock() {
+        flags.insert(agent_id.to_string(), flag);
+    }
+}
+
+fn forget_cancel(agent_id: &str) {
+    if let Ok(mut flags) = cancel_flags().lock() {
+        flags.remove(agent_id);
+    }
+}
 
 /// Starts one sub-agent and returns at once, before it has done any work.
 ///
@@ -120,6 +162,11 @@ pub async fn spawn(arguments: Value, context: ToolContext) -> Result<String, Str
     };
 
     let agent_id = uuid::Uuid::new_v4().to_string();
+    // A flag of this agent's own, so Stop can end one run without ending the
+    // parent or a sibling. A watcher in `run_agent` also sets it when the parent
+    // is stopped, so the parent's own stop still reaches its agents.
+    let cancelled = Arc::new(AtomicBool::new(false));
+    register_cancel(&agent_id, Arc::clone(&cancelled));
     let started_at = crate::database::utc_now();
     // What the user sees this run called: a label the model gave, or the model's
     // own name when it gave none.
@@ -157,6 +204,7 @@ pub async fn spawn(arguments: Value, context: ToolContext) -> Result<String, Str
         started_at,
         kind,
         approval,
+        cancelled,
     };
     tokio::spawn(run_agent(task));
     // Counted only once the task is launched: a refusal above never consumes a
@@ -193,6 +241,8 @@ struct AgentTask {
     /// The approval gate to run under. Its own clone of the parent's when the kind
     /// may change things, or a read-only narrowed one when it may not.
     approval: crate::ai::tools::ApprovalGate,
+    /// This agent's own stop flag, registered so the panel can end it alone.
+    cancelled: Arc<AtomicBool>,
 }
 
 /// Runs the sub-agent to completion and delivers its result.
@@ -215,7 +265,23 @@ async fn run_agent(task: AgentTask) {
         started_at,
         kind,
         approval,
+        cancelled,
     } = task;
+
+    // The parent's stop must still reach its agents, but this agent's own stop
+    // must not reach the parent. A watcher folds the parent's flag into this
+    // one, and ends as soon as either is set -- including on a normal finish,
+    // because `watch.abort()` below stops it.
+    let watch = tokio::spawn({
+        let parent = Arc::clone(&context.cancelled);
+        let child = Arc::clone(&cancelled);
+        async move {
+            while !parent.load(Ordering::Relaxed) && !child.load(Ordering::Relaxed) {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            child.store(true, Ordering::Relaxed);
+        }
+    });
 
     // Collected with arrival times so a thought can be timed. Shared into the
     // event closure by clone, and into each other through the sink.
@@ -360,7 +426,7 @@ async fn run_agent(task: AgentTask) {
             // general one. Either way the pending-prompt map is shared, so an
             // approval still reaches the same answer command.
             approval.clone(),
-            Arc::clone(&context.cancelled),
+            Arc::clone(&cancelled),
             // A sub-agent's own run has no sub-agent default: it cannot spawn, so
             // there is nothing for the value to configure.
             None,
@@ -421,7 +487,7 @@ async fn run_agent(task: AgentTask) {
                         "error": reason,
                     })),
                 });
-                if crate::ai::runtime::wait_before_retry(delay, &context.cancelled).await {
+                if crate::ai::runtime::wait_before_retry(delay, &cancelled).await {
                     // A stop during the wait is the user ending the run, not a
                     // failure: the same shape a cancelled `stream_chat` returns, so
                     // no "did not finish" report is sent for work nobody cancelled
@@ -490,6 +556,11 @@ async fn run_agent(task: AgentTask) {
     // the model retry, route around it, or tell the user -- which is the whole
     // reason the report exists. [`report_for`] holds the rule; this only delivers
     // what it returns.
+    // The run is over, whoever ended it, so nothing can stop it any more and the
+    // watcher has nothing left to watch.
+    watch.abort();
+    forget_cancel(&agent_id);
+
     let Some((report, failed)) = report_for(&result, &display_label) else {
         return;
     };

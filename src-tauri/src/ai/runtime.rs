@@ -229,6 +229,13 @@ impl AiRuntime {
     /// The loop notices the flag between reads and returns, which drops the
     /// response stream -- the closed stream is what ends the generation.
     pub fn cancel_chat(&self, run_id: &str) {
+        // A sub-agent is not in this map: it is started from a tool call after the
+        // parent's run was registered, and it has its own flag so stopping one
+        // agent does not end its parent or its siblings. Its registry is asked
+        // first, because an agent id can never collide with a run id.
+        if crate::ai::subagent::cancel(run_id) {
+            return;
+        }
         if let Some(cancelled) = self.active_runs.lock().unwrap().get(run_id) {
             cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
         }

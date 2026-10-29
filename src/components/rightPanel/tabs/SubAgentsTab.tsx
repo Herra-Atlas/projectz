@@ -1,4 +1,5 @@
-import { Bot, ChevronRight, LoaderCircle } from "lucide-react";
+import { useState, type FormEvent } from "react";
+import { ArrowUp, Bot, ChevronRight, LoaderCircle, Square } from "lucide-react";
 import ActivityPanel from "../../../pages/chat/ActivityPanel";
 import { Markdown } from "../../../pages/chat/Markdown";
 import { markdownComponents, MarkdownActionsProvider } from "../../../pages/chat/markdownComponents";
@@ -33,10 +34,11 @@ type SubAgentsTabProps = {
  * same spinner the sidebar uses for a writing session -- replaces the agent icon,
  * so a run in flight is recognisable at a glance.
  *
- * **Read-only, and deliberately so.** A sub-agent has no composer: it was given
- * one task and finished it, and talking back to it after the fact would either do
- * nothing or start work the parent never asked for. The panel is a record — what
- * the agent read, ran and answered — not a second chat.
+ * **There is a composer, and a run can be stopped.** A finished run is a
+ * conversation like any other: a further message continues it under the same
+ * session, saved and streamed through the ordinary run path. A live row -- its
+ * own brief or a follow-up -- can be stopped from the same control the chat page
+ * uses, and the stop is scoped to this agent rather than its parent.
  *
  * **The transcript is drawn the way the chat draws one**, down to the activity
  * panel and the markdown, because it *is* the same data. A sub-agent's reply
@@ -44,7 +46,9 @@ type SubAgentsTabProps = {
  * shortcut here; it is what keeps the two from looking like different features.
  */
 export default function SubAgentsTab({ parentSessionId, onOpenUrl }: SubAgentsTabProps) {
-  const { runs, activeLive, activeId, transcript, select, close, error, loaded } = useSubAgents(true, parentSessionId);
+  const { runs, activeLive, activeId, transcript, select, close, send, stop, error, loaded } = useSubAgents(true, parentSessionId);
+  const [draft, setDraft] = useState("");
+  const running = activeLive !== null;
 
   // The chat's own overrides, so a link and a code block -- including its copy
   // button -- read the same in a run's transcript as in a reply. The provider
@@ -57,6 +61,20 @@ export default function SubAgentsTab({ parentSessionId, onOpenUrl }: SubAgentsTa
   );
 
   const active = runs.find((run) => run.id === activeId) ?? null;
+
+  /** Sends the draft, restoring it when the run could not be started. */
+  const submitDraft = () => {
+    const text = draft.trim();
+    if (!text || running) return;
+    setDraft("");
+    void send(text).then((sent) => {
+      if (!sent) setDraft(text);
+    });
+  };
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    submitDraft();
+  };
 
   // The one open run: a header that leads back to the list, above its transcript.
   if (active) {
@@ -84,40 +102,23 @@ export default function SubAgentsTab({ parentSessionId, onOpenUrl }: SubAgentsTa
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-          {activeLive ? (
-            <div className="flex flex-col gap-6">
-              <TaskCard text={activeLive.prompt} />
-              <div>
-                {/* The work behind the answer, ticking live while it happens. */}
-                <ActivityPanel steps={activeLive.activity} live renderMarkdown={renderMarkdown} />
-                {activeLive.text ? (
-                  <div className="markdown-content text-[14px] leading-7 text-[var(--text)]">{renderMarkdown(activeLive.text)}</div>
-                ) : (
-                  // Nothing to read yet -- the agent is still thinking or calling
-                  // tools. Said plainly rather than left blank, so an open run does
-                  // not read as a run with no answer.
-                  <p className="flex items-center gap-2 text-[13px] text-[var(--muted)]">
-                    <LiveSpinner gradientId={`pz-spin-${activeLive.id}-body`} size={14} />
-                    Working…
-                  </p>
-                )}
-                <FileChanges steps={activeLive.activity} live />
-              </div>
-            </div>
-          ) : transcript === null ? (
+          {transcript === null && !activeLive ? (
             <div className="flex items-center gap-2 text-sm text-[var(--muted)]">
               <LoaderCircle size={15} className="animate-spin text-[var(--accent)]" />
               Loading the run…
             </div>
           ) : (
             <div className="flex flex-col gap-6">
+              {/* A spawned run's brief is its first turn; a follow-up has none of
+                  its own, and draws the message that started it instead. */}
+              {activeLive?.prompt && <TaskCard text={activeLive.prompt} />}
               {transcript
-                .filter((message) => message.role === "user")
+                ?.filter((message) => message.role === "user")
                 .map((message, index) => (
                   <TaskCard key={`user-${index}`} text={message.content} />
                 ))}
               {transcript
-                .filter((message) => message.role === "assistant")
+                ?.filter((message) => message.role === "assistant")
                 .map((message, index) => (
                   <div key={`assistant-${index}`}>
                     <ActivityPanel steps={message.activity ?? []} live={false} renderMarkdown={renderMarkdown} totalSeconds={message.metrics?.elapsed_seconds} />
@@ -125,9 +126,74 @@ export default function SubAgentsTab({ parentSessionId, onOpenUrl }: SubAgentsTa
                     <FileChanges steps={message.activity ?? []} live={false} />
                   </div>
                 ))}
+              {activeLive && (
+                <>
+                  {activeLive.userText && <UserTurn text={activeLive.userText} />}
+                  <div>
+                    {/* The work behind the answer, ticking live while it happens. */}
+                    <ActivityPanel steps={activeLive.activity} live renderMarkdown={renderMarkdown} />
+                    {activeLive.text ? (
+                      <div className="markdown-content text-[14px] leading-7 text-[var(--text)]">{renderMarkdown(activeLive.text)}</div>
+                    ) : (
+                      // Nothing to read yet -- the agent is still thinking or calling
+                      // tools. Said plainly rather than left blank, so an open run does
+                      // not read as a run with no answer.
+                      <p className="flex items-center gap-2 text-[13px] text-[var(--muted)]">
+                        <LiveSpinner gradientId={`pz-spin-${activeLive.id}-body`} size={14} />
+                        Working…
+                      </p>
+                    )}
+                    <FileChanges steps={activeLive.activity} live />
+                  </div>
+                </>
+              )}
             </div>
           )}
         </div>
+
+        {/* The chat composer's card, for this conversation. The field is closed
+            while the agent works -- there is one run to watch and one thing worth
+            pressing -- and the button becomes Stop, the same control the chat page
+            shows for its own run. */}
+        <form onSubmit={submit} className="shrink-0 border-t border-[var(--line)] px-3 py-2.5">
+          <div className="flex items-end gap-1 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5 shadow-[0_8px_24px_-14px_rgba(0,0,0,0.5)] transition-colors focus-within:border-[color-mix(in_srgb,var(--accent)_30%,var(--line))]">
+            <textarea
+              aria-label="Message this agent"
+              rows={1}
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter" || event.shiftKey) return;
+                event.preventDefault();
+                submitDraft();
+              }}
+              disabled={running}
+              placeholder={running ? "The agent is working…" : "Message this agent…"}
+              className="max-h-[9.5rem] min-h-9 min-w-0 flex-1 resize-none overflow-y-auto bg-transparent px-1.5 py-2 text-[14px] leading-6 text-[var(--text)] outline-none placeholder:text-[var(--quiet)] disabled:cursor-not-allowed disabled:opacity-60"
+            />
+            {running ? (
+              <button
+                type="button"
+                onClick={() => void stop()}
+                aria-label="Stop agent"
+                title="Stop agent"
+                className="grid size-9 shrink-0 place-items-center rounded-full bg-[var(--raised)] text-[var(--text)] transition-colors hover:bg-[color-mix(in_srgb,var(--accent)_20%,var(--raised))] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+              >
+                <Square size={14} fill="currentColor" />
+              </button>
+            ) : (
+              <button
+                type="submit"
+                disabled={!draft.trim()}
+                aria-label="Send message"
+                title="Send message"
+                className="grid size-9 shrink-0 place-items-center rounded-full bg-[var(--text)] text-[var(--page)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--accent-ink)] disabled:cursor-not-allowed disabled:opacity-35 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+              >
+                <ArrowUp size={18} strokeWidth={2.5} />
+              </button>
+            )}
+          </div>
+        </form>
 
         {error && <p role="alert" className="border-t border-[var(--line)] px-5 py-2 text-[11px] text-[var(--danger)]">{error}</p>}
       </div>
@@ -188,6 +254,15 @@ function RunMark({ id, running, size = 14 }: { id: string; running: boolean; siz
     <span role="status" aria-label="Agent is working" title="Agent is working" className="grid size-4 shrink-0 place-items-center text-[var(--accent)]">
       <LiveSpinner gradientId={`pz-spin-${id}`} size={size} />
     </span>
+  );
+}
+
+/** The user's turn in a follow-up, drawn as theirs rather than as the agent's brief. */
+function UserTurn({ text }: { text: string }) {
+  return (
+    <article className="ml-auto max-w-[85%] rounded-lg bg-[var(--raised)] px-3 py-2">
+      <p className="whitespace-pre-wrap break-words text-[13px] leading-6 text-[var(--text)]">{text}</p>
+    </article>
   );
 }
 

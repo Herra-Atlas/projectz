@@ -416,6 +416,7 @@ async fn attempt(
             local_model,
             model: model_name,
             provider_label,
+            metadata: None,
             mode,
             permission: turn.permission,
             access: turn.access,

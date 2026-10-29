@@ -62,6 +62,10 @@ export function useSubAgents(enabled: boolean, parentSessionId: string | null) {
   liveRef.current = live;
   const parentRef = useRef(parentSessionId);
   parentRef.current = parentSessionId;
+  // The stored headers, for `send`: the run being continued may be a finished row
+  // rather than a live one, and the composer needs its model and parent.
+  const headersRef = useRef<SubAgentRun[]>([]);
+  headersRef.current = headers;
 
   const refresh = useCallback(async () => {
     try {
@@ -148,6 +152,68 @@ export function useSubAgents(enabled: boolean, parentSessionId: string | null) {
     setTranscript(null);
   }, []);
 
+  /**
+   * Sends one message to the run on screen.
+   *
+   * The run id is minted here, before the backend starts, so the listener can
+   * fold the first event into a live entry this call has already added. A failed
+   * start removes the entry rather than leaving a permanent "working" row.
+   */
+  const send = useCallback(async (text: string) => {
+    const agentId = activeIdRef.current;
+    const message = text.trim();
+    if (!agentId || !message) return false;
+    const runId = crypto.randomUUID();
+    const header = headersRef.current.find((run) => run.id === agentId);
+    setLive((current) => [
+      ...current.filter((run) => run.id !== agentId),
+      {
+        id: agentId,
+        title: header?.title ?? "Sub-agent",
+        parentSessionId: header?.parentSessionId ?? parentRef.current,
+        prompt: "",
+        modelId: header?.modelId ?? "",
+        providerId: header?.providerId ?? "",
+        startedAt: new Date().toISOString(),
+        activity: [],
+        text: "",
+        reasoning: "",
+        searching: false,
+        runId,
+        userText: message,
+      },
+    ]);
+    try {
+      await invoke("ai_subagent_send", { agentId, text: message, runId });
+      setError("");
+      return true;
+    } catch (reason: unknown) {
+      setLive((current) => current.filter((run) => run.id !== agentId));
+      setError(String(reason));
+      return false;
+    }
+  }, []);
+
+  /**
+   * Stops the run on screen.
+   *
+   * A spawned agent is stopped by its own id; a follow-up is an ordinary chat run
+   * and uses the run id the panel minted. The backend answers both through the
+   * same command, because it is the same wish.
+   */
+  const stop = useCallback(async () => {
+    const id = activeIdRef.current;
+    if (!id) return;
+    const liveRun = liveRef.current.find((run) => run.id === id);
+    const target = liveRun?.runId ?? id;
+    try {
+      await invoke("ai_cancel_chat", { runId: target });
+      setError("");
+    } catch (reason: unknown) {
+      setError(String(reason));
+    }
+  }, []);
+
   useEffect(() => {
     if (!enabled) return;
     const pending = listen<AiEvent>("ai-event", (event) => {
@@ -177,15 +243,40 @@ export function useSubAgents(enabled: boolean, parentSessionId: string | null) {
         }
         return;
       }
-      // Any other event belongs to a run's stream only if we are tracking that run
-      // id. The parent run's own events fall through here and are ignored.
-      const run = liveRef.current.find((entry) => entry.id === payload.run_id);
+      // Any other event belongs to a run's stream only if we are tracking that
+      // run id -- or, for a follow-up, the chat run id this panel minted. The
+      // parent run's own events fall through here and are ignored.
+      const run = liveRef.current.find(
+        (entry) => entry.id === payload.run_id || entry.runId === payload.run_id,
+      );
       if (!run) return;
       foldEvent(run, payload);
       // A fresh array identity, so the panel re-renders from the mutated run.
       setLive((current) => [...current]);
+      // A follow-up is an ordinary chat run, so it ends with `completed`,
+      // `failed` or `stopped` rather than the `subagent` notice a spawned run
+      // sends. Its transcript is written after the stream ends, and the
+      // `messaging-event` below is what says the row is saved -- reloading here
+      // would read it before the reply had been written.
     });
-    return () => { pending.then((unlisten) => unlisten()); };
+    // The follow-up's save, after which the stored transcript is the truth. The
+    // stream's own last event arrives before the write, so this is the moment to
+    // swap the in-memory run for the row it became.
+    const saved = listen<{ sessionId?: string; kind?: string }>("messaging-event", (event) => {
+      const id = event.payload.sessionId;
+      if (!id) return;
+      const run = liveRef.current.find((entry) => entry.id === id && entry.runId);
+      if (!run) return;
+      const next = liveRef.current.filter((entry) => entry.id !== id);
+      liveRef.current = next;
+      setLive(next);
+      void refresh();
+      if (activeIdRef.current === id) void select(id);
+    });
+    return () => {
+      pending.then((unlisten) => unlisten());
+      saved.then((unlisten) => unlisten());
+    };
   }, [enabled, refresh, select]);
 
   // Running runs first, then finished ones, each group newest first from its own
@@ -193,11 +284,15 @@ export function useSubAgents(enabled: boolean, parentSessionId: string | null) {
   // list row shows until the stored row replaces it.
   const runs = useMemo<SubAgentListItem[]>(() => {
     const running = live.map((run) => ({ id: run.id, title: run.title, updatedAt: run.startedAt, running: true }));
-    const finished = headers.map((run) => ({ id: run.id, title: run.title, updatedAt: run.updatedAt, running: false }));
+    // A follow-up continues a row that is already stored, so the same id would
+    // otherwise appear twice: once streaming, once finished.
+    const finished = headers
+      .filter((run) => !live.some((entry) => entry.id === run.id))
+      .map((run) => ({ id: run.id, title: run.title, updatedAt: run.updatedAt, running: false }));
     return [...running, ...finished];
   }, [live, headers]);
 
   const activeLive = live.find((run) => run.id === activeId) ?? null;
 
-  return { runs, activeLive, activeId, transcript, select, close, refresh, error, loaded };
+  return { runs, activeLive, activeId, transcript, select, close, send, stop, refresh, error, loaded };
 }

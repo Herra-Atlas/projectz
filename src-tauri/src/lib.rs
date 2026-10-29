@@ -266,6 +266,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::ai_chat,
             commands::ai_cancel_chat,
+            ai::subagent::commands::ai_subagent_send,
             commands::ai_compact_session,
             commands::ai_recap_messages,
             commands::ai_set_run_permission,

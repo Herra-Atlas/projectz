@@ -174,6 +174,7 @@ async fn execute(
             local_model,
             model,
             provider_label,
+            metadata: None,
             mode: job.mode,
             permission: job.permission,
             // The job's own access set, with scheduling taken off it. Enforced here rather

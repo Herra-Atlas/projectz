@@ -66,6 +66,14 @@ pub struct PromptRun {
     /// The label stored on the session row. A local run uses the model id; a
     /// provider run uses the model name.
     pub provider_label: String,
+    /// Conversation metadata the caller wants carried through the save.
+    ///
+    /// A caller continuing a conversation it did not create -- a sub-agent run
+    /// being talked to from the panel -- must not drop the fields the row already
+    /// carries (`kind`, `parentSessionId`, the pin, the permission). The session
+    /// record is rebuilt from the request on every save, so the values that make
+    /// the row what it is have to travel with the request.
+    pub metadata: Option<serde_json::Value>,
     pub mode: ToolMode,
     pub permission: PermissionMode,
     pub access: AccessSet,
@@ -214,7 +222,7 @@ fn conversation(spec: &PromptRun) -> Vec<serde_json::Value> {
 /// The session row both writes use, so the started and finished records cannot
 /// disagree about anything except the messages.
 fn session_record(spec: &PromptRun, messages: Vec<serde_json::Value>) -> serde_json::Value {
-    json!({
+    let mut record = json!({
         "id": spec.session_id,
         "title": spec.title,
         "createdAt": spec.created_at,
@@ -223,7 +231,16 @@ fn session_record(spec: &PromptRun, messages: Vec<serde_json::Value>) -> serde_j
         "mode": if spec.mode == ToolMode::Agent { "agent" } else { "chat" },
         "modelId": spec.provider_label,
         "messages": messages,
-    })
+    });
+    // The caller's own fields win over the generated ones. A sub-agent's row is
+    // identified by `kind` and `parentSessionId`, and a follow-up save that did not
+    // carry them would detach the run from the conversation that owns it.
+    if let (Some(record), Some(extra)) = (record.as_object_mut(), spec.metadata.as_ref().and_then(|value| value.as_object())) {
+        for (key, value) in extra {
+            record.insert(key.clone(), value.clone());
+        }
+    }
+    record
 }
 
 /// Writes the conversation as it stands when the run begins.
@@ -310,6 +327,7 @@ mod tests {
             local_model: false,
             model: None,
             provider_label: "m".into(),
+            metadata: None,
             mode: ToolMode::Agent,
             permission: PermissionMode::AutoWrites,
             access: AccessSet::default(),

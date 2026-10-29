@@ -1094,6 +1094,8 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           outcome: payload.text ?? "",
           failed: false,
           running: false,
+          // Drawn in the panel, but not a call: the header must not count it.
+          synthetic: true,
         });
         if (isActive) {
           setRetryWait({ seconds: delay, attempt, total });

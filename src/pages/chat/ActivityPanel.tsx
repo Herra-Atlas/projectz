@@ -5,15 +5,14 @@ import { formatTokens } from "../../features/chat/sessionStats";
 import type { ActivityStep, DiffLine, NoteStep, ThoughtStep, ToolDiff, ToolStep, ToolStepStats } from "../../features/chat/types";
 
 /**
- * One row of the panel: either a single call, or a run of them folded together.
+ * One row of the panel: one tool call, one thought, or one note.
  *
- * Folding happens here rather than in the message shape because it needs the
- * whole list and no one else does. Reading three files in one turn is ordinary
- * and the useful fact about it is the count, not each path, so consecutive reads
- * share a row while anything else stands on its own.
+ * A tool call is a step, so it is its own row. Nothing is folded: the header
+ * counts calls, and folding two calls behind one "Read 2 files" line made the
+ * header and the list disagree about how many steps a reply took.
  */
 type Row =
-  | { kind: "tool"; steps: ToolStep[] }
+  | { kind: "tool"; step: ToolStep }
   | { kind: "thought"; step: ThoughtStep }
   | { kind: "note"; step: NoteStep };
 
@@ -99,11 +98,10 @@ export default function ActivityPanel({ steps, live, renderMarkdown, totalSecond
         <span className="text-[var(--muted)]">
           {live ? "Working for" : "Worked for"} {formatSeconds(totals.seconds)}
         </span>
-        {/* Tool uses only. A thought is a step the panel lists, but the count in
-            the header is the number of things the agent *did* — the figure the
-            user is scanning for. Counting a thought as one made a reply with a
-            single read read as "2 steps", which is not what anyone means by
-            that. Hidden entirely when there were no tools, so a reply that only
+        {/* Tool uses only: one call is one step, and one step is one row, so the
+            figure always matches the list beneath it. A thought is listed but not
+            counted -- counting it made a reply with a single read read as "2
+            steps". Hidden entirely when there were no tools, so a reply that only
             reasoned does not claim it ran something. */}
         {totals.toolCount > 0 && (
           <span className="text-[var(--quiet)]">
@@ -120,7 +118,7 @@ export default function ActivityPanel({ steps, live, renderMarkdown, totalSecond
             ) : row.kind === "note" ? (
               <NoteRow key={`note-${index}`} step={row.step} renderMarkdown={renderMarkdown} />
             ) : (
-              <ToolRow key={`tool-${index}`} steps={row.steps} live={live} />
+              <ToolRow key={`tool-${index}`} step={row.step} live={live} />
             ),
           )}
         </ol>
@@ -229,20 +227,20 @@ function NoteRow({
 }
 
 /**
- * One tool call, or a run of them folded together.
+ * One tool call.
  *
- * A run carries its count rather than the individual paths, and the paths stay
- * one disclosure away — collapsing saves the reader three near-identical lines
- * without hiding what was read.
+ * One call is one row and one step, so the header's count and the list always
+ * agree. Reads are no longer folded into a "Read 2 files" line: that line was one
+ * row but counted as two steps above it.
  *
- * **Every row opens, including a run of one.** The disclosure is offered when
- * there is something behind it, which is the call's own output: the text the
- * model was handed. Previously only a folded run was clickable, so a single call
- * — the common case, and the one where a command's output or a read's contents
- * are most worth seeing — was the one shape with no way to look at what came
- * back. The output is rendered in a monospace block rather than as markdown,
- * because it is the tool's literal text: a diff, a stack trace or a directory
- * listing is not prose, and formatting it would misrepresent what the model saw.
+ * **Every row opens.** The disclosure is offered when there is something behind
+ * it, which is the call's own output: the text the model was handed. Previously
+ * only a folded run was clickable, so a single call — the common case, and the one
+ * where a command's output or a read's contents are most worth seeing — was the
+ * one shape with no way to look at what came back. The output is rendered in a
+ * monospace block rather than as markdown, because it is the tool's literal text:
+ * a diff, a stack trace or a directory listing is not prose, and formatting it
+ * would misrepresent what the model saw.
  *
  * **A failure reads red on the row, not under it.** The reason used to be printed
  * below every failed row, so a run with a refusal or two carried a wall of error
@@ -250,37 +248,31 @@ function NoteRow({
  * the reason itself sits behind the same disclosure as a success's output: the
  * signal is on the row, the detail is one click away.
  */
-function ToolRow({ steps, live }: { steps: ToolStep[]; live: boolean }) {
+function ToolRow({ step, live }: { step: ToolStep; live: boolean }) {
   const [expanded, setExpanded] = useState(false);
-  const first = steps[0];
-  const running = steps.some((step) => step.running);
-  const seconds = useRunSeconds(steps, live);
-  const failed = steps.some((step) => step.failed);
-  const outcome = groupOutcome(steps);
-  // What is behind the disclosure: each call's diff where it has one, and its
-  // own output otherwise. A write's diff replaces its output rather than sitting
-  // beside it, because the output for an edit is the lines that landed and the
-  // diff is the same lines plus the ones they replaced -- showing both repeats
-  // every added line twice.
-  const outputs = steps.flatMap((step) => {
-    if (step.diff) return [];
-    return step.output ? [{ step, output: step.output }] : [];
-  });
-  const diffs = steps.flatMap((step) => (step.diff ? [{ step, diff: step.diff }] : []));
+  const running = step.running;
+  // Only a running row needs a clock. A finished one reports the backend's
+  // measured figure, so ticking for it would re-render the row once a second for
+  // nothing.
+  const now = useTick(live && running);
+  const seconds = stepSeconds(step, now, live);
+  // A failure's reason lives behind the disclosure rather than on the row, so
+  // the collapsed line only has to say red.
+  const outcome = step.failed ? "" : step.outcome;
+  // A write's diff replaces its output rather than sitting beside it, because the
+  // output for an edit is the lines that landed and the diff is the same lines
+  // plus the ones they replaced -- showing both repeats every added line twice.
+  const hasOutput = step.diff === undefined && Boolean(step.output);
   // A search has nothing to open until its results land, so the row is only a
   // disclosure once they have: a caret over a running search would open nothing.
-  const hasResults = steps.some((step) => step.search);
-  // A failure opens too: its reason lives behind the row rather than printed
-  // beneath it, so the collapsed row only has to say red and the disclosure is
-  // how the reader gets the detail.
-  const collapsible =
-    steps.length > 1 || outputs.length > 0 || diffs.length > 0 || hasResults || failed;
+  // A failure opens too, because its reason lives behind the row.
+  const collapsible = hasOutput || step.diff !== undefined || step.search !== undefined || step.failed;
 
   const label = (
     <>
-      <ToolIcon tool={first.tool} className={failed ? "text-[var(--danger)]" : undefined} />
-      <span className={`shrink-0 ${failed ? "text-[var(--danger)]" : "text-[var(--muted)]"}`}>
-        {collapsible ? groupLabel(steps) : first.label}
+      <ToolIcon tool={step.tool} className={step.failed ? "text-[var(--danger)]" : undefined} />
+      <span className={`shrink-0 ${step.failed ? "text-[var(--danger)]" : "text-[var(--muted)]"}`}>
+        {step.label}
       </span>
       {/* Content-width, and truncating rather than growing. `flex-1` here was
           wrong: it stretched the detail to fill the row, so the figures and the
@@ -288,9 +280,7 @@ function ToolRow({ steps, live }: { steps: ToolStep[]; live: boolean }) {
           width of blank space between the command and its own outcome. `min-w-0`
           with no growth lets it take what it needs and still shrink on a long
           path, which keeps the figures beside the text rather than off-row. */}
-      <span className="min-w-0 truncate text-[var(--quiet)]">
-        {collapsible ? groupDetail(steps) : first.detail}
-      </span>
+      <span className="min-w-0 truncate text-[var(--quiet)]">{step.detail}</span>
     </>
   );
   // Everything after the text lives inside the button, so the whole row is one
@@ -298,14 +288,12 @@ function ToolRow({ steps, live }: { steps: ToolStep[]; live: boolean }) {
   // on either side of it, which read as belonging to two different things.
   const figures = (
     <>
-      {outcome.text && (
+      {outcome && (
         // Shrinks and truncates like the detail above it. It used to be
         // `shrink-0`, so its width was its content's -- a long command's first
         // line or a file's created path pushed the row past the bubble and the
         // transcript grew a horizontal scrollbar.
-        <span className={`min-w-0 truncate text-[var(--quiet)] ${outcome.failed ? "text-[var(--danger)]" : ""}`}>
-          {outcome.text}
-        </span>
+        <span className="min-w-0 truncate text-[var(--quiet)]">{outcome}</span>
       )}
       {seconds > 0 && <span className="shrink-0 text-[var(--quiet)]">{formatSeconds(seconds)}</span>}
       {running && live && (
@@ -336,7 +324,7 @@ function ToolRow({ steps, live }: { steps: ToolStep[]; live: boolean }) {
             // unreadable at a glance. The title carries the whole of it, and
             // TooltipLayer draws it without spending the width the rest of the
             // row needs.
-            title={collapsible ? groupDetail(steps) : first.detail}
+            title={step.detail}
             className="flex min-h-7 min-w-0 flex-1 items-center gap-1.5 rounded text-left hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
           >
             {label}
@@ -344,7 +332,7 @@ function ToolRow({ steps, live }: { steps: ToolStep[]; live: boolean }) {
             {caret}
           </button>
         ) : (
-          <div className="flex min-h-7 min-w-0 flex-1 items-center gap-1.5" title={first.detail}>
+          <div className="flex min-h-7 min-w-0 flex-1 items-center gap-1.5" title={step.detail}>
             {label}
             {figures}
           </div>
@@ -355,33 +343,18 @@ function ToolRow({ steps, live }: { steps: ToolStep[]; live: boolean }) {
         // Indented to the tool icon, not to where the caret used to sit on the
         // left. The content belongs to the call it describes.
         <div className="ml-[18px] pb-1 pl-3">
-          {steps.length > 1 ? (
-            <ul className="space-y-0.5 border-l border-[var(--line)] pb-1">
-              {steps.map((step, index) => (
-                <li key={`${step.tool}-${index}`} className="flex min-h-7 items-center gap-1.5 text-[11px] text-[var(--muted)]">
-                  <ToolIcon tool={step.tool} />
-                  <span className="shrink-0 text-[var(--muted)]">{step.label}</span>
-                  <span className="min-w-0 truncate text-[var(--quiet)]">{step.detail}</span>
-                  {step.cached && <span className="shrink-0 text-[var(--quiet)]">cached</span>}
-                  {step.failed && <span className="min-w-0 max-w-[40%] truncate text-[var(--danger)]">{step.outcome}</span>}
-                </li>
-              ))}
-            </ul>
-          ) : failed ? (
-            // A single failed call has no output stored, so its reason is the one
-            // thing behind the disclosure. In a run the per-step list above
-            // already names each failure, so this would be the same fact twice.
-            <p className="py-0.5 text-[11px] text-[var(--danger)]">{first.outcome}</p>
+          {step.failed && (
+            // A failed call has no output stored, so its reason is the one thing
+            // behind the disclosure. The red label and icon are the signal while
+            // the row is collapsed.
+            <p className="py-0.5 text-[11px] text-[var(--danger)]">{step.outcome}</p>
+          )}
+          {step.diff ? (
+            <DiffBlock label={step.label} diff={step.diff} />
+          ) : step.output ? (
+            <OutputBlock label={step.label} output={step.output} stats={step.stats} />
           ) : null}
-          {diffs.map(({ step, diff }) => (
-            <DiffBlock key={`${step.tool}-diff`} label={step.label} diff={diff} />
-          ))}
-          {outputs.map(({ step, output }) => (
-            <OutputBlock key={`${step.tool}-${output.slice(0, 24)}`} label={step.label} output={output} stats={step.stats} />
-          ))}
-          {steps.flatMap((step) => (step.search ? [step.search] : [])).map((search, index) => (
-            <SearchResults key={`results-${index}`} search={search} />
-          ))}
+          {step.search && <SearchResults search={step.search} />}
         </div>
       )}
     </li>
@@ -600,69 +573,19 @@ function closeSuperseded(steps: ActivityStep[]): ActivityStep[] {
 }
 
 /**
- * Folds consecutive finished reads into one row.
+ * One row per step. A tool call is a step, so it gets its own line.
  *
- * Only reads fold. Two searches are two questions and merging them would say
- * "2 steps" where what happened was two separate lookups, and a running call
- * stays on its own line so the panel can show it ticking.
+ * Reads used to fold into a "Read 2 files" row, which counted as one line but
+ * two calls in the header. The two figures disagreed for the same run -- the list
+ * showed four rows and the header said eight steps. One call, one row, one step
+ * removes the disagreement by construction.
  */
 function buildRows(steps: ActivityStep[]): Row[] {
-  const rows: Row[] = [];
-  for (const step of steps) {
-    const previous = rows[rows.length - 1];
-    const foldable =
-      step.kind === "tool" &&
-      !step.running &&
-      previous?.kind === "tool" &&
-      previous.steps.every((entry) => entry.tool === "read_file");
-    if (foldable) {
-      previous.steps.push(step);
-      continue;
-    }
-    if (step.kind === "thought") rows.push({ kind: "thought", step });
-    else if (step.kind === "note") rows.push({ kind: "note", step });
-    else rows.push({ kind: "tool", steps: [step] });
-  }
-  return rows;
-}
-
-/** The verb phrase for a run of calls. */
-function groupLabel(steps: ToolStep[]): string {
-  if (steps.length === 1) return steps[0].label;
-  return `Read ${steps.length} files`;
-}
-
-/** What a run was pointed at: the folder the reads share. */
-function groupDetail(steps: ToolStep[]): string {
-  if (steps.length === 1) return steps[0].detail;
-  const folders = new Set(
-    steps.map((step) => {
-      const slash = step.detail.lastIndexOf("/");
-      return slash === -1 ? "" : step.detail.slice(0, slash);
-    }),
-  );
-  const [folder] = [...folders];
-  return folder || steps.map((step) => step.detail).join(", ");
-}
-
-/**
- * A failure anywhere outranks the count. "3 files" beside a row where one of
- * them failed is the summary that hides the thing worth knowing.
- */
-function groupOutcome(steps: ToolStep[]): { text: string; failed: boolean } {
-  if (steps.some((step) => step.failed)) {
-    // A run states how many of it failed -- a count, not the error. A single
-    // failure says nothing at all here, because its `outcome` *is* the reason,
-    // and the reason is moved behind the disclosure rather than printed on the
-    // row. The red label and icon are what signal it while collapsed.
-    if (steps.length === 1) return { text: "", failed: true };
-    return {
-      text: `${steps.filter((step) => step.failed).length} of ${steps.length} failed`,
-      failed: true,
-    };
-  }
-  if (steps.length === 1) return { text: steps[0].outcome, failed: false };
-  return { text: "", failed: false };
+  return steps.map((step) => {
+    if (step.kind === "tool") return { kind: "tool", step };
+    if (step.kind === "thought") return { kind: "thought", step };
+    return { kind: "note", step };
+  });
 }
 
 /**
@@ -694,8 +617,10 @@ function groupOutcome(steps: ToolStep[]): { text: string; failed: boolean } {
  * contributes nothing to the sum; the wall clock is what covers it, and it is a
  * span by construction.
  *
- * The step count covers tool uses only, because that is the figure a reader is
- * scanning for: two thoughts and one read is one step, not three.
+ * The step count is the number of tool calls -- one call, one step -- which is
+ * also exactly the number of tool rows the list draws, so the header and the list
+ * cannot disagree. A thought is listed but never counted: two thoughts and one
+ * read is one step, not three.
  */
 function usePanelTotals(
   steps: ActivityStep[],
@@ -707,7 +632,7 @@ function usePanelTotals(
   let toolCount = 0;
   let summed = 0;
   for (const step of steps) {
-    if (step.kind === "tool") toolCount += 1;
+    if (step.kind === "tool" && !step.synthetic) toolCount += 1;
     // A step that is still running adds nothing here: the wall clock below covers
     // its time, and adding it again is what double-counted it.
     if (step.kind !== "note" && !step.running) summed += step.seconds ?? 0;
@@ -742,12 +667,6 @@ function stepSeconds(step: ActivityStep, now: number, live: boolean): number {
   // Clamped at zero because the clock is read after the step began, and a
   // negative duration would render as something absurd.
   return Math.max(0, (now - step.startedAt) / 1000);
-}
-
-/** Seconds for a row: the whole run, so a group reports what it cost. */
-function useRunSeconds(steps: ToolStep[], live: boolean): number {
-  const now = useTick(live);
-  return steps.reduce((total, step) => total + stepSeconds(step, now, live), 0);
 }
 
 /**

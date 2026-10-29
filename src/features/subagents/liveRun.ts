@@ -27,6 +27,16 @@ export type LiveRun = {
   text: string;
   reasoning: string;
   searching: boolean;
+  /**
+   * The chat run streaming this agent's follow-up, when the user has sent one.
+   *
+   * A spawned run is addressed by its agent id; a follow-up is an ordinary chat
+   * run with its own id, and the panel matches events on either. Absent while the
+   * agent is still working on its original brief.
+   */
+  runId?: string;
+  /** The message the user just sent, drawn above the follow-up's answer. */
+  userText?: string;
 };
 
 /**
