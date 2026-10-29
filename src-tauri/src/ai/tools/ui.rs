@@ -51,6 +51,19 @@ pub struct ToolSummary {
     /// scanning the summary for. Set from the tool's own knowledge of whether the
     /// path existed.
     pub created: bool,
+    /// The result as the model actually read it, for the record a later turn sees.
+    ///
+    /// The panel's copy ([`panel_snippet`]) is deliberately small: a row is for
+    /// reading at a glance, and it omits failures and one-line results entirely.
+    /// The model's record is the opposite question -- what did this call return --
+    /// and a reply that loses it cannot explain its own work one turn later. So
+    /// this carries the text whole, bounded only by
+    /// [`super::output::MAX_TOOL_OUTPUT`], which is the same cap the tool itself
+    /// already applied before the model was handed it.
+    ///
+    /// Stored only when it differs from the panel's copy, so a short result is not
+    /// written twice into the transcript.
+    pub context: Option<String>,
 }
 
 impl ToolSummary {
@@ -85,6 +98,11 @@ impl ToolSummary {
             if let Some(object) = fields.as_object_mut() {
                 object.insert("created".into(), serde_json::Value::Bool(true));
             }
+        }
+        // The model's own view of what came back. Absent when the panel's snippet
+        // already is that text, so the transcript stores one copy of a short result.
+        if let (Some(context), Some(object)) = (&self.context, fields.as_object_mut()) {
+            object.insert("context".into(), serde_json::Value::String(context.clone()));
         }
         fields
     }
@@ -123,6 +141,27 @@ pub fn summarize(tool: &str, arguments: &Value, result: &str, succeeded: bool) -
         // through from `write.rs` so the one place that recognises a created file
         // is this one, next to the wording it recognises.
         created: tool == "write_file" && succeeded && created_wording(result),
+        context: model_context(result, !succeeded),
+    }
+}
+
+/// The result as the model read it, kept only where the panel's copy would lose it.
+///
+/// Three cases need this and the panel deliberately drops all three: a failure
+/// (whose reason the row already carries), a one-line result (already on the row as
+/// its outcome), and anything longer than [`MAX_PANEL_OUTPUT`]. The model saw the
+/// text in each of them, so the record must hold it, or the next turn is a
+/// conversation that read a file and cannot say what was in it.
+fn model_context(result: &str, failed: bool) -> Option<String> {
+    let trimmed = result.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let whole = super::output::truncate_within(trimmed, super::output::MAX_TOOL_OUTPUT);
+    match panel_snippet(result, failed) {
+        // The panel's copy is already the whole text, so one copy is enough.
+        Some(snippet) if snippet == whole => None,
+        _ => Some(whole),
     }
 }
 
@@ -277,6 +316,10 @@ fn label_for(tool: &str) -> &'static str {
         "skill_write" => "Write skill file",
         "skill_run" => "Run skill script",
         "sub_agent" => "Run agent",
+        // Its own label rather than sharing `Run agent`: the two read as two
+        // different intentions -- one asks an agent to work, the other reads what
+        // it found -- and one row per intention is what a "Worked for" list is for.
+        "subagent_wait" => "Wait for agent",
         "schedule_job" => "Schedule job",
         "ask_user" => "Ask user",
         "todo" => "Checklist",
@@ -903,5 +946,64 @@ mod tests {
             "{}",
             summary.event_fields()
         );
+    }
+
+    /// A one-line result never reaches the panel, but the model read it, so the
+    /// record keeps it. This is the case a grep would otherwise lose entirely.
+    #[test]
+    fn a_single_line_result_is_kept_for_the_record() {
+        let summary = summarize(
+            "grep",
+            &json!({ "pattern": "needle" }),
+            "3 matches in a.rs",
+            true,
+        );
+        assert!(panel_snippet("3 matches in a.rs", false).is_none());
+        assert_eq!(summary.context.as_deref(), Some("3 matches in a.rs"));
+        assert_eq!(
+            summary.event_fields()["context"],
+            "3 matches in a.rs",
+            "the record travels on the step"
+        );
+    }
+
+    /// A failure's text is kept too: the model was handed the reason, and the next
+    /// turn has to be able to say why the call did not work.
+    #[test]
+    fn a_failed_call_keeps_the_text_the_model_read() {
+        let summary = summarize(
+            "read_file",
+            &json!({ "path": "gone.rs" }),
+            "no such file or directory",
+            false,
+        );
+        assert_eq!(
+            summary.context.as_deref(),
+            Some("no such file or directory")
+        );
+    }
+
+    /// A result longer than the panel's cap is stored whole for the model, capped
+    /// only where the tool itself already capped it.
+    #[test]
+    fn a_long_result_is_recorded_whole_for_the_model() {
+        let long = format!("{}\n{}", "a".repeat(MAX_PANEL_OUTPUT), "z".repeat(50));
+        let summary = summarize("read_file", &json!({ "path": "big.rs" }), &long, true);
+        let context = summary.context.expect("recorded");
+        assert!(context.contains(&"z".repeat(50)), "the tail is kept");
+        assert!(context.len() > MAX_PANEL_OUTPUT);
+    }
+
+    /// Where the panel's copy already is the whole result, it is not stored twice.
+    #[test]
+    fn a_short_result_is_stored_once() {
+        let summary = summarize(
+            "read_file",
+            &json!({ "path": "a.rs" }),
+            "1\ta\n2\tb\n",
+            true,
+        );
+        assert!(summary.context.is_none(), "{:?}", summary.context);
+        assert!(summary.event_fields().get("context").is_none());
     }
 }

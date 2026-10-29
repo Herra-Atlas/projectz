@@ -952,6 +952,11 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         // a hidden turn (below).
         attachSubagentReport(reportSession, report, failed, subagentStats(payload.metrics));
         if (failed) onNotify("error", `Sub-agent "${label}" failed.`);
+        // A `subagent_wait` that was parked when the run ended has already handed
+        // this report back as that call's result, so the model has read it. Sending
+        // it again would cost the conversation a whole second reply to say what it
+        // has just been told -- the row above is all this turn still owes.
+        if (payload.metrics?.delivered === false) return;
         const content = failed
           ? `Sub-agent \`${label}\` failed and did not finish. Its report:\n\n${report}`
           : `Sub-agent \`${label}\` finished and reported:\n\n${report}`;
@@ -1262,6 +1267,10 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           // What the model was handed, so opening the row shows the real result
           // rather than the one-line summary beside it.
           if (metrics.output) open.output = metrics.output;
+          // The model's own copy of the result, kept for the next turn's record.
+          // Separate from `output`: the panel shows a short reading of it, while
+          // the next request needs everything the model actually saw.
+          if (metrics.context) open.context = metrics.context;
           // A write's diff, which the panel draws in place of the raw text.
           if (metrics.diff) open.diff = metrics.diff;
           // Carried onto the row so a created file is distinguishable from a
@@ -1286,6 +1295,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
             running: false,
             ...(metrics.cached ? { cached: true } : {}),
             ...(metrics.output ? { output: metrics.output } : {}),
+            ...(metrics.context ? { context: metrics.context } : {}),
             ...(metrics.diff ? { diff: metrics.diff } : {}),
             ...(metrics.created ? { created: true } : {}),
           });

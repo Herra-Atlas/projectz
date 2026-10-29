@@ -26,16 +26,28 @@
 //! in `Ask` mode stops for the user just as its parent would. The prompt is
 //! re-stamped with the parent's run id, because that is the only run the screen
 //! knows about, and the answer comes back through the shared map.
+//!
+//! # Why a parent can also ask
+//!
+//! Emitting the report at the end of the run is still the default: a parent that
+//! does not need the answer should never be made to wait for it. But a parent whose
+//! *next step* depends on that answer had no door at all -- it had to finish its
+//! reply and receive the report as a new turn, which is a whole second request for
+//! one dependency. [`wait`] is that door: the model names the agent id from the
+//! spawn acknowledgement and parks one call on it, so dependent work happens in
+//! one turn. The report is then handed back through that call instead of as a
+//! hidden turn -- see [`registry::AgentRecord::finish`] for why the choice is made
+//! once, and not by a race at emit time.
 
 pub mod commands;
 mod prompt;
+mod registry;
 mod stats;
 pub(crate) mod transcript;
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -53,44 +65,18 @@ use transcript::{RunRecord, Stamped};
 /// bare refusal, so a model that sees it can stop trying.
 const NO_RUN: &str = "Sub-agents are only available during an agent run.";
 
-/// Cancel flags for the sub-agents at work, keyed by their own id.
-///
-/// A sub-agent is started from a tool call, after the parent's `run_chat` has
-/// already built the runtime's run map, so there is no second run id to register
-/// there. The flag is process-wide because an agent id is a UUID minted here and
-/// nothing else can name one. [`cancel`] is what the Stop button reaches.
-fn cancel_flags() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
-    static FLAGS: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
-    FLAGS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 /// Stops one sub-agent by its id.
+///
+/// The stop flags live in [`registry`] beside each run's progress and its report,
+/// so stopping an agent, watching it and reading its answer are questions about one
+/// record rather than three that could disagree. This is what the Stop button
+/// reaches.
 ///
 /// Returns whether a run was found. A run that has already finished is not an
 /// error the user needs to see: the stop button may be pressed in the moment the
 /// report lands.
 pub fn cancel(agent_id: &str) -> bool {
-    let Some(flag) = cancel_flags()
-        .lock()
-        .ok()
-        .and_then(|flags| flags.get(agent_id).cloned())
-    else {
-        return false;
-    };
-    flag.store(true, Ordering::Relaxed);
-    true
-}
-
-fn register_cancel(agent_id: &str, flag: Arc<AtomicBool>) {
-    if let Ok(mut flags) = cancel_flags().lock() {
-        flags.insert(agent_id.to_string(), flag);
-    }
-}
-
-fn forget_cancel(agent_id: &str) {
-    if let Ok(mut flags) = cancel_flags().lock() {
-        flags.remove(agent_id);
-    }
+    registry::cancel(agent_id)
 }
 
 /// Starts one sub-agent and returns at once, before it has done any work.
@@ -162,12 +148,6 @@ pub async fn spawn(arguments: Value, context: ToolContext) -> Result<String, Str
     };
 
     let agent_id = uuid::Uuid::new_v4().to_string();
-    // A flag of this agent's own, so Stop can end one run without ending the
-    // parent or a sibling. A watcher in `run_agent` also sets it when the parent
-    // is stopped, so the parent's own stop still reaches its agents.
-    let cancelled = Arc::new(AtomicBool::new(false));
-    register_cancel(&agent_id, Arc::clone(&cancelled));
-    let started_at = crate::database::utc_now();
     // What the user sees this run called: a label the model gave, or the model's
     // own name when it gave none.
     let display_label = if label.is_empty() {
@@ -175,6 +155,16 @@ pub async fn spawn(arguments: Value, context: ToolContext) -> Result<String, Str
     } else {
         label.clone()
     };
+    // The record is created before the first token, and deliberately: everything a
+    // parent can ask about this agent -- is it alive, where has it got to, what did
+    // it say -- has to have an answer from the moment the id exists, because the id
+    // is handed to the model in the acknowledgement below.
+    let record = registry::register(&agent_id, &display_label);
+    // A flag of this agent's own, so Stop can end one run without ending the
+    // parent or a sibling. A watcher in `run_agent` also sets it when the parent
+    // is stopped, so the parent's own stop still reaches its agents.
+    let cancelled = record.cancelled_flag();
+    let started_at = crate::database::utc_now();
 
     // Announced before the first token, so the panel can show the run the moment
     // it exists. A sub-agent is not written to storage until it finishes, so this
@@ -205,6 +195,7 @@ pub async fn spawn(arguments: Value, context: ToolContext) -> Result<String, Str
         kind,
         approval,
         cancelled,
+        record,
     };
     tokio::spawn(run_agent(task));
     // Counted only once the task is launched: a refusal above never consumes a
@@ -216,13 +207,128 @@ pub async fn spawn(arguments: Value, context: ToolContext) -> Result<String, Str
     Ok(format!(
         "Agent `{display_label}` is working in the background (id `{agent_id}`). It cannot see this \
 conversation and cannot ask you questions. Its report will arrive as its own message when it \
-finishes -- and a run that fails reports the failure, with its reason, instead. Either way, do \
-not wait for it; carry on with anything else, or finish your answer."
+finishes -- and a run that fails reports the failure, with its reason, instead. If your next step \
+needs the answer now, call `subagent_wait` with that id instead of finishing your turn. Otherwise \
+do not wait: carry on with anything else, or finish your answer."
     ))
 }
 
-/// Everything one background sub-agent needs, moved off the call stack.
+/// How long a wait parks when the call does not say.
 ///
+/// Thirty seconds is long enough that a short research task usually lands inside
+/// one call and short enough that a reply is never silently held for minutes. The
+/// ceiling exists because the model is choosing the number: a wait it cannot be
+/// woken from until its own limit is a stuck reply, and the user's Stop is the
+/// only thing that would end it.
+const WAIT_SECONDS: u64 = 30;
+const WAIT_SECONDS_MAX: u64 = 120;
+
+/// Parks one call on a sub-agent, and answers with its report or its progress.
+///
+/// This is the parent's *pull* half of delegation. `sub_agent` still returns at
+/// once and the report still arrives on its own, so nothing here changes the
+/// default; a model reaches for this only when the next step genuinely needs the
+/// answer. Waiting costs no tokens while it waits, which is why it is one call
+/// with a limit rather than a poll the loop has to keep round-tripping.
+pub async fn wait(arguments: Value, context: ToolContext) -> Result<String, String> {
+    let agent_id = arguments
+        .get("agent_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            "subagent_wait requires an `agent_id` -- the id printed when the agent was started"
+                .to_string()
+        })?;
+    // Named rather than silently empty: an id from another conversation, or from a
+    // previous launch, is something the model can correct once it knows that is the
+    // problem. Records are process-wide and pruned, so an old id is genuinely gone.
+    let Some(record) = registry::find(agent_id) else {
+        return Err(format!(
+            "No sub-agent with id `{agent_id}`. It may have been started by another conversation, \
+             or the app may have been restarted since. Results are delivered when a run finishes, \
+             so carry on with what you have."
+        ));
+    };
+
+    if arguments
+        .get("peek")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(match record.outcome() {
+            Some(outcome) => report_text(&record, outcome),
+            None => progress_text(record.label(), &record.progress(), "is still working"),
+        });
+    }
+
+    let seconds = arguments
+        .get("seconds")
+        .and_then(Value::as_u64)
+        .unwrap_or(WAIT_SECONDS)
+        .clamp(1, WAIT_SECONDS_MAX);
+    match record
+        .wait_for(Duration::from_secs(seconds), &context.cancelled)
+        .await
+    {
+        registry::Finish::Ready(outcome) => Ok(report_text(&record, outcome)),
+        registry::Finish::Running(progress) => Ok(format!(
+            "{} No answer within {seconds}s. Call again, or carry on without it -- its report still \
+             arrives as its own message when it finishes.",
+            progress_text(record.label(), &progress, "is still working")
+        )),
+        // A stop is the user ending the run, not a failed tool call: the reply is
+        // over either way, so this is stated plainly rather than drawn as an error.
+        registry::Finish::Stopped => Ok(format!(
+            "Stopped waiting for `{}` because the run was stopped.",
+            record.label()
+        )),
+    }
+}
+
+/// The finished run's report, worded so a parent can tell agents apart.
+fn report_text(record: &registry::AgentRecord, outcome: registry::Outcome) -> String {
+    if outcome.failed {
+        // The stored failure already names the agent and carries the provider's
+        // reason -- see `report_for`.
+        return outcome.report;
+    }
+    if outcome.report.trim().is_empty() {
+        return format!(
+            "Agent `{}` finished without a written report.",
+            record.label()
+        );
+    }
+    format!(
+        "Agent `{}` finished. Its report:\n\n{}",
+        record.label(),
+        outcome.report
+    )
+}
+
+/// One line about where a running agent has got to.
+///
+/// The step count is what a reader can act on: an agent still on its first read is
+/// worth waiting for, one twenty calls deep is not, and the last step says what it
+/// is doing rather than that it is busy.
+fn progress_text(label: &str, progress: &registry::Progress, verb: &str) -> String {
+    let steps = match progress.steps {
+        0 => "no steps yet".to_string(),
+        1 => "1 step so far".to_string(),
+        count => format!("{count} steps so far"),
+    };
+    let last = if progress.last_step.is_empty() {
+        String::new()
+    } else {
+        format!(", last: {}", progress.last_step)
+    };
+    format!(
+        "Agent `{label}` {verb} ({}s, {steps}{last}).",
+        progress.elapsed_seconds
+    )
+}
+
+/// Everything one background sub-agent needs, moved off the call stack.
 /// A struct rather than a dozen captured locals so the task body reads as one
 /// thing: the run it belongs to, the conversation it started from, and the fields
 /// the panel and the transcript are built from.
@@ -243,6 +349,10 @@ struct AgentTask {
     approval: crate::ai::tools::ApprovalGate,
     /// This agent's own stop flag, registered so the panel can end it alone.
     cancelled: Arc<AtomicBool>,
+    /// What the parent can ask about this agent while it works, and read when it
+    /// has finished. Shared with the registry, so it is the same value the tool
+    /// looks up by id.
+    record: Arc<registry::AgentRecord>,
 }
 
 /// Runs the sub-agent to completion and delivers its result.
@@ -266,6 +376,7 @@ async fn run_agent(task: AgentTask) {
         kind,
         approval,
         cancelled,
+        record,
     } = task;
 
     // The parent's stop must still reach its agents, but this agent's own stop
@@ -295,6 +406,11 @@ async fn run_agent(task: AgentTask) {
     let tool_calls = Arc::new(AtomicUsize::new(0));
     let produced_counter = Arc::clone(&produced);
     let tool_counter = Arc::clone(&tool_calls);
+    // What a `subagent_wait` reads while it is parked: how many calls the run has
+    // made and the last one. Updated here rather than derived later because the
+    // events are this run's only account of its own progress, and this closure is
+    // the one place they all pass through.
+    let progress = Arc::clone(&record);
     let on_event: Arc<dyn Fn(ChatEvent) + Send + Sync> = Arc::new({
         let emit = Arc::clone(&run.emit);
         let parent_run_id = run.run_id.clone();
@@ -306,6 +422,16 @@ async fn run_agent(task: AgentTask) {
                 }
                 "tool_call" => {
                     tool_counter.fetch_add(1, Ordering::Relaxed);
+                    // The label is what a reader would call the step; the tool
+                    // name is the fallback for an event that carries no summary.
+                    let label = event
+                        .metrics
+                        .as_ref()
+                        .and_then(|metrics| metrics.get("label"))
+                        .and_then(Value::as_str)
+                        .or(event.text.as_deref())
+                        .unwrap_or_default();
+                    progress.note_step(label);
                 }
                 _ => {}
             }
@@ -559,9 +685,21 @@ async fn run_agent(task: AgentTask) {
     // The run is over, whoever ended it, so nothing can stop it any more and the
     // watcher has nothing left to watch.
     watch.abort();
-    forget_cancel(&agent_id);
 
-    let Some((report, failed)) = report_for(&result, &display_label) else {
+    // Recorded before the event, because the event's `delivered` says whether a
+    // parked `subagent_wait` already took it. An empty success is still recorded:
+    // a wait parked on it must come back with an answer, even if that answer is
+    // "finished and said nothing".
+    let report = report_for(&result, &display_label);
+    let awaited = record.finish(registry::Outcome {
+        report: report
+            .as_ref()
+            .map(|(text, _)| text.clone())
+            .unwrap_or_default(),
+        failed: report.as_ref().map(|(_, failed)| *failed).unwrap_or(false),
+    });
+
+    let Some((report, failed)) = report else {
         return;
     };
     let session_id = run.session_id.clone();
@@ -579,6 +717,11 @@ async fn run_agent(task: AgentTask) {
             // Lets the chat draw the `sub_agent` row as failed -- and say so to the
             // user -- rather than showing the report as if the work had succeeded.
             "failed": failed,
+            // Whether the report becomes a hidden turn. A wait that was parked when
+            // the run ended has already handed it to the model as that call's
+            // result, so sending it again would spend the conversation a second
+            // reply to say what it has just read.
+            "delivered": !awaited,
             // What the run cost and how much it did, drawn under the report on the
             // `sub_agent` row -- the delegated run's own totals, so a delegate can
             // be judged from the reply that spawned it.

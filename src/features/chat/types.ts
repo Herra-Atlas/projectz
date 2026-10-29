@@ -58,6 +58,15 @@ export type ToolStep = {
    */
   output?: string;
   /**
+   * The result as the model actually read it, kept for the next request.
+   *
+   * Never drawn. `output` is a short copy for the panel; this is the whole text
+   * for the record that rides on the reply — see `ai/recap.rs` — and it exists
+   * because a reply that loses what its tools returned cannot explain its own
+   * work one turn later. Absent when `output` already is the whole result.
+   */
+  context?: string;
+  /**
    * The results of a web search, attached to the `search_web` call that ran it.
    *
    * On the step rather than as a separate message, so a search is drawn where

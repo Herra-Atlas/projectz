@@ -251,6 +251,10 @@ pub fn steps_from(events: &[Stamped]) -> Vec<Value> {
                             step["cached"] = Value::Bool(true);
                         }
                         copy(&metrics, step, "output");
+                        // The model's own copy of the result, which is what the
+                        // next turn's record is built from. Absent when the panel's
+                        // snippet already holds the whole thing.
+                        copy(&metrics, step, "context");
                         copy(&metrics, step, "diff");
                         if metrics["created"] == Value::Bool(true) {
                             step["created"] = Value::Bool(true);
@@ -259,16 +263,24 @@ pub fn steps_from(events: &[Stamped]) -> Vec<Value> {
                     // A result with no open row is still shown, for the same
                     // reason the live panel shows it: a call the user cannot see
                     // is one they cannot account for.
-                    None => steps.push(json!({
-                        "kind": "tool",
-                        "tool": name,
-                        "label": metrics["label"].clone(),
-                        "detail": metrics["detail"].clone(),
-                        "outcome": metrics["outcome"].clone(),
-                        "failed": metrics["failed"] == Value::Bool(true),
-                        "seconds": metrics["seconds"].clone(),
-                        "running": false,
-                    })),
+                    None => {
+                        let mut step = json!({
+                            "kind": "tool",
+                            "tool": name,
+                            "label": metrics["label"].clone(),
+                            "detail": metrics["detail"].clone(),
+                            "outcome": metrics["outcome"].clone(),
+                            "failed": metrics["failed"] == Value::Bool(true),
+                            "seconds": metrics["seconds"].clone(),
+                            "running": false,
+                        });
+                        // The two copies of the result a row can carry, copied
+                        // only when they exist -- the panel's reading, and the
+                        // model's whole text for the next turn's record.
+                        copy(&metrics, &mut step, "output");
+                        copy(&metrics, &mut step, "context");
+                        steps.push(step);
+                    }
                 }
             }
             // Everything else -- status, deltas of the answer, the completion

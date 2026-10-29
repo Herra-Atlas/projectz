@@ -156,7 +156,10 @@ fn capability(tool_name: &str) -> Capability {
             Capability::Terminal
         }
         "search_web" | "web_fetch" => Capability::Web,
-        "sub_agent" => Capability::Subagents,
+        // Waiting on an agent is the same capability that started it: a run with no
+        // business spawning has nothing to wait for, and one told it may delegate
+        // may also read what its delegate found.
+        "sub_agent" | "subagent_wait" => Capability::Subagents,
         "schedule_job" => Capability::Jobs,
         // Asking the user reads their intent; it changes nothing, so it belongs
         // with the reads even though it is not cacheable.

@@ -137,15 +137,24 @@ fn spec_for(
 }
 
 /// The stored turns as the request view: role and text, nothing else.
+///
+/// An assistant turn carries its record of what it did, built from the steps the
+/// transcript stored -- the same derivation a channel uses, so a follow-up reads the
+/// same history a continuing chat would. Without it a resumed agent begins by
+/// re-reading files it already read.
 fn wire_messages(stored: &[Value]) -> Vec<ChatMessage> {
     stored
         .iter()
         .filter_map(|message| {
             let role = message.get("role")?.as_str()?;
             let content = message.get("content")?.as_str()?;
+            let content = match message.get("activity") {
+                Some(activity) => crate::ai::recap::append(content, activity),
+                None => content.to_string(),
+            };
             Some(ChatMessage {
                 role: role.to_string(),
-                content: content.to_string(),
+                content,
             })
         })
         .collect()

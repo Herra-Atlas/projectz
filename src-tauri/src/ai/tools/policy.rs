@@ -53,6 +53,12 @@ const AUTO_READ_TOOLS: &[&str] = &[
     "skill_read",
     "search_web",
     "web_fetch",
+    // Waiting on an agent this run already started observes the run rather than
+    // changing anything, so a level that trusts reads trusts this too. It is not
+    // a `Read` for caching -- see its `Effect` -- but prompting for it while the
+    // reply is parked would make the run stop for a question about work it has
+    // already been allowed to start.
+    "subagent_wait",
 ];
 /// Write tools, approved without asking only from `auto_writes` upward.
 ///
@@ -265,6 +271,8 @@ mod tests {
             // per page it opens.
             "search_web",
             "web_fetch",
+            // Waiting observes a run this level already allowed to start.
+            "subagent_wait",
         ] {
             assert_eq!(decide(PermissionMode::AutoSafe, tool), Decision::Allow);
         }
@@ -302,6 +310,7 @@ mod tests {
             "delete_file",
             "write_document",
             "sub_agent",
+            "subagent_wait",
             "schedule_job",
         ] {
             assert_eq!(decide(PermissionMode::AutoWrites, tool), Decision::Allow);

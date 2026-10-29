@@ -131,6 +131,16 @@ pub fn stored(database: &crate::database::Database) -> Compression {
 /// What a tool result becomes once it is elided.
 const TOOL_STUB: &str = "[tool output elided to keep the conversation within the context window]";
 
+/// What a reply's tool record becomes in an older turn.
+///
+/// The record is carried on the reply's own text -- see [`crate::ai::recap`] -- so it
+/// is not a `tool` message and the elision above cannot reach it. It is still the
+/// part of a conversation that costs the most tokens for the least value once the
+/// turn is history, so it is elided the same way. The answer before the marker
+/// stays: that is what the model said, and a record of what it read is only worth a
+/// glance once the work is done.
+const RECORD_STUB: &str = "[tool record elided to keep the conversation within the context window]";
+
 /// The note left where older turns were dropped, so the model knows the history
 /// is not continuous rather than assuming it begins at the first message.
 const TRIM_NOTICE: &str =
@@ -249,14 +259,34 @@ pub fn apply(
     // instead of claiming a saving of zero.
     let from = rewrite_start(messages, compression);
     for message in messages.iter_mut().take(cut).skip(from) {
-        if message.get("role").and_then(Value::as_str) != Some("tool") {
+        let Some(object) = message.as_object_mut() else {
             continue;
-        }
-        if let Some(object) = message.as_object_mut() {
-            let already = object.get("content").and_then(Value::as_str) == Some(TOOL_STUB);
-            if !already {
-                object.insert("content".into(), Value::String(TOOL_STUB.to_string()));
+        };
+        match object.get("role").and_then(Value::as_str) {
+            Some("tool") => {
+                let already = object.get("content").and_then(Value::as_str) == Some(TOOL_STUB);
+                if !already {
+                    object.insert("content".into(), Value::String(TOOL_STUB.to_string()));
+                }
             }
+            // A reply's tool record rides on its own text, so this is the other
+            // place a conversation keeps what a tool returned. Elided from the
+            // marker onward, leaving the answer it was attached to.
+            Some("assistant") => {
+                let Some(content) = object
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                else {
+                    continue;
+                };
+                let Some((answer, _)) = content.split_once(crate::ai::recap::MARKER) else {
+                    continue;
+                };
+                let replacement = format!("{}\n\n{RECORD_STUB}", answer.trim_end());
+                object.insert("content".into(), Value::String(replacement));
+            }
+            _ => {}
         }
     }
 
@@ -534,6 +564,48 @@ mod tests {
             .dropped
             .iter()
             .all(|(role, content)| role == "assistant" && !content.is_empty()));
+    }
+
+    /// A reply's tool record is elided with its answer left in place, and a second
+    /// pass finds nothing left to do. Without this the record added to every reply
+    /// would be the one part of a long conversation the elision depth could not
+    /// reach, and a conversation of tool-using replies would fill the window with
+    /// exactly the text this depth exists to give up.
+    #[test]
+    fn an_old_replys_tool_record_is_elided_and_its_answer_kept() {
+        let knobs = Compression {
+            protect_recent: 4,
+            ..settings()
+        };
+        let mut messages = vec![json!({ "role": "system", "content": "system prompt" })];
+        for index in 1..10 {
+            let content = if index % 2 == 0 {
+                format!(
+                    "answer {index}\n\n{}\n- Read file: a.rs\n  the whole file",
+                    crate::ai::recap::MARKER
+                )
+            } else {
+                format!("question {index}")
+            };
+            let role = if index % 2 == 0 { "assistant" } else { "user" };
+            messages.push(json!({ "role": role, "content": content }));
+        }
+        apply(&mut messages, knobs, None);
+        // Index 4 is inside the reach window: the record is gone, the answer is not.
+        let elided = messages[4]["content"].as_str().expect("content");
+        assert_eq!(elided, format!("answer 4\n\n{RECORD_STUB}"));
+        // The record is gone from that turn, so the marker cannot be found there.
+        assert!(!elided.contains(crate::ai::recap::MARKER));
+        // The turn nearest the reader is untouched -- it is what they are reading.
+        assert!(messages[8]["content"]
+            .as_str()
+            .expect("content")
+            .contains(crate::ai::recap::MARKER));
+
+        // A second pass changes nothing: the stub is the state, not a step.
+        let before = messages.clone();
+        apply(&mut messages, knobs, None);
+        assert_eq!(messages, before);
     }
 
     /// The stub is the state, not a step: a second pass over an already-stubbed

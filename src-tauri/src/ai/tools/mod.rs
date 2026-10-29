@@ -30,6 +30,7 @@ mod registry;
 mod run;
 mod schedule;
 pub mod skills;
+mod subagent_wait;
 mod terminal;
 mod todo;
 mod vision;
@@ -122,6 +123,12 @@ pub fn registry_for_with(
     // in a Chat conversation that has no tools at all.
     if allow_subagents && mode == ToolMode::Agent {
         registry.add(agent::SUB_AGENT);
+        // Added with the spawn tool rather than on its own: waiting is only
+        // meaningful for an agent this run was allowed to start, and a run handed
+        // one without the other would be offered a door to nothing. Both are
+        // withheld from a sub-agent's own registry, which is what keeps delegation
+        // one level deep -- including waiting on a sibling it cannot see.
+        registry.add(subagent_wait::SUBAGENT_WAIT);
     }
     // Agent-only for the same reason, and one capability narrower: scheduling is only
     // reachable by a run whose access set carries `jobs`, so a job's own run never sees
@@ -269,6 +276,7 @@ mod tests {
                 "skill_run",
                 "skill_write",
                 "sub_agent",
+                "subagent_wait",
                 "terminal_kill",
                 "terminal_output",
                 "terminal_status",
@@ -280,30 +288,34 @@ mod tests {
         );
     }
 
-    /// A sub-agent gets every tool its parent has except the one that would let it
-    /// delegate again. Delegation is one level deep by construction, not by a depth
-    /// counter that has to be checked at runtime.
+    /// A sub-agent gets every tool its parent has except the two that make up
+    /// delegation -- spawning and waiting on a spawn. Both are withheld together:
+    /// an agent that cannot start another has nothing to wait for, and waiting on a
+    /// sibling it cannot see would be a door onto another run's work. Delegation is
+    /// one level deep by construction, not by a depth counter checked at runtime.
     #[test]
     fn a_sub_agent_cannot_spawn_another_sub_agent() {
         let names = registry_for_with(ToolMode::Agent, true, false).names();
         assert!(!has(&names, "sub_agent"), "{names:?}");
+        assert!(!has(&names, "subagent_wait"), "{names:?}");
         // Everything else it needs to do work is still there.
         for tool in ["read_file", "write_file", "run_terminal", "search_web"] {
             assert!(has(&names, tool), "{tool} missing: {names:?}");
         }
     }
 
-    /// The gap between a parent's tool set and a sub-agent's is exactly one tool,
-    /// so a future addition to the agent tools is not silently withheld.
+    /// The gap between a parent's tool set and a sub-agent's is exactly the
+    /// delegation pair, so a future addition to the agent tools is not silently
+    /// withheld.
     #[test]
-    fn the_only_difference_is_the_spawn_tool() {
+    fn the_only_difference_is_the_delegation_pair() {
         let parent = registry_for_with(ToolMode::Agent, true, true).names();
         let child = registry_for_with(ToolMode::Agent, true, false).names();
         let difference = parent
             .into_iter()
             .filter(|name| !child.contains(name))
             .collect::<Vec<_>>();
-        assert_eq!(difference, listed(&["sub_agent"]));
+        assert_eq!(difference, listed(&["sub_agent", "subagent_wait"]));
     }
 
     #[test]
@@ -331,6 +343,7 @@ mod tests {
                 "skill_run",
                 "skill_write",
                 "sub_agent",
+                "subagent_wait",
                 "terminal_kill",
                 "terminal_output",
                 "terminal_status",
@@ -359,6 +372,7 @@ mod tests {
                 "skill_run",
                 "skill_write",
                 "sub_agent",
+                "subagent_wait",
                 "terminal_kill",
                 "terminal_output",
                 "terminal_status",

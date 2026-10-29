@@ -31,6 +31,8 @@ conversation, or to run several independent tasks at once: issue one sub_agent c
 in the same turn and they run in parallel. You get back only the agent's final message, so write \
 the task as a complete brief — it cannot see this conversation and cannot ask you questions. \
 Good fits: research, a broad search across a codebase, or any job you only need the conclusion of. \
+When your next step needs the answer, call `subagent_wait` with the id you are given; otherwise \
+carry on and the report arrives on its own. \
 Do not overlap them: never point two agents at the same files, and do not delegate an edit you \
 are making yourself, because concurrent writes to one file race and one of them is lost. If you \
 are unsure whether the work is independent, do it yourself. Set `type` to `explore` for a \

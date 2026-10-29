@@ -65,6 +65,11 @@ export type AiEvent = {
     seconds?: number;
     cached?: boolean;
     output?: string;
+    /**
+     * The result as the model read it, when it differs from the panel's `output`.
+     * Stored on the step so the next request's record carries the whole thing.
+     */
+    context?: string;
     diff?: ToolDiff;
     created?: boolean;
     /**
@@ -112,6 +117,15 @@ export type AiEvent = {
       turns?: number;
       seconds?: number;
     };
+    /**
+     * Whether a `subagent_result` is still owed to the model as a hidden turn.
+     *
+     * `false` means a `subagent_wait` was parked when the run ended and has already
+     * returned the report as its own result, so the conversation must not start a
+     * second reply just to repeat it. Absent means delivered, which is what every
+     * report did before the wait tool existed.
+     */
+    delivered?: boolean;
   };
 };
 

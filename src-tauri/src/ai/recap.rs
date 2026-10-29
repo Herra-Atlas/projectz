@@ -5,35 +5,35 @@
 //! The provider is only ever sent `{role, content}` -- `prepare_messages` drops every
 //! other field -- so the steps behind a reply never leave the app. For the panel that
 //! is right; for the model it means it remembers what it *said* and has no record of
-//! what it *saw*, so a conversation that used the browser cannot explain its own work
-//! one turn later.
+//! what it *saw*, so a conversation that used tools cannot explain its own work one
+//! turn later. This is that record.
+//!
+//! # Why it is whole, and why that is not a cache problem
+//!
+//! Nothing here clips a result. A bounded record was the bug it replaced: the model
+//! read 80k tokens of files during one reply, and the next turn was handed a
+//! thousand, so it re-read them and paid for the same work twice. Each result is
+//! already bounded once, by [`crate::ai::tools::output::MAX_TOOL_OUTPUT`] at the
+//! moment the model is given it, so carrying it whole costs exactly what the model
+//! already read and no more.
+//!
+//! The provider caches a prefix, and this text is derived from stored steps, so the
+//! bytes for a finished reply never move between turns: a bigger record is a larger
+//! cached prefix, not a miss. What it must never become is a size computed at send
+//! time -- from the window, or from how many turns have passed -- because then an
+//! older reply's record would shrink as the conversation grew and every token after
+//! it would be invalidated. A window that is genuinely full is handled by
+//! [`crate::ai::compact`], which elides the oldest records on the request copy.
 //!
 //! # Why it is derived rather than stored
 //!
-//! The same activity always produces the same text, so the request prefix does not
-//! change between turns and the provider's prompt cache still matches. A separately
-//! stored summary would drift from the steps it summarises, and one that changed
-//! would invalidate every token after it.
-//!
-//! # Why it lives in Rust
-//!
-//! Three callers need the identical bytes: the chat view (through `ai_recap_messages`),
-//! a job, and a message from a channel. One implementation is the only way those three
-//! cannot disagree -- and a disagreement is a cache miss on every single turn.
-//!
-//! # Why it is budgeted
-//!
-//! A page tree is large, and an old one is worth a glance rather than a re-read. Each
-//! result keeps its opening -- where a tool's own summary lives -- and a reply stops
-//! adding results once its budget is spent.
+//! The same activity always produces the same text, so the bytes are stable by
+//! construction and nothing has to be migrated or kept in step with the steps it
+//! summarises. Three callers need the identical bytes -- the chat view (through
+//! `ai_recap_messages`), a job, and a message from a channel -- and one
+//! implementation is the only way those three cannot disagree.
 
 use serde_json::Value;
-
-/// Characters kept from one tool result.
-const RESULT_BUDGET: usize = 1_200;
-
-/// Characters kept from one reply's whole set of results.
-const REPLY_BUDGET: usize = 4_000;
 
 /// The marker that separates a reply's text from the record of its work.
 pub const MARKER: &str = "[What I did in that reply]";
@@ -59,7 +59,6 @@ pub fn append(content: &str, activity: &Value) -> String {
     }
 
     let mut lines = vec![String::new(), String::new(), MARKER.to_string()];
-    let mut spent = 0usize;
     for step in tools {
         let label = step.get("label").and_then(Value::as_str).unwrap_or("Tool");
         let detail = step.get("detail").and_then(Value::as_str).unwrap_or("");
@@ -74,8 +73,11 @@ pub fn append(content: &str, activity: &Value) -> String {
         }
         lines.push(line);
 
-        // What the model was handed, if the call produced anything worth carrying.
-        let body = ["output", "outcome"]
+        // What the model was handed, in the model's own copy of it. `context` is
+        // the whole text for the cases the panel shortens; `output` is the panel's
+        // copy when that is already everything; `outcome` is the last resort for a
+        // result whose body was never worth showing a reader.
+        let body = ["context", "output", "outcome"]
             .iter()
             .find_map(|key| {
                 step.get(*key)
@@ -85,27 +87,11 @@ pub fn append(content: &str, activity: &Value) -> String {
             })
             .map(str::to_string);
         let Some(body) = body else { continue };
-        if spent >= REPLY_BUDGET {
-            lines.push("  … the rest of this reply's output is omitted.".to_string());
-            break;
-        }
-        let room = RESULT_BUDGET.min(REPLY_BUDGET - spent);
-        for line in clip(&body, room).lines() {
+        for line in body.lines() {
             lines.push(format!("  {line}"));
         }
-        spent += body.chars().count().min(room);
     }
     format!("{content}{}", lines.join("\n"))
-}
-
-/// Cuts on a character boundary, so a multi-byte character is never split.
-fn clip(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.to_string();
-    }
-    let mut clipped: String = text.chars().take(limit).collect();
-    clipped.push('…');
-    clipped
 }
 
 #[cfg(test)]
@@ -137,6 +123,33 @@ mod tests {
         assert!(!text.contains("thinking"));
     }
 
+    /// The model's own copy wins over the panel's, and is carried whole. This is the
+    /// rule that stops a reply's tool output from vanishing on the next turn.
+    #[test]
+    fn the_models_copy_is_preferred_and_carried_whole() {
+        let whole = format!("{}{}", "a".repeat(5_000), "z".repeat(5_000));
+        let steps = json!([
+            { "kind": "tool", "label": "Read file", "detail": "big.rs",
+              "output": "short panel copy", "context": whole, "failed": false },
+        ]);
+        let text = append("", &steps);
+        assert!(text.contains(&"a".repeat(5_000)), "the whole body is kept");
+        assert!(text.contains(&"z".repeat(5_000)));
+        assert!(!text.contains("short panel copy"), "{text}");
+    }
+
+    /// A failure's text travels too: the model was given the reason, and a record
+    /// that drops it leaves the next turn unable to say why a call failed.
+    #[test]
+    fn a_failure_keeps_the_reason_the_model_read() {
+        let steps = json!([
+            { "kind": "tool", "label": "Read file", "detail": "gone.rs",
+              "outcome": "no such file", "context": "no such file or directory", "failed": true },
+        ]);
+        let text = append("", &steps);
+        assert!(text.contains("no such file or directory"), "{text}");
+    }
+
     /// Running it twice must not grow the message: that would invalidate the cached
     /// prefix on every turn, which is the cost this module exists to avoid.
     #[test]
@@ -152,32 +165,5 @@ mod tests {
         let text = append("answer", &json!([{ "kind": "thought", "text": "hmm" }]));
         assert_eq!(text, "answer");
         assert_eq!(append("answer", &Value::Null), "answer");
-    }
-
-    /// A long result is clipped rather than sent whole, and the budget is spent in
-    /// the order the calls happened.
-    #[test]
-    fn a_long_result_is_clipped_and_the_budget_stops_the_rest() {
-        let long = "x".repeat(RESULT_BUDGET + 50);
-        let steps = json!([
-            { "kind": "tool", "label": "Read file", "detail": "a", "outcome": long },
-            { "kind": "tool", "label": "Read file", "detail": "b", "outcome": long },
-            { "kind": "tool", "label": "Read file", "detail": "c", "outcome": long },
-            { "kind": "tool", "label": "Read file", "detail": "d", "outcome": long },
-            // The budget is spent by now; this one is only named, and the next
-            // triggers the omission notice.
-            { "kind": "tool", "label": "Read file", "detail": "e", "outcome": long },
-            { "kind": "tool", "label": "Read file", "detail": "f", "outcome": long },
-        ]);
-        let text = append("", &steps);
-        assert!(text.contains('…'));
-        assert!(text.contains("the rest of this reply's output is omitted"));
-    }
-
-    /// The clip never splits a character in half.
-    #[test]
-    fn clipping_counts_characters_not_bytes() {
-        let clipped = clip(&"é".repeat(10), 4);
-        assert_eq!(clipped, "éééé…");
     }
 }
