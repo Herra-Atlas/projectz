@@ -121,6 +121,97 @@ pub fn render(name: &str, description: &str, body: &str) -> String {
     out
 }
 
+/// Rewrites the `description:` field alone, leaving the rest of the file alone.
+///
+/// The counterpart to [`render`], which rebuilds the whole file from two fields
+/// and is therefore only right for a call that says it replaces the text. Saving
+/// one field through a rebuild would discard every key this parser does not
+/// understand, every comment, and the author's own spacing -- material that was
+/// never the thing being edited. Here only the `description:` line moves; the
+/// bytes on either side of it are copied through untouched, including a CRLF
+/// file's line endings.
+///
+/// Three cases: a replacement where the line exists, an insertion right under the
+/// opening `---` where it does not, and a file with no header at all -- the
+/// body-only skill [`parse`] accepts -- which has to gain one to carry the field.
+/// An empty description removes the line, because the header is the only place a
+/// trigger lives and an absent line is how this format says "none".
+pub fn set_description(text: &str, name: &str, description: &str) -> String {
+    let value = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    let Some((open, close)) = header_bounds(text) else {
+        return if value.is_empty() {
+            text.to_string()
+        } else {
+            render(name, &value, text)
+        };
+    };
+
+    let mut offset = open;
+    for chunk in text[open..close].split_inclusive('\n') {
+        let line = chunk.trim_end_matches(['\r', '\n']);
+        let indented = line.len() != line.trim_start().len();
+        // An indented `description:` belongs to a nested block, which this parser
+        // ignores; writing over it would change a key it never read.
+        if !indented {
+            if let Some((key, _)) = line.trim().split_once(':') {
+                if key.trim() == "description" {
+                    let end = offset + line.len();
+                    // The newline after the line is kept, so a missing final
+                    // newline cannot run the next key onto this one.
+                    let replacement = if value.is_empty() {
+                        String::new()
+                    } else {
+                        format!("description: {}", quote(&value))
+                    };
+                    let mut out = String::with_capacity(text.len() + replacement.len());
+                    out.push_str(&text[..offset]);
+                    out.push_str(&replacement);
+                    out.push_str(&text[end..]);
+                    return out;
+                }
+            }
+        }
+        offset += chunk.len();
+    }
+
+    if value.is_empty() {
+        // Nothing to insert and nothing to remove.
+        return text.to_string();
+    }
+    let newline = if text[..open].ends_with("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut out = String::with_capacity(text.len() + value.len() + 16);
+    out.push_str(&text[..open]);
+    out.push_str(&format!("description: {}{newline}", quote(&value)));
+    out.push_str(&text[open..]);
+    out
+}
+
+/// The byte range of a file's header interior, between the two `---` lines.
+///
+/// `None` when the file has no header, which [`parse`] accepts as a body-only
+/// skill. The same reading as [`parse`] on purpose: a first line that is not
+/// `---`, after a byte-order mark, means the file starts with its instructions.
+fn header_bounds(text: &str) -> Option<(usize, usize)> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut lines = text.split_inclusive('\n');
+    let first = lines.next()?;
+    if first.trim_end_matches(['\r', '\n']).trim() != "---" {
+        return None;
+    }
+    let mut offset = first.len();
+    for chunk in lines {
+        if chunk.trim_end_matches(['\r', '\n']).trim() == "---" {
+            return Some((first.len(), offset));
+        }
+        offset += chunk.len();
+    }
+    None
+}
+
 /// Reads only enough of a `SKILL.md` to parse its header.
 ///
 /// The index needs names and triggers, not bodies. Reading a whole file per skill
@@ -225,6 +316,62 @@ mod tests {
         assert_eq!(
             parsed.description,
             "Use when the user says \"ship it\": carefully"
+        );
+    }
+
+    /// Lifted by the folded pass one line at a time, never by offset.
+    #[test]
+    fn a_description_line_is_replaced_in_place() {
+        let text = "---\nname: x\nlicense: MIT\n# mine\ndescription: \"old\"\n---\n\nBody\n";
+        let out = set_description(text, "x", "new");
+        // Everything except the one line, including a key this parser ignores and
+        // a comment a person wrote.
+        assert_eq!(
+            out,
+            "---\nname: x\nlicense: MIT\n# mine\ndescription: \"new\"\n---\n\nBody\n"
+        );
+    }
+
+    #[test]
+    fn a_missing_description_line_is_inserted_under_the_opening_rule() {
+        let out = set_description("---\nname: x\n---\n\nBody\n", "x", "when working on x");
+        assert_eq!(
+            out,
+            "---\ndescription: \"when working on x\"\nname: x\n---\n\nBody\n"
+        );
+    }
+
+    /// A body-only skill gains a header rather than the field being lost.
+    #[test]
+    fn a_file_without_a_header_gains_one() {
+        let out = set_description("Just do the thing.", "x", "when doing it");
+        let (header, body) = parse(&out).expect("parse");
+        assert_eq!(header.description, "when doing it");
+        assert_eq!(body, "Just do the thing.");
+    }
+
+    /// An empty description removes the line: an absent line is how this format
+    /// says "no trigger", and `parse` reads it back as empty either way.
+    #[test]
+    fn an_empty_description_removes_the_line() {
+        let out = set_description("---\nname: x\ndescription: \"old\"\n---\n\nBody\n", "x", "");
+        let (header, body) = parse(&out).expect("parse");
+        assert_eq!(header.description, "");
+        assert_eq!(body, "Body");
+    }
+
+    /// A CRLF file keeps its line endings: the bytes on either side of the edited
+    /// line are copied through rather than re-joined.
+    #[test]
+    fn editing_a_description_keeps_a_crlf_file_crlf() {
+        let out = set_description(
+            "---\r\nname: x\r\ndescription: \"old\"\r\n---\r\n\r\nBody\r\n",
+            "x",
+            "new",
+        );
+        assert_eq!(
+            out,
+            "---\r\nname: x\r\ndescription: \"new\"\r\n---\r\n\r\nBody\r\n"
         );
     }
 

@@ -929,6 +929,13 @@ impl<'a> CallRunner<'a> {
                 ApprovalRequest {
                     run_id: String::new(),
                     tool_name: call.name.clone(),
+                    // The same wording the transcript row uses, so the prompt and
+                    // the call it is about cannot describe it two ways.
+                    label: crate::ai::tools::ui::label_for(&call.name).to_string(),
+                    // What the call will touch, with the fact needed to judge it.
+                    // Without this the dialog only said "write_file", which names
+                    // no file and cannot be answered with any confidence.
+                    detail: crate::ai::tools::ui::approval_detail(&call.name, &arguments),
                     // The tool's own declared command field. Empty for every tool
                     // that does not run a shell, which is how the policy knows it
                     // is not looking at a command line.
@@ -947,6 +954,10 @@ impl<'a> CallRunner<'a> {
                         metrics: Some(serde_json::json!({
                             "approval_id": approval_id,
                             "tool": request.tool_name,
+                            // The prompt draws the call the way a row does: a
+                            // readable label and the thing it will touch.
+                            "label": request.label,
+                            "detail": request.detail,
                             "command": request.command,
                             "arguments": request.arguments,
                         })),
@@ -1030,6 +1041,11 @@ impl<'a> CallRunner<'a> {
             crate::ai::tools::ui::summarize(&call.name, &arguments, &result, succeeded);
         if let Some(diff) = self.sink.drain_diffs().into_iter().next() {
             summary.attach_diff(diff);
+        }
+        // Same reason as the diff: a `sub_agent` call started a run, and the row is
+        // where that run's report will be drawn. The id is what matches the two.
+        if let Some(agent_id) = self.sink.drain_subagents().into_iter().next() {
+            summary.attach_subagent_id(agent_id);
         }
         // Announced whether or not it worked. A tool that failed still ran, and
         // the row is what shows the user why before the model decides what to do.

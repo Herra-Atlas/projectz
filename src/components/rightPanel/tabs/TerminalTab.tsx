@@ -104,13 +104,15 @@ export default function TerminalTab({ sessions, activeId, workspace, loadedModel
         <button type="button" onClick={onNew} aria-label="New terminal" title="New terminal" className="grid size-6 shrink-0 place-items-center rounded text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"><Plus size={14} /></button>
       </div>
       {active?.kind === "server" ? (
-        <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto bg-[var(--page)] p-3 font-mono text-[11px] leading-5 text-[var(--text)]">
+        <div ref={scrollRef} data-find-scope="" data-find-label="terminal" className="min-h-0 flex-1 overflow-auto bg-[var(--page)] p-3 font-mono text-[11px] leading-5 text-[var(--text)]">
           {(logs[active.id] ?? []).map((line, index) => <div key={`${index}-${line}`} className="whitespace-pre-wrap break-all">{line}</div>)}
           {!(logs[active.id]?.length) && <p className="text-[var(--quiet)]">{active.id === "audiocpp" ? "Waiting for the audio engine…" : "Waiting for llama-server output…"}</p>}
         </div>
       ) : active ? (
         <>
-          <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto bg-[var(--page)] p-3 font-mono text-[11px] leading-5 text-[var(--text)]">
+          {/* The log is a find scope; the command form below it is not content,
+              and its field is an `<input>`, which the matcher skips anyway. */}
+          <div ref={scrollRef} data-find-scope="" data-find-label="terminal" className="min-h-0 flex-1 overflow-auto bg-[var(--page)] p-3 font-mono text-[11px] leading-5 text-[var(--text)]">
             {(logs[active.id] ?? []).map((line, index) => <div key={`${index}-${line}`} className="whitespace-pre-wrap break-all">{line}</div>)}
           </div>
           <form onSubmit={(event) => { event.preventDefault(); void runCommand(); }} className="flex shrink-0 items-center gap-2 border-t border-[var(--line)] p-2">

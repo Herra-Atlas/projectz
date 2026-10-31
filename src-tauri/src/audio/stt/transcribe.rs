@@ -30,7 +30,7 @@ pub async fn samples(
         return Err("Nothing was heard. Hold the microphone a little longer.".to_string());
     }
     let settings = models::settings(database);
-    let selected = models::resolve(Some(app), &settings)?;
+    let selected = models::resolve(Some(app), &settings).await?;
     let language = settings.language_for(&selected.path()).map(str::to_string);
 
     let text = match selected {

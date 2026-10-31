@@ -25,12 +25,29 @@ use super::transcript::{elapsed_seconds, Stamped};
 /// counted from the events the run emitted, not reported by anyone.
 pub fn summarize(metrics: &Value, events: &[Stamped]) -> Value {
     let field = |key: &str| metrics.get(key).and_then(Value::as_u64);
+    // A run that failed has no final `metrics` -- the loop returns `Err`, so the
+    // report carries `Null` -- but it still spent tokens on every round before it
+    // died. The `usage` events the run emitted are the only record of that, so the
+    // last one is read as a fallback: it holds the same merged `used_*` totals the
+    // final metrics would have.
+    let reported = events
+        .iter()
+        .rev()
+        .find(|stamped| stamped.event.kind == "usage")
+        .and_then(|stamped| stamped.event.metrics.as_ref());
+    let counted = |key: &str| reported.and_then(|value| value.get(key)).and_then(Value::as_u64);
     // The `used_*` totals are the sum over every round the run made, which is the
     // real spend once a tool round re-sends the conversation. A provider that
     // reported none leaves only the final round to fall back on, exact for a run
     // that made a single request.
-    let input = field("used_prompt_tokens").or_else(|| field("prompt_tokens"));
-    let output = field("used_completion_tokens").or_else(|| field("completion_tokens"));
+    let input = field("used_prompt_tokens")
+        .or_else(|| counted("used_prompt_tokens"))
+        .or_else(|| field("prompt_tokens"))
+        .or_else(|| counted("prompt_tokens"));
+    let output = field("used_completion_tokens")
+        .or_else(|| counted("used_completion_tokens"))
+        .or_else(|| field("completion_tokens"))
+        .or_else(|| counted("completion_tokens"));
 
     let mut stats = serde_json::Map::new();
     if input.is_some() || output.is_some() {
@@ -106,6 +123,32 @@ mod tests {
     fn an_unreported_spend_is_omitted_not_zeroed() {
         let stats = summarize(&json!({}), &[]);
         assert!(stats.get("used_tokens").is_none(), "{stats}");
+    }
+
+    /// A failed run has no final metrics -- the loop returned an error -- but it
+    /// still spent tokens on the rounds it completed. The `usage` events are the
+    /// only record of that, so the row must not claim the run was free.
+    #[test]
+    fn a_failed_run_still_reports_the_tokens_it_spent() {
+        let events = vec![Stamped {
+            at: Instant::now(),
+            event: ChatEvent {
+                run_id: "agent-1".into(),
+                session_id: None,
+                sequence: 0,
+                kind: "usage".into(),
+                text: None,
+                error: None,
+                metrics: Some(json!({
+                    "prompt_tokens": 4_000,
+                    "completion_tokens": 40,
+                    "used_prompt_tokens": 9_000,
+                    "used_completion_tokens": 100,
+                })),
+            },
+        }];
+        let stats = summarize(&Value::Null, &events);
+        assert_eq!(stats["used_tokens"], 9_100);
     }
 
     /// Calls and rounds are counted from the stream: a `tool_call` is one use and a

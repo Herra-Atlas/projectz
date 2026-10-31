@@ -76,14 +76,21 @@ pub struct ModelRow {
     /// `whisper`, `audiocpp` or `llamacpp`. The page draws one section per value.
     pub engine: String,
     pub family: String,
+    /// Whether this model can transcribe right now without a cold start.
+    ///
+    /// Always true for the two folder engines; a GGUF speech model says false
+    /// until its `llama-server` is up, which is the page's cue to withhold the
+    /// row rather than offer a click that starts a 2 GB process.
+    pub loaded: bool,
 }
 
 #[tauri::command]
-pub fn stt_models(app: AppHandle) -> Result<Vec<ModelRow>, String> {
+pub async fn stt_models(app: AppHandle) -> Result<Vec<ModelRow>, String> {
     // One list, every engine: `models::list` walks whisper.cpp's folder, appends
     // audio.cpp's recognisers, and asks the app for the GGUF speech models, so
     // nothing is added twice here.
     Ok(models::list(Some(&app))
+        .await
         .into_iter()
         .map(|model| ModelRow {
             path: model.path,
@@ -93,6 +100,7 @@ pub fn stt_models(app: AppHandle) -> Result<Vec<ModelRow>, String> {
             parakeet: model.parakeet,
             engine: model.engine,
             family: model.family,
+            loaded: model.loaded,
         })
         .collect())
 }
@@ -148,12 +156,30 @@ pub fn stt_select_input(
 }
 
 #[tauri::command]
-pub fn stt_select_model(
+pub async fn stt_select_model(
+    app: AppHandle,
     database: State<'_, Arc<Database>>,
     model: String,
 ) -> Result<SttSettings, String> {
     if !std::path::Path::new(&model).is_file() {
         return Err("That model is no longer on disk.".to_string());
+    }
+    // A GGUF speech model is chosen only while its server is up. Choosing it
+    // while it is down used to be allowed, and the next microphone press then
+    // started a 2 GB `llama-server` that no terminal row and no header chip
+    // announced. The page hides the row while it is down; this refuses the same
+    // call from anywhere else.
+    if let Some(row) = models::list(Some(&app))
+        .await
+        .into_iter()
+        .find(|row| row.path == model)
+    {
+        if row.engine == "llamacpp" && !row.loaded {
+            return Err(format!(
+                "{} is not loaded. Load it in Settings > Local first, or choose another model.",
+                row.name
+            ));
+        }
     }
     let mut next = models::settings(&database);
     // A resident engine holds one model; choosing another means the process is
@@ -185,7 +211,7 @@ pub async fn stt_set_keep_loaded(
         // model lives inside that engine's server. "Off" has to reach it too, or
         // the weights stay resident while the switch says otherwise.
         if matches!(
-            models::resolve(Some(&app), &settings),
+            models::resolve(Some(&app), &settings).await,
             Ok(models::Selected::Audiocpp(_))
         ) {
             crate::audio::audiocpp::stop(crate::audio::audiocpp::Purpose::Speech, &app).await;

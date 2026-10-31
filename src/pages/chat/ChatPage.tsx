@@ -53,6 +53,7 @@ import { closeOpenSteps, closeRunningThought } from "./closeOpenSteps";
 import { appendReasoning, applyReasoningSegment } from "../../features/chat/reasoningSteps";
 import { useDictation } from "../../features/stt/useDictation";
 import { hasPartialReply, partialReplyMessage } from "./partialReply";
+import { chatRepository } from "../../features/chat/chatRepository";
 import { MARKDOWN_STYLES } from "./markdownStyles";
 import { useAttachments } from "./useAttachments";
 import ContextRing from "./composer/ContextRing";
@@ -143,6 +144,102 @@ function subagentStats(metrics: AiEvent["metrics"]): ToolStepStats | undefined {
   };
 }
 
+/**
+ * The run a report notice is about, for the notice to be a door into it.
+ *
+ * The notice itself carries only prose -- the label and the report the model was
+ * handed -- because that is all a hidden turn is. The id lives on the `sub_agent`
+ * row that spawned the run, so it is found by matching the report the notice
+ * quotes against the row's output. The report is exact where the label is not:
+ * two agents in one reply can share a label, and identical answers are not
+ * something two runs produce.
+ *
+ * `null` is the honest answer for a transcript stored before rows carried an id;
+ * the notice then stays the plain marker it was.
+ */
+function noticeAgentId(messages: ChatMessage[], noticeIndex: number): string | null {
+  const notice = messages[noticeIndex];
+  if (!notice?.hidden) return null;
+  const firstBreak = notice.content.indexOf("\n\n");
+  if (firstBreak < 0) return null;
+  const report = notice.content.slice(firstBreak + 2);
+  for (let index = noticeIndex - 1; index >= 0; index--) {
+    for (const step of messages[index].activity ?? []) {
+      if (step.kind !== "tool" || step.tool !== "sub_agent" || !step.agentId) continue;
+      if (step.output === report) return step.agentId;
+    }
+  }
+  return null;
+}
+
+/**
+ * Puts one run's report on the `sub_agent` row that started it.
+ *
+ * Matched by the id the call carried, not by "the last agent row with no
+ * output": several agents can be in flight and their reports arrive in whatever
+ * order they finish, so a positional match put one run's report -- and its
+ * figures -- on another run's row. The positional scan stays as a fallback for a
+ * transcript written before the id was carried.
+ *
+ * Shared by the live path (a step list in memory) and the stored path (a
+ * transcript read back from the database), because a run that reports after its
+ * reply ended lands in the second and one that reports mid-reply in the first.
+ */
+function fillSubagentReport(
+  steps: ActivityStep[],
+  agentId: string,
+  report: string,
+  failed: boolean,
+  stats?: ToolStepStats,
+): boolean {
+  const byId = steps.find(
+    (step): step is Extract<ActivityStep, { kind: "tool" }> =>
+      step.kind === "tool" && step.tool === "sub_agent" && step.agentId === agentId,
+  );
+  const step =
+    byId ??
+    [...steps]
+      .reverse()
+      .find(
+        (entry): entry is Extract<ActivityStep, { kind: "tool" }> =>
+          entry.kind === "tool" && entry.tool === "sub_agent" && entry.output === undefined,
+      );
+  if (!step) return false;
+  // A report is delivered once. Re-applying it is harmless, which is why this is
+  // assignment rather than a guard on `output`.
+  step.output = report;
+  step.outcome = failed ? "failed" : "finished";
+  // The delegated run's own figures, drawn under the report so the run is judged
+  // from the row rather than by opening the Sub agents panel.
+  if (stats) step.stats = stats;
+  // The delegated work failed, so the row reads as a failed step rather than a
+  // successful call that happens to carry a sad paragraph.
+  step.failed = failed;
+  return true;
+}
+
+/**
+ * The same fill, over a whole transcript. Rewrites the one message that owns the
+ * row, in place, and answers whether anything changed.
+ */
+function patchSubagentReport(
+  messages: ChatMessage[],
+  agentId: string,
+  report: string,
+  failed: boolean,
+  stats?: ToolStepStats,
+): boolean {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role !== "assistant" || !message.activity) continue;
+    const activity = message.activity.map((step) => ({ ...step }));
+    if (!fillSubagentReport(activity, agentId, report, failed, stats)) continue;
+    messages[index] = { ...message, activity };
+    return true;
+  }
+  return false;
+}
+
 type ChatPageProps = {
   endpointId: string;
   model: string;
@@ -215,6 +312,14 @@ type ChatPageProps = {
    * are already in the form the panel's read command takes.
    */
   onOpenFile?: (path: string) => void;
+  /**
+   * Opens one sub-agent run in the right panel.
+   *
+   * Wired to the centred "finished" notice in the transcript, so the line that
+   * announces a report is also the way to read the run it came from. The id is
+   * resolved from the `sub_agent` row that spawned it -- see [`noticeAgentId`].
+   */
+  onOpenSubAgent?: (agentId: string) => void;
   /** Models that name new conversations, in order; empty disables the feature. */
   titleModels?: ModelSelection[];
   onAutoTitle: (sessionId: string, title: string) => void;
@@ -264,7 +369,7 @@ function playAlertIfUnseen(kind: AlertKind, isActive = true) {
   if (sound) playAlertSound(sound);
 }
 
-export default function ChatPage({ endpointId, model, localModelId, session, sessionLoading = false, activeId = null, onEnsureSession, onFirstSend, onActivity, onModelSelect, onLocalModelSelect, modelRefreshKey, onMessagesChange, onWorkingModeChange, onNotify, onNotifyAction, onClearNotification, onOpenUrl, onOpenFile, titleModels, onAutoTitle, workspaceRoot, onWorkspaceSelect, defaultEffort }: ChatPageProps) {
+export default function ChatPage({ endpointId, model, localModelId, session, sessionLoading = false, activeId = null, onEnsureSession, onFirstSend, onActivity, onModelSelect, onLocalModelSelect, modelRefreshKey, onMessagesChange, onWorkingModeChange, onNotify, onNotifyAction, onClearNotification, onOpenUrl, onOpenFile, onOpenSubAgent, titleModels, onAutoTitle, workspaceRoot, onWorkspaceSelect, defaultEffort }: ChatPageProps) {
   const [messages, setMessages] = useState<ChatMessage[]>(session?.messages ?? []);
   // The latest transcript, for the run listener (a mount-time effect) to build on
   // when something arrives outside the current render -- a background sub-agent's
@@ -1017,43 +1122,32 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       // in the live run's activity while the reply is still going and in a stored
       // assistant message once it has ended, so both are patched -- and the live one
       // matters because its activity is what gets persisted when the reply ends.
-      const attachSubagentReport = (sessionId: string, report: string, failed: boolean, stats?: ToolStepStats) => {
-        const fill = (steps: ActivityStep[]): boolean => {
-          for (let index = steps.length - 1; index >= 0; index--) {
-            const step = steps[index];
-            if (step.kind === "tool" && step.tool === "sub_agent" && step.output === undefined) {
-              step.output = report;
-              step.outcome = failed ? "failed" : "finished";
-              // The delegated run's own figures, drawn under the report so the run
-              // is judged from the row rather than by opening the Sub agents panel.
-              if (stats) step.stats = stats;
-              // The delegated work failed, so the row reads as a failed step rather
-              // than a successful call that happens to carry a sad paragraph.
-              step.failed = failed;
-              return true;
-            }
-          }
-          return false;
-        };
-
+      const attachSubagentReport = (sessionId: string, agentId: string, report: string, failed: boolean, stats?: ToolStepStats) => {
+        // The reply that spawned the run may still be streaming: its activity is
+        // the copy that will be written when it ends, so it is patched first.
         const runId = sessionRunIdsRef.current.get(sessionId);
         const live = runId ? backgroundRunsRef.current.get(runId) : undefined;
-        if (live && fill(live.activity)) {
+        if (live && fillSubagentReport(live.activity, agentId, report, failed, stats)) {
           streamActivityRef.current = [...live.activity];
           scheduleStreamFlush();
         }
 
         const next = [...messagesRef.current];
-        for (let index = next.length - 1; index >= 0; index--) {
-          const message = next[index];
-          if (message.role !== "assistant" || !message.activity) continue;
-          const activity = message.activity.map((step) => ({ ...step }));
-          if (!fill(activity)) continue;
-          next[index] = { ...message, activity };
-          messagesRef.current = next;
-          setMessages(next);
-          onMessagesChangeRef.current(sessionId, next);
-          return;
+        if (!patchSubagentReport(next, agentId, report, failed, stats)) return;
+        messagesRef.current = next;
+        setMessages(next);
+        onMessagesChangeRef.current(sessionId, next);
+      };
+
+      /** The same patch for a conversation that is not the one on screen. */
+      const patchOffscreenReport = async (sessionId: string, agentId: string, report: string, failed: boolean, stats?: ToolStepStats) => {
+        try {
+          const stored = await chatRepository.listMessages(sessionId);
+          if (!patchSubagentReport(stored, agentId, report, failed, stats)) return;
+          onMessagesChangeRef.current(sessionId, stored);
+        } catch {
+          // The report still reached the model; only the row's copy is missing,
+          // and the next open reads whatever the database holds.
         }
       };
       // A background sub-agent's report. It arrives under the agent's own run id,
@@ -1070,12 +1164,20 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         // so a failure goes to the stack rather than being dropped silently.
         if (reportSession !== sessionIdRef.current) {
           if (failed) onNotify("error", `Sub-agent "${label}" failed.`);
+          // The row still has to say what came back, even though the user is
+          // reading another conversation -- that is the case a silent drop left
+          // permanently empty. A running reply in that conversation is skipped:
+          // its own completion write would land on top with a copy taken before
+          // this patch. Its live activity was not reachable from here anyway.
+          if (!sessionRunIdsRef.current.has(reportSession)) {
+            void patchOffscreenReport(reportSession, payload.metrics?.agent_id ?? "", report, failed, subagentStats(payload.metrics));
+          }
           return;
         }
         // The report goes on the `sub_agent` row inside "Worked for ...", not into
         // the transcript as the user's own message; the model still receives it, as
         // a hidden turn (below).
-        attachSubagentReport(reportSession, report, failed, subagentStats(payload.metrics));
+        attachSubagentReport(reportSession, payload.metrics?.agent_id ?? "", report, failed, subagentStats(payload.metrics));
         if (failed) onNotify("error", `Sub-agent "${label}" failed.`);
         // A `subagent_wait` that was parked when the run ended has already handed
         // this report back as that call's result, so the model has read it. Sending
@@ -1108,6 +1210,11 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           sessionId: payload.session_id ?? null,
           approvalId: payload.metrics.approval_id,
           tool: payload.metrics.tool ?? "tool",
+          // The same wording the row uses, and what the call will touch. Both
+          // are absent from a prompt emitted before they existed, which the
+          // component handles by falling back to the tool name.
+          label: payload.metrics.label ?? "",
+          detail: payload.metrics.detail ?? "",
           command: payload.metrics.command ?? "",
           arguments: payload.metrics.arguments ?? {},
         };
@@ -1402,6 +1509,9 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
           // rewritten one. Both look the same in the diff — every line added,
           // none removed — so this is the only thing that tells them apart.
           if (metrics.created) open.created = true;
+          // The run this call started, so the report that arrives later lands on
+          // this row rather than on whichever agent row is still open.
+          if (metrics.agent_id) open.agentId = metrics.agent_id;
           // `startedAt` is dropped once the call is done: the row is reporting
           // the backend's measured figure now, and leaving a local timestamp on
           // it would let a later tick add to a call that has already finished.
@@ -1423,6 +1533,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
             ...(metrics.context ? { context: metrics.context } : {}),
             ...(metrics.diff ? { diff: metrics.diff } : {}),
             ...(metrics.created ? { created: true } : {}),
+            ...(metrics.agent_id ? { agentId: metrics.agent_id } : {}),
           });
         }
         if (isActive) {
@@ -2550,11 +2661,35 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
                 // message from either side: the report itself lives on the `sub_agent`
                 // tool row inside the reply that spawned it, and this only marks that
                 // the run has reported back and the model has been told.
-                <div key={`${index}-notice`} className="my-2 flex items-center gap-3 px-1 text-[11px] text-[var(--quiet)]">
-                  <span className="h-px flex-1 bg-[var(--line)]" />
-                  <span className="shrink-0">{message.content.split("\n")[0]}</span>
-                  <span className="h-px flex-1 bg-[var(--line)]" />
-                </div>
+                //
+                // The notice is a door when the run can be named: clicking it opens
+                // that agent in the Sub agents panel. It stays a plain marker for a
+                // transcript whose row predates the id being carried.
+                (() => {
+                  const agentId = onOpenSubAgent ? noticeAgentId(messages, index) : null;
+                  const body = (
+                    <>
+                      <span className="h-px flex-1 bg-[var(--line)]" />
+                      <span className="shrink-0">{message.content.split("\n")[0]}</span>
+                      <span className="h-px flex-1 bg-[var(--line)]" />
+                    </>
+                  );
+                  return agentId ? (
+                    <button
+                      key={`${index}-notice`}
+                      type="button"
+                      onClick={() => onOpenSubAgent?.(agentId)}
+                      title="Open this sub agent"
+                      className="my-2 flex w-full items-center gap-3 rounded px-1 text-[11px] text-[var(--quiet)] transition-colors hover:text-[var(--accent)] focus-visible:outline-2 focus-visible:outline-[var(--accent)]"
+                    >
+                      {body}
+                    </button>
+                  ) : (
+                    <div key={`${index}-notice`} className="my-2 flex items-center gap-3 px-1 text-[11px] text-[var(--quiet)]">
+                      {body}
+                    </div>
+                  );
+                })()
               ) : (
               <article key={`${index}-${message.role}`} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
                 <div className={`group min-w-0 max-w-[85%] break-words text-[14px] leading-7 sm:max-w-[78%] ${message.role === "user" ? "whitespace-pre-wrap rounded-2xl rounded-br-md bg-[var(--raised)] px-4 py-3 text-[var(--text)]" : "py-1 text-[var(--text)]"}`}>

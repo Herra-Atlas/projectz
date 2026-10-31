@@ -109,7 +109,9 @@ export type AiEvent = {
      * `used_tokens` counts every round the run made, so it is the run's real spend
      * rather than its final request; it is absent when the provider reported no
      * usage. The other three are always present -- they are counted from the run's
-     * own events, which the stored transcript does not keep.
+     * own events, which the stored transcript does not keep. On a `tool_result`,
+     * `agent_id` is the run a `sub_agent` call started, and is what matches the
+     * later report to the row that asked for it.
      */
     stats?: {
       used_tokens?: number;

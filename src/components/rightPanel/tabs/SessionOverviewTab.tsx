@@ -97,6 +97,12 @@ export default function SessionOverviewTab({ sessionId, loadSession }: SessionOv
         id="session-tab-panel"
         role="tabpanel"
         aria-labelledby={`session-tab-${tab.toLowerCase()}`}
+        // The record is a find scope like the chat's transcript: the figures and
+        // the advanced lists are text a reader searches by name. The panel's tab
+        // strip above stays outside it -- the view's name is drawn as chrome, not
+        // as the page's own words.
+        data-find-scope=""
+        data-find-label="overview"
         className="min-h-0 flex-1 overflow-y-auto"
       >
         {tab === "Overview" && <OverviewTab stats={stats} />}

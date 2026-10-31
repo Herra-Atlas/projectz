@@ -8,6 +8,7 @@ import BrowserTab from "./browser/BrowserTab";
 import FilesTab from "./tabs/FilesTab";
 import TerminalTab from "./tabs/TerminalTab";
 import SubAgentsTab from "./tabs/SubAgentsTab";
+import { useSubAgents } from "../../features/subagents/useSubAgents";
 import SessionOverviewTab from "./tabs/SessionOverviewTab";
 import type { ChatSession } from "../../features/chat/types";
 import { type PanelViewId, usePanelViews } from "../../features/rightPanel/usePanelViews";
@@ -186,6 +187,22 @@ type RightPanelProps = {
    */
   overviewRequest?: { id: string; key: number } | null;
   /**
+   * One sub-agent run the Sub agents view should open, raised by the transcript.
+   *
+   * Same shape and same rule as `overviewRequest`: setting it opens the panel and
+   * brings the view forward, and the nonce makes asking for the same run again a
+   * new request. The view owns which run is open; this only names one.
+   */
+  subagentRequest?: { id: string; key: number } | null;
+  /**
+   * Raises the Overview view for one conversation or run.
+   *
+   * The Sub agents list reaches it from its row menu, the same action the
+   * sidebar's session menu offers. Held by `App` so both entry points use one
+   * request and one view.
+   */
+  onOpenOverview?: (id: string) => void;
+  /**
    * Reads one conversation with its transcript, for the Overview view.
    *
    * Supplied by the chat hook so the panel shares its transcript cache rather
@@ -204,14 +221,27 @@ type RightPanelProps = {
  *
  * Closed is *zero width*, not `display: none`, so the handle can stay on screen
  * to bring it back. The body is hidden from the tree as well as from layout, so
- * a tab the panel remembers is not silently live behind a closed panel.
+ * a tab the panel remembers is not silently live behind a closed panel. The one
+ * thing that outlives both is the Sub agents *session* below, which is data
+ * rather than a view: it is what lets a run keep streaming, or be re-read after
+ * it finished, while the reader was somewhere else.
  */
-export default function RightPanel({ open, width, workspace, skill = null, onCloseSkill, sessionId = null, loadedModelId = null, loadingModelId = null, terminalRequest = null, requestedPath, requestedUrl, onUrlRequestHandled, onRequestHandled, overviewRequest = null, loadSession, onClose, onOpen, onResize, onNotify }: RightPanelProps) {
+export default function RightPanel({ open, width, workspace, skill = null, onCloseSkill, sessionId = null, loadedModelId = null, loadingModelId = null, terminalRequest = null, requestedPath, requestedUrl, onUrlRequestHandled, onRequestHandled, overviewRequest = null, subagentRequest = null, onOpenOverview, loadSession, onClose, onOpen, onResize, onNotify }: RightPanelProps) {
   const panelRef = useRef<HTMLElement>(null);
+  /**
+   * The Sub agents session, owned here rather than by the tab.
+   *
+   * The panel draws one view at a time and unmounts the rest, and it unmounts
+   * everything when it is closed -- so a hook inside the tab forgot the open run
+   * and its transcript the moment the reader looked at Files or shut the panel.
+   * Kept at this level, the state is as long-lived as the panel itself, and a
+   * run that finishes while the tab is away is still folded and re-read.
+   */
+  const subagents = useSubAgents(true, sessionId);
   const {
     openViews, activeView, open: openView, close: closeView, setActiveView,
     terminalSessions, activeTerminalId, setActiveTerminalId, openTerminalSession,
-    closeTerminalSession, closeAll: closeAllViews, ensureServerSession,
+    closeTerminalSession, ensureServerSession,
   } = usePanelViews();
   const serverModelId = loadedModelId ?? loadingModelId;
   // A file:// URL asked for by the Files view. Object rather than a bare string
@@ -402,14 +432,22 @@ export default function RightPanel({ open, width, workspace, skill = null, onClo
       );
     }, [terminalSessions, closeTerminalSession, onNotify]);
 
+  /**
+   * Closes the dock without forgetting what was in it.
+   *
+   * The body is unmounted either way -- that is what keeps a browser webview or a
+   * terminal from living behind a closed panel -- so the tabs and the view that
+   * was showing are only remembered, not kept running. Clearing them here is what
+   * made closing the panel look like it had reset the Sub agents view: reopening
+   * landed on the empty state instead of the run the reader had been reading.
+   */
   const handleClosePanel = useCallback(() => {
-    closeAllViews();
     setBrowserRequest(null);
     onUrlRequestHandled?.();
     onRequestHandled?.();
     onClose();
     void invoke("panel_browser_close").catch(() => undefined);
-  }, [closeAllViews, onClose, onRequestHandled, onUrlRequestHandled]);
+  }, [onClose, onRequestHandled, onUrlRequestHandled]);
 
   /**
    * Closing the Terminal view closes its server rows too.
@@ -497,6 +535,22 @@ export default function RightPanel({ open, width, workspace, skill = null, onClo
   }, [overviewRequest, openView, onOpen]);
 
   /**
+   * Opens the panel and brings Sub agents forward when a run is asked for.
+   *
+   * The same shape as the overview request, and for the same reason: the notice
+   * in the transcript is a request to *see* a run, so a closed panel must open
+   * rather than the click doing nothing. The request is handed to the view as it
+   * is; the view decides which run it is showing.
+   */
+  const handledSubagentKeyRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!subagentRequest || handledSubagentKeyRef.current === subagentRequest.key) return;
+    handledSubagentKeyRef.current = subagentRequest.key;
+    openView("subagents");
+    onOpen();
+  }, [subagentRequest, openView, onOpen]);
+
+  /**
    * Opens the panel and brings Files forward when a file is asked for.
    *
    * The panel does this rather than the caller, because a caller that set a path
@@ -575,6 +629,12 @@ export default function RightPanel({ open, width, workspace, skill = null, onClo
       ref={panelRef}
       aria-label="Right panel"
       data-right-panel=""
+      // The panel is one search region: it draws one find scope at a time (tree,
+      // preview, terminal, overview, sub agents) and swaps them without moving
+      // the user. `features/find/scopes.ts` remembers the region a press landed
+      // in, so opening a file from the tree keeps Ctrl+F in the panel instead of
+      // falling back to the conversation beside it.
+      data-find-region=""
       // The panel's frame, as a mark rather than an aria name. A file dragged
       // from Explorer lands wherever the pointer is, and the chat page's own OS
       // drop listener is window-wide -- this is what lets it tell a drop on the
@@ -645,7 +705,7 @@ export default function RightPanel({ open, width, workspace, skill = null, onClo
               // A link out of a run's answer opens in the panel's browser, the same
               // place a link from the chat opens -- both are the same act, so they
               // share one handler rather than growing a second way to open a page.
-              <SubAgentsTab parentSessionId={sessionId} onOpenUrl={handlePreviewInBrowser} />
+              <SubAgentsTab subagents={subagents} onOpenUrl={handlePreviewInBrowser} requestedAgent={subagentRequest} onOpenOverview={onOpenOverview} />
             ) : (
               <RightPanelEmpty onOpen={openView} hasWorkspace={Boolean(workspace)} />
             )}

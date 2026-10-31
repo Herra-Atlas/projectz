@@ -572,6 +572,13 @@ export default function FilesTab({ workspace, skill = null, onCloseSkill, reques
           `folderAtDropPoint`. */}
       <div
         data-drop-root
+        // The tree is a find scope, so the app's bar searches it rather than the
+        // conversation behind it. The label is the view's name, not the folder's:
+        // it is what the bar's placeholder says, and a long workspace path would
+        // not fit. The filter field above is deliberately outside the scope --
+        // an `<input>` is skipped anyway, and it is a control, not content.
+        data-find-scope=""
+        data-find-label="files"
         className={`min-h-0 flex-1 overflow-y-auto py-1 ${dropTarget === "" ? "bg-[color-mix(in_srgb,var(--accent)_6%,transparent)]" : ""}`}
         onContextMenu={openBlankMenu}
         // Only the blank space itself: a click on a row is that row's, and this

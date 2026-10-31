@@ -96,6 +96,11 @@ pub fn build_run(record: RunRecord<'_>) -> Value {
         "updatedAt": utc_now(),
         "kind": "subagent",
         "parentSessionId": record.parent_session,
+        // Whether the run ended as a failure, for the panel's list row: the icon
+        // turns red and the row says so without opening the transcript. It lives
+        // in the metadata blob beside `kind`, so the header query can state it
+        // without reading messages. Absent means the run did not fail.
+        "failed": record.error.is_some(),
         "modelId": record.model,
         "providerId": record.provider,
         // Deliberately present even though a sub-agent is never edited or renamed:
@@ -364,4 +369,40 @@ fn metrics_json(reported: &Value, elapsed: f64, failed: bool) -> Value {
         metrics.insert("failed".into(), Value::Bool(true));
     }
     Value::Object(metrics)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The list row needs the outcome without reading the transcript, so it is
+    /// written on the session record itself. A run that failed must be
+    /// distinguishable from one that answered -- the panel turns its icon red.
+    #[test]
+    fn a_failed_run_is_marked_on_its_row() {
+        let events: Vec<Stamped> = Vec::new();
+        let record = |error: Option<&'static str>| RunRecord {
+            id: "agent-1",
+            label: "car research",
+            prompt: "Find three cars",
+            content: "The agent did not finish: HTTP 400",
+            metrics: &Value::Null,
+            error,
+            parent_session: Some("chat-1"),
+            model: "gpt-5",
+            provider: "openai",
+            started_at: "2026-01-01T00:00:00Z",
+            events: &events,
+            searches: &[],
+        };
+
+        let failed = build_run(record(Some("HTTP 400")));
+        assert_eq!(failed["failed"], Value::Bool(true));
+        // The reply the panel draws says why, as before.
+        assert_eq!(failed["messages"][1]["metrics"]["failed"], Value::Bool(true));
+
+        let answered = build_run(record(None));
+        assert_eq!(answered["failed"], Value::Bool(false));
+        assert!(answered["messages"][1]["metrics"].get("failed").is_none());
+    }
 }

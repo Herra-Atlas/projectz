@@ -101,7 +101,9 @@ pub struct SkillFile {
 /// What a create/update writes.
 ///
 /// The description is the only header field left to edit, because the name is
-/// the folder and the body is the rest of the file.
+/// the folder and the body is the rest of the file. `None` on an update means
+/// *keep the stored one* -- see [`update`] for why an omitted field must not be
+/// the thing that erases a skill's trigger.
 #[derive(Clone, Debug, Deserialize)]
 pub struct SkillDraft {
     /// The display name. The slug is derived from it on create and kept after.
@@ -233,19 +235,108 @@ fn create_at(root: &Path, draft: &SkillDraft) -> Result<Skill, String> {
 }
 
 /// Replaces a skill's text, keeping its slug and files.
+///
+/// **A draft that omits the description keeps the one already on disk.** The
+/// trigger is the only text a model chooses a skill by, so an update that did not
+/// mention it must not be the call that erases it -- which it was: the header was
+/// rebuilt from the draft alone, and an omitted field rendered as no line at all.
+/// The skill then still loaded, with no description, and could never be selected
+/// again. There is no way to *clear* a description here for the same reason: a
+/// skill without a trigger is a skill the index offers for no task.
 pub fn update(slug: &str, draft: &SkillDraft) -> Result<Skill, String> {
-    let skill = resolve(slug)?;
+    update_at(&root(), slug, draft)
+}
+
+/// The update, against an explicit root for the same reason [`create_at`] takes
+/// one: a test can watch what a save keeps without touching the real skills
+/// folder.
+fn update_at(root: &Path, slug: &str, draft: &SkillDraft) -> Result<Skill, String> {
+    let skill = resolve_at(root, slug)?;
     let body = required(&draft.instructions, "instructions")?;
-    let dir = directory_of(&skill)?;
-    write_markdown(
-        &dir,
-        &frontmatter::render(
-            &skill.slug,
-            clean(&draft.description).as_deref().unwrap_or(""),
-            &body,
-        ),
-    )?;
-    resolve(&skill.slug)
+    let dir = skill_directory(root, &skill)?;
+    let description = match clean(&draft.description) {
+        Some(description) => description,
+        None => existing_description(&dir),
+    };
+    write_markdown(&dir, &frontmatter::render(&skill.slug, &description, &body))?;
+    resolve_at(root, &skill.slug)
+}
+
+/// What one surgical edit did.
+pub struct Patched {
+    pub skill: Skill,
+    /// The file was written. A call that matched its own replacement leaves it
+    /// alone, so a no-op does not move the modification time the index watches.
+    pub changed: bool,
+    /// How many changes were found by the folded pass rather than exactly, which
+    /// is the one detail worth telling the model: the text it sent was not the
+    /// text in the file.
+    pub lenient: usize,
+}
+
+/// Applies text changes to a skill's `SKILL.md` without rewriting the rest.
+///
+/// The door that was missing: `update` replaces the whole body, so changing one
+/// line cost the model every other line -- up to the 20,000-character ceiling, on
+/// every edit, with the body arriving through a single tool call that a long
+/// enough reply truncates mid-way. Here the matched run is the only thing that
+/// moves, the file is written once, and everything else in it -- unknown header
+/// keys, comments, spacing -- is copied through.
+pub fn patch(
+    slug: &str,
+    edits: &[crate::ai::tools::patch::Change],
+    description: Option<&str>,
+) -> Result<Patched, String> {
+    patch_at(&root(), slug, edits, description)
+}
+
+/// The patch, against an explicit root, so a test can check what a correction
+/// leaves alone without editing a real skill.
+fn patch_at(
+    root: &Path,
+    slug: &str,
+    edits: &[crate::ai::tools::patch::Change],
+    description: Option<&str>,
+) -> Result<Patched, String> {
+    let skill = resolve_at(root, slug)?;
+    let dir = skill_directory(root, &skill)?;
+    let raw = std::fs::read_to_string(dir.join(SKILL_FILE)).map_err(|error| {
+        format!(
+            "Could not read `{}`: {error}",
+            dir.join(SKILL_FILE).display()
+        )
+    })?;
+
+    let (edited, lenient) = crate::ai::tools::patch::apply_all(&raw, edits)?;
+    let after = match description {
+        Some(description) => frontmatter::set_description(&edited, &skill.slug, description),
+        None => edited,
+    };
+
+    if after == raw {
+        return Ok(Patched {
+            skill,
+            changed: false,
+            lenient,
+        });
+    }
+    write_markdown(&dir, &after)?;
+    Ok(Patched {
+        skill: resolve_at(root, &skill.slug)?,
+        changed: true,
+        lenient,
+    })
+}
+
+/// The description already written in a skill's header, or nothing.
+fn existing_description(dir: &Path) -> String {
+    match frontmatter::read(&dir.join(SKILL_FILE)) {
+        Ok((header, _)) => header.description,
+        // A file that cannot be parsed is about to be replaced by a well-formed
+        // one, so a missing trigger is the honest outcome rather than a failure
+        // that would leave the caller unable to save at all.
+        Err(_) => String::new(),
+    }
 }
 
 /// Removes a skill's folder.
@@ -369,7 +460,15 @@ pub fn script_path(slug: &str, path: &str) -> Result<(Skill, PathBuf), String> {
 
 /// The folder a skill lives in.
 pub fn directory_of(skill: &Skill) -> Result<PathBuf, String> {
-    let dir = root().join(&skill.slug);
+    skill_directory(&root(), skill)
+}
+
+/// The folder a skill lives in, under a named root.
+///
+/// One rule for the path, so a write reached through the global root and one
+/// reached through a test's root cannot disagree about where a skill is.
+fn skill_directory(root: &Path, skill: &Skill) -> Result<PathBuf, String> {
+    let dir = root.join(&skill.slug);
     if dir.is_dir() {
         Ok(dir)
     } else {
@@ -763,6 +862,123 @@ mod tests {
         let markdown =
             std::fs::read_to_string(root.join("diff-review").join(SKILL_FILE)).expect("read back");
         assert!(markdown.contains("Check the diff."));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The trigger is the only text a model chooses a skill by, so an update that
+    /// did not mention it must not be the call that erases it. It was: the header
+    /// was rebuilt from the draft alone, and the skill became unselectable while
+    /// still looking fine in the list.
+    #[test]
+    fn an_update_without_a_description_keeps_the_stored_trigger() {
+        let root = temp("keep-trigger");
+        write_skill(&root, "code-review", "when reviewing a diff");
+        let updated = update_at(
+            &root,
+            "code-review",
+            &SkillDraft {
+                name: "code-review".into(),
+                description: None,
+                instructions: "Do it in a different order.".into(),
+            },
+        )
+        .expect("update");
+
+        assert_eq!(
+            updated.description.as_deref(),
+            Some("when reviewing a diff"),
+            "the update dropped the skill's trigger"
+        );
+        let markdown =
+            std::fs::read_to_string(root.join("code-review").join(SKILL_FILE)).expect("read back");
+        assert!(markdown.contains("Do it in a different order."));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_update_that_names_a_description_still_replaces_it() {
+        let root = temp("replace-trigger");
+        write_skill(&root, "code-review", "when reviewing a diff");
+        let updated = update_at(
+            &root,
+            "code-review",
+            &SkillDraft {
+                name: "code-review".into(),
+                description: Some("when a diff lands".into()),
+                instructions: "Do it.".into(),
+            },
+        )
+        .expect("update");
+        assert_eq!(updated.description.as_deref(), Some("when a diff lands"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn change(old_text: &str, new_text: &str) -> crate::ai::tools::patch::Change {
+        crate::ai::tools::patch::Change {
+            old_text: old_text.into(),
+            new_text: new_text.into(),
+            replace_all: false,
+        }
+    }
+
+    /// The point of the surgical door: one line moves and the rest of the file --
+    /// including keys this app does not parse and the author's own spacing -- is
+    /// copied through, because none of it was the thing being edited.
+    #[test]
+    fn a_patch_changes_only_the_matched_text() {
+        let root = temp("patch");
+        let dir = root.join("careful");
+        std::fs::create_dir_all(&dir).expect("dir");
+        std::fs::write(
+            dir.join(SKILL_FILE),
+            "---\nname: careful\nlicense: MIT\n# kept by hand\ndescription: \"when touching money\"\n---\n\n# Steps\n\nRead the ledger.\n\nKeep the pennies.\n",
+        )
+        .expect("write");
+
+        let patched = patch_at(
+            &root,
+            "careful",
+            &[change("Read the ledger.", "Read the whole ledger.")],
+            None,
+        )
+        .expect("patch");
+        assert!(patched.changed);
+
+        let written = std::fs::read_to_string(dir.join(SKILL_FILE)).expect("read back");
+        assert_eq!(
+            written,
+            "---\nname: careful\nlicense: MIT\n# kept by hand\ndescription: \"when touching money\"\n---\n\n# Steps\n\nRead the whole ledger.\n\nKeep the pennies.\n"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A metadata-only correction: the trigger moves, the body does not.
+    #[test]
+    fn a_patch_can_change_the_trigger_alone() {
+        let root = temp("patch-trigger");
+        write_skill(&root, "code-review", "when reviewing a diff");
+        let patched =
+            patch_at(&root, "code-review", &[], Some("when a diff lands")).expect("patch");
+        assert!(patched.changed);
+        assert_eq!(
+            patched.skill.description.as_deref(),
+            Some("when a diff lands")
+        );
+        let markdown =
+            std::fs::read_to_string(root.join("code-review").join(SKILL_FILE)).expect("read back");
+        assert!(markdown.contains("Do it."), "the body was lost: {markdown}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A correction that matches its own replacement is not a write, so the
+    /// modification time the catalogue watches does not move.
+    #[test]
+    fn a_patch_that_changes_nothing_reports_it() {
+        let root = temp("patch-noop");
+        write_skill(&root, "code-review", "when reviewing");
+        let patched =
+            patch_at(&root, "code-review", &[change("Do it.", "Do it.")], None).expect("patch");
+        assert!(!patched.changed);
         let _ = std::fs::remove_dir_all(&root);
     }
 

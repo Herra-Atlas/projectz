@@ -20,13 +20,19 @@ export type SubAgentRun = ChatSessionHeader;
  *
  * Both a finished run (from storage) and a running one (from memory) become this,
  * so the list has one shape to render. `running` is what decides the row's mark:
- * a spinner while the agent works, the agent icon once it is done.
+ * a spinner while the agent works, the agent icon once it is done -- red when it
+ * failed. `startedAt` and `finishedAt` are kept apart because the row names which
+ * one it is showing: a live run has only begun, a finished one has both.
  */
 export type SubAgentListItem = {
   id: string;
   title: string;
-  updatedAt: string;
+  /** When the run began, in UTC ISO-8601. */
+  startedAt: string;
+  /** When it ended, absent while it is still working. */
+  finishedAt?: string;
   running: boolean;
+  failed: boolean;
 };
 
 /**
@@ -280,15 +286,30 @@ export function useSubAgents(enabled: boolean, parentSessionId: string | null) {
   }, [enabled, refresh, select]);
 
   // Running runs first, then finished ones, each group newest first from its own
-  // source. A running run carries its start time as `updatedAt`, which is what the
-  // list row shows until the stored row replaces it.
+  // source. A running run carries only its start, which is what the row shows
+  // until the stored row replaces it -- and the stored row's `updatedAt` is the
+  // moment it finished, so the two states name different moments rather than
+  // both showing a bare clock that the reader has to interpret.
   const runs = useMemo<SubAgentListItem[]>(() => {
-    const running = live.map((run) => ({ id: run.id, title: run.title, updatedAt: run.startedAt, running: true }));
+    const running = live.map((run) => ({
+      id: run.id,
+      title: run.title,
+      startedAt: run.startedAt,
+      running: true,
+      failed: false,
+    }));
     // A follow-up continues a row that is already stored, so the same id would
     // otherwise appear twice: once streaming, once finished.
     const finished = headers
       .filter((run) => !live.some((entry) => entry.id === run.id))
-      .map((run) => ({ id: run.id, title: run.title, updatedAt: run.updatedAt, running: false }));
+      .map((run) => ({
+        id: run.id,
+        title: run.title,
+        startedAt: run.createdAt,
+        finishedAt: run.updatedAt,
+        running: false,
+        failed: run.failed === true,
+      }));
     return [...running, ...finished];
   }, [live, headers]);
 
@@ -296,3 +317,13 @@ export function useSubAgents(enabled: boolean, parentSessionId: string | null) {
 
   return { runs, activeLive, activeId, transcript, select, close, send, stop, refresh, error, loaded };
 }
+
+/**
+ * Everything the Sub agents view needs, owned by whoever keeps it alive.
+ *
+ * The view is unmounted whenever another tab is shown, and the whole panel is
+ * unmounted when it is closed -- so a hook living inside the view lost the open
+ * run, its transcript and its activity on every switch. This type names the
+ * object the panel holds instead, so the state outlives the thing that draws it.
+ */
+export type SubAgentsController = ReturnType<typeof useSubAgents>;

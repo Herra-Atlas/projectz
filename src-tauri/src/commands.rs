@@ -390,6 +390,25 @@ pub fn database_list_session_messages(
     runtime.database().list_session_messages(&session_id)
 }
 
+/// One session with its transcript, whoever it belongs to.
+///
+/// The Overview view reads a conversation by id, and its usual source is the
+/// header list the sidebar loaded. A sub-agent run is deliberately absent from
+/// that list, so without this its "Overview" had no header to join a transcript
+/// to and the view came back empty. Read whole here, from the same two queries,
+/// so the panel can show the record of any stored session -- a run included.
+#[tauri::command]
+pub fn database_read_session(
+    runtime: State<'_, AiRuntime>,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    let database = runtime.database();
+    let mut session = database.session_record(&id)?;
+    let messages = database.list_session_messages(&id)?;
+    session["messages"] = serde_json::Value::Array(messages);
+    Ok(session)
+}
+
 #[tauri::command]
 pub fn database_save_session(
     runtime: State<'_, AiRuntime>,

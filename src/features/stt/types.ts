@@ -33,6 +33,16 @@ export type SttModel = {
   engine: string;
   /** The audio.cpp family the model names, empty for a whisper model. */
   family: string;
+  /**
+   * Whether this model can transcribe right now without a cold start.
+   *
+   * Always true for a whisper or audio.cpp file. A GGUF speech model says false
+   * until its `llama-server` is up: choosing one while it is down used to start
+   * a 2 GB process from a microphone press, with no terminal row and no header
+   * chip to say it had happened, so the page draws only the loaded ones and the
+   * backend refuses the others.
+   */
+  loaded: boolean;
 };
 
 /** Mirrors `stt::models::SttSettings`. */

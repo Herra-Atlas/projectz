@@ -30,6 +30,16 @@ use super::policy::{Decision, PermissionMode};
 pub struct ApprovalRequest {
     pub run_id: String,
     pub tool_name: String,
+    /// The call in words a reader uses: "Write file", "Run command".
+    ///
+    /// Supplied by `tools/ui.rs`, which is where every call is described. A prompt
+    /// that named the tool by its wire name (`write_file`) was a second vocabulary
+    /// for the same call, and the only one the user ever saw.
+    pub label: String,
+    /// What the call is pointed at, with the fact needed to judge it: the path and
+    /// what will happen to it, the destination of a move, a folder that a delete
+    /// takes with it. Empty when there is nothing to add.
+    pub detail: String,
     /// The dangerous string for this call: a command line, or empty.
     pub command: String,
     /// Rendered as JSON for the frontend to show beside the command.
@@ -37,15 +47,20 @@ pub struct ApprovalRequest {
 }
 
 impl ApprovalRequest {
-    /// The one-line summary shown in the prompt.
+    /// The one-line summary shown in the prompt and relayed to a phone.
     ///
-    /// Built here rather than in the frontend so a permission dialog and a log
-    /// line always describe the same call the same way.
+    /// Built here rather than in the frontend so a permission dialog, a chat
+    /// message and a log line always describe the same call the same way.
     pub fn summary(&self) -> String {
-        if self.command.trim().is_empty() {
+        let subject = if self.command.trim().is_empty() {
+            self.detail.trim()
+        } else {
+            self.command.trim()
+        };
+        if subject.is_empty() {
             self.tool_name.clone()
         } else {
-            format!("{}: {}", self.tool_name, self.command.trim())
+            format!("{}: {subject}", self.tool_name)
         }
     }
 }
@@ -372,6 +387,8 @@ mod tests {
         ApprovalRequest {
             run_id: "r1".into(),
             tool_name: "run_terminal".into(),
+            label: "Run command".into(),
+            detail: String::new(),
             command: "mkdir build".into(),
             arguments: serde_json::json!({ "command": "mkdir build" }),
         }
@@ -627,5 +644,37 @@ mod tests {
         let mut without_command = request();
         without_command.command = "  ".into();
         assert_eq!(without_command.summary(), "run_terminal");
+    }
+
+    /// A write's prompt names the file it will change and how much of it. "Allow
+    /// write_file" is not a question a reader can answer.
+    #[test]
+    fn a_prompt_names_what_a_write_does() {
+        let mut write = request();
+        write.tool_name = "write_file".into();
+        write.label = "Write file".into();
+        write.command = String::new();
+        write.detail = "src/App.tsx · write 12 lines".into();
+        assert_eq!(write.summary(), "write_file: src/App.tsx · write 12 lines");
+    }
+
+    /// A terminal prompt's subject is the command, even if a detail was supplied:
+    /// the command is the part a reader must be able to see verbatim.
+    #[test]
+    fn a_command_is_preferred_over_a_detail() {
+        let mut terminal = request();
+        terminal.detail = "the workspace".into();
+        assert_eq!(terminal.summary(), "run_terminal: mkdir build");
+    }
+
+    /// A stop that arrives while the prompt is open ends the run rather than
+    /// returning a denial the model would read as an answer.
+    #[test]
+    fn a_cancelled_prompt_ends_the_run() {
+        let gate = ApprovalGate::new(PermissionMode::Ask);
+        let stop = cancelled();
+        stop.store(true, Ordering::SeqCst);
+        let outcome = runtime().block_on(gate.settle("r1", request(), &stop, |_, _| {}));
+        assert!(outcome.is_err(), "a stop is an error, not a decision");
     }
 }

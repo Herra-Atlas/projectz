@@ -9,12 +9,29 @@
 //!   a failing test and a compiler diagnostic all appear at the end, so a
 //!   head-only cap spends the entire budget on the part that was already fine.
 
+use serde_json::Value;
+
 /// Largest tool result passed to the model, in characters.
 ///
 /// Roughly 7k tokens. Large enough for a real source file or a useful error
 /// dump, small enough that several tools in one round do not crowd out the
 /// conversation.
 pub const MAX_TOOL_OUTPUT: usize = 28_000;
+
+/// Whether this call asked for a result the shared cap must not cut.
+///
+/// One exception exists, and it is defined in one place because two callers have
+/// to agree about it: the registry decides whether to truncate, and the
+/// transcript decides what to keep for the next turn. A second copy of this rule
+/// is precisely how the model would be handed a whole file while its own record
+/// of having read it held only the first window.
+///
+/// The tool bounds itself (`file::FULL_READ_CHAR_BUDGET`), so lifting the cap here
+/// does not lift the bound -- it only stops this layer cutting the middle out of a
+/// result that was deliberately asked for whole.
+pub fn is_uncapped(tool: &str, arguments: &Value) -> bool {
+    tool == super::file::READ_FILE.name && super::file::is_full(arguments)
+}
 
 /// Fraction of the budget kept from the end when truncating.
 const TAIL_RATIO: f64 = 0.4;

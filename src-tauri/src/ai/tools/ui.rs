@@ -64,6 +64,13 @@ pub struct ToolSummary {
     /// Stored only when it differs from the panel's copy, so a short result is not
     /// written twice into the transcript.
     pub context: Option<String>,
+    /// The run a `sub_agent` call started, when it started one.
+    ///
+    /// The row is what the report is drawn on, and a report arrives minutes after
+    /// the call returned. Without an exact key the frontend has to guess which row
+    /// a report belongs to, which is wrong as soon as two agents run in parallel.
+    /// Set from the tool's own sink rather than parsed out of the acknowledgement.
+    pub subagent: Option<String>,
 }
 
 impl ToolSummary {
@@ -104,6 +111,15 @@ impl ToolSummary {
         if let (Some(context), Some(object)) = (&self.context, fields.as_object_mut()) {
             object.insert("context".into(), serde_json::Value::String(context.clone()));
         }
+        // The id the call's own run will report under. Absent on every tool that
+        // did not start a run, so the frontend reads it as "this row is a
+        // delegation" without a second field to check.
+        if let (Some(agent_id), Some(object)) = (&self.subagent, fields.as_object_mut()) {
+            object.insert(
+                "agent_id".into(),
+                serde_json::Value::String(agent_id.clone()),
+            );
+        }
         fields
     }
 
@@ -114,6 +130,14 @@ impl ToolSummary {
     /// the tool has returned, by which point the summary already exists.
     pub fn attach_diff(&mut self, diff: super::diff::Diff) {
         self.diff = Some(diff);
+    }
+
+    /// Records the run a `sub_agent` call started.
+    ///
+    /// A setter for the same reason as [`Self::attach_diff`]: the id is reported
+    /// through the sink while the call runs, and the summary is built after it.
+    pub fn attach_subagent_id(&mut self, agent_id: String) {
+        self.subagent = Some(agent_id);
     }
 }
 
@@ -141,7 +165,10 @@ pub fn summarize(tool: &str, arguments: &Value, result: &str, succeeded: bool) -
         // through from `write.rs` so the one place that recognises a created file
         // is this one, next to the wording it recognises.
         created: tool == "write_file" && succeeded && created_wording(result),
-        context: model_context(result, !succeeded),
+        context: model_context(tool, arguments, result, !succeeded),
+        // Filled from the sink by the loop, which is the only place that sees the
+        // tool's structured report. `summarize` sees the call's text alone.
+        subagent: None,
     }
 }
 
@@ -152,12 +179,20 @@ pub fn summarize(tool: &str, arguments: &Value, result: &str, succeeded: bool) -
 /// its outcome), and anything longer than [`MAX_PANEL_OUTPUT`]. The model saw the
 /// text in each of them, so the record must hold it, or the next turn is a
 /// conversation that read a file and cannot say what was in it.
-fn model_context(result: &str, failed: bool) -> Option<String> {
+fn model_context(tool: &str, arguments: &Value, result: &str, failed: bool) -> Option<String> {
     let trimmed = result.trim();
     if trimmed.is_empty() {
         return None;
     }
-    let whole = super::output::truncate_within(trimmed, super::output::MAX_TOOL_OUTPUT);
+    // A call that opted out of the shared cap was asked for whole, so the record
+    // keeps it whole too. Re-capping it here would not save a token on the turn
+    // that read it -- the model already received all of it -- and it would mean
+    // the turn after that knew less about the file than the turn which read it.
+    let whole = if super::output::is_uncapped(tool, arguments) {
+        trimmed.to_string()
+    } else {
+        super::output::truncate_within(trimmed, super::output::MAX_TOOL_OUTPUT)
+    };
     match panel_snippet(result, failed) {
         // The panel's copy is already the whole text, so one copy is enough.
         Some(snippet) if snippet == whole => None,
@@ -273,6 +308,27 @@ fn detail_for(tool: &str, arguments: &Value) -> String {
     if tool == "schedule_job" {
         return string_at(arguments, "name").unwrap_or_default();
     }
+    // An MCP tool is named by the server and the tool inside it. Its schema is
+    // the server's, so the fields below are a guess; the two names are the one
+    // thing this app knows for certain about the call.
+    if let Some(rest) = tool.strip_prefix("mcp__") {
+        return rest.replace("__", " · ");
+    }
+    // A skill tool is identified by the skill and the file inside it. Neither
+    // alone is enough to judge: the skill names the folder, and the file names
+    // what a run or a write will touch.
+    if matches!(tool, "skill_read" | "skill_write" | "skill_run" | "skill_manage") {
+        let skill = string_at(arguments, "skill")
+            .or_else(|| string_at(arguments, "existing_name"))
+            .or_else(|| string_at(arguments, "name"));
+        let file = string_at(arguments, "path").or_else(|| string_at(arguments, "script"));
+        return match (skill, file) {
+            (Some(skill), Some(file)) => format!("{skill} · {file}"),
+            (Some(skill), None) => skill,
+            (None, Some(file)) => file,
+            (None, None) => String::new(),
+        };
+    }
     let fields: &[&str] = if matches!(tool, "search_web" | "web_fetch" | "run_terminal") {
         &["query", "url", "command", "path", "pattern"]
     } else {
@@ -284,13 +340,136 @@ fn detail_for(tool: &str, arguments: &Value) -> String {
         .unwrap_or_default()
 }
 
+/// What a permission prompt must say about a call, beside its label.
+///
+/// The prompt used to name only the tool -- "Allow write_file" -- which tells a
+/// reader nothing they can judge: not which file, not how much of it, not that a
+/// delete takes a folder with it. This is the call's subject (the same detail its
+/// transcript row would show) followed by the one fact that makes the decision
+/// meaningful.
+///
+/// Built from the arguments alone, because that is all the gate holds: the file
+/// has not been read or written yet, so the line count is what the call writes,
+/// never the file's own size.
+pub fn approval_detail(tool: &str, arguments: &Value) -> String {
+    let detail = detail_for(tool, arguments);
+    let fact = match tool {
+        "write_file" => {
+            let lines = arguments
+                .get("content")
+                .and_then(Value::as_str)
+                .map(|content| content.lines().count())
+                .unwrap_or(0);
+            let append = arguments
+                .get("append")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            match (append, lines) {
+                (true, 0) => "append".to_string(),
+                (true, count) => format!("append {}", plural(count, "line")),
+                (false, 0) => "replace contents".to_string(),
+                (false, count) => format!("write {}", plural(count, "line")),
+            }
+        }
+        // The number of change blocks, which is what `edits` carries. The result
+        // states how many occurrences actually matched, but that is not known
+        // before the call runs.
+        "edit_file" => {
+            let changes = arguments
+                .get("edits")
+                .and_then(Value::as_array)
+                .map_or(1, Vec::len);
+            if arguments
+                .get("replace_all")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                format!("{} · every occurrence", plural(changes, "change"))
+            } else {
+                plural(changes, "change")
+            }
+        }
+        "edit_lines" => {
+            let start = arguments.get("start_line").and_then(Value::as_u64);
+            let end = arguments.get("end_line").and_then(Value::as_u64);
+            let lines = arguments
+                .get("new_text")
+                .and_then(Value::as_str)
+                .map(|text| text.lines().count())
+                .unwrap_or(0);
+            match start {
+                Some(start) => {
+                    let range = match end {
+                        Some(end) if end != start => format!("lines {start}–{end}"),
+                        _ => format!("line {start}"),
+                    };
+                    match lines {
+                        0 => format!("delete {range}"),
+                        count => format!("replace {range} with {}", plural(count, "line")),
+                    }
+                }
+                None => String::new(),
+            }
+        }
+        // A folder delete is the one that cannot be undone by looking at the path:
+        // it takes everything inside it, and the prompt has to say so.
+        "delete_file" => {
+            if arguments
+                .get("recursive")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                "folder and everything in it".to_string()
+            } else {
+                "file".to_string()
+            }
+        }
+        "write_document" => {
+            let format = string_at(arguments, "format").unwrap_or_else(|| "document".to_string());
+            let lines = arguments
+                .get("content")
+                .and_then(Value::as_str)
+                .map(|content| content.lines().count())
+                .unwrap_or(0);
+            if lines == 0 {
+                format
+            } else {
+                format!("{format} · {}", plural(lines, "line"))
+            }
+        }
+        // A delegated run is judged by what kind it is: an `explore`/`plan` agent
+        // is read-only, and the prompt should not look like a write when it is not.
+        "sub_agent" => format!(
+            "{} agent",
+            arguments
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("general")
+        ),
+        // A shell is judged by its command alone. `detail_for` already carries
+        // it, and the prompt shows that command verbatim, so there is no second
+        // fact worth adding here.
+        _ => String::new(),
+    };
+    match (detail.is_empty(), fact.is_empty()) {
+        (false, false) => format!("{detail} · {fact}"),
+        (false, true) => detail,
+        (true, false) => fact,
+        (true, true) => String::new(),
+    }
+}
+
 /// The singular verb phrase for a tool.
+///
+/// Public because a permission prompt names a call the same way its transcript
+/// row does: two wordings for one call would make the dialog and the row it is
+/// about disagree.
 ///
 /// Matched by name rather than carried on [`super::ToolSpec`] because
 /// `ToolSpec` feeds the cached `tools` array: adding a field to it would change
 /// the bytes a provider caches on, which is exactly what the sorted-tools
 /// invariant in `registry.rs` exists to protect.
-fn label_for(tool: &str) -> &'static str {
+pub fn label_for(tool: &str) -> &'static str {
     match tool {
         "read_file" => "Read file",
         "list_dir" => "List folder",
@@ -668,6 +847,110 @@ mod tests {
         assert!(summary.outcome.unwrap_err().contains("Could not start"));
     }
 
+    /// A write's prompt names the file and how much is being written, which is
+    /// the difference between a prompt a reader can answer and one they cannot.
+    #[test]
+    fn a_write_prompt_names_its_path_and_size() {
+        assert_eq!(
+            approval_detail(
+                "write_file",
+                &json!({ "path": "src/App.tsx", "content": "a\nb\nc\n" })
+            ),
+            "src/App.tsx · write 3 lines"
+        );
+        assert_eq!(
+            approval_detail(
+                "write_file",
+                &json!({ "path": "a.md", "content": "x", "append": true })
+            ),
+            "a.md · append 1 line"
+        );
+    }
+
+    /// An edit prompt states the changes it carries, and a line edit states the
+    /// range it replaces -- a file name alone does not say what is at stake.
+    #[test]
+    fn an_edit_prompt_names_its_change_or_its_range() {
+        assert_eq!(
+            approval_detail(
+                "edit_file",
+                &json!({ "path": "a.rs", "old_text": "x", "new_text": "y" })
+            ),
+            "a.rs · 1 change"
+        );
+        assert_eq!(
+            approval_detail(
+                "edit_file",
+                &json!({ "path": "a.rs", "edits": [
+                    { "old_text": "x", "new_text": "y" },
+                    { "old_text": "p", "new_text": "q" }
+                ] })
+            ),
+            "a.rs · 2 changes"
+        );
+        assert_eq!(
+            approval_detail(
+                "edit_lines",
+                &json!({ "path": "a.ts", "start_line": 2, "end_line": 3, "new_text": "A\nB" })
+            ),
+            "a.ts · replace lines 2–3 with 2 lines"
+        );
+        assert_eq!(
+            approval_detail(
+                "edit_lines",
+                &json!({ "path": "a.ts", "start_line": 9, "new_text": "" })
+            ),
+            "a.ts · delete line 9"
+        );
+    }
+
+    /// A recursive delete takes everything inside the folder, and the prompt is
+    /// the only place that says so before it happens.
+    #[test]
+    fn a_folder_delete_says_it_takes_the_folder() {
+        assert_eq!(
+            approval_detail("delete_file", &json!({ "path": "build", "recursive": true })),
+            "build · folder and everything in it"
+        );
+        assert_eq!(
+            approval_detail("delete_file", &json!({ "path": "notes.txt" })),
+            "notes.txt · file"
+        );
+    }
+
+    /// A skill tool is named by its skill and the file inside it -- neither alone
+    /// tells a reader what will run or change.
+    #[test]
+    fn a_skill_prompt_names_the_skill_and_the_file() {
+        assert_eq!(
+            approval_detail(
+                "skill_run",
+                &json!({ "skill": "code-changes", "script": "scripts/build.ps1" })
+            ),
+            "code-changes · scripts/build.ps1"
+        );
+    }
+
+    /// A shell's prompt is its command, verbatim, with no second copy beside it.
+    #[test]
+    fn a_terminal_prompt_is_its_command() {
+        assert_eq!(
+            approval_detail("run_terminal", &json!({ "command": "cargo test" })),
+            "cargo test"
+        );
+    }
+
+    /// An MCP tool's schema belongs to the server, so its arguments are not known
+    /// here. The server and tool names are, and they are what a prompt can state
+    /// without guessing.
+    #[test]
+    fn an_mcp_prompt_names_the_server_and_the_tool() {
+        assert_eq!(
+            approval_detail("mcp__playwright__browser_click", &json!({})),
+            "playwright · browser_click"
+        );
+    }
+
     #[test]
     fn a_search_names_its_pattern_and_where_it_looked() {
         let root = summarize("grep", &json!({ "pattern": "needle" }), "", true);
@@ -852,6 +1135,19 @@ mod tests {
         assert!(bad_fields["outcome"].as_str().unwrap().contains("no such"));
     }
 
+    /// The id a `sub_agent` call started rides its own result, so the frontend can
+    /// match the run's later report to this row rather than to "the last agent row
+    /// still open". Two parallel agents make that guess wrong immediately.
+    #[test]
+    fn a_subagent_id_rides_the_call_that_started_the_run() {
+        let mut summary = summarize("sub_agent", &json!({ "instructions": "x" }), "ack", true);
+        summary.attach_subagent_id("agent-1".into());
+        assert_eq!(summary.event_fields()["agent_id"], "agent-1");
+
+        let read = summarize("read_file", &json!({ "path": "a" }), "1\ta\n", true);
+        assert!(read.event_fields().get("agent_id").is_none());
+    }
+
     /// A write's diff travels on the event, tagged per line, which is the shape
     /// the panel colours by.
     #[test]
@@ -992,6 +1288,27 @@ mod tests {
         let context = summary.context.expect("recorded");
         assert!(context.contains(&"z".repeat(50)), "the tail is kept");
         assert!(context.len() > MAX_PANEL_OUTPUT);
+    }
+
+    /// A full read is recorded whole, not capped a second time for the record.
+    ///
+    /// The model already received the whole file, so a capped record would mean
+    /// the next turn knew less about it than the turn that read it -- and the
+    /// record is the only thing the next turn sees.
+    #[test]
+    fn a_full_read_is_recorded_whole_for_the_model() {
+        let long = format!(
+            "{}\n{}",
+            "a".repeat(super::super::output::MAX_TOOL_OUTPUT),
+            "z".repeat(50)
+        );
+        let summary = summarize(
+            "read_file",
+            &json!({ "path": "big.rs", "full": true }),
+            &long,
+            true,
+        );
+        assert_eq!(summary.context.as_deref(), Some(long.trim()));
     }
 
     /// Where the panel's copy already is the whole result, it is not stored twice.

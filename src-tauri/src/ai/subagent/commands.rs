@@ -126,6 +126,10 @@ fn spec_for(
             "renamedByUser": record.get("renamedByUser").cloned().unwrap_or_else(|| json!(false)),
             "dotColor": record.get("dotColor").cloned().unwrap_or(Value::Null),
             "permission": serde_json::to_value(permission).unwrap_or(Value::Null),
+            // Carried so a failed run is not silently marked healthy by the next
+            // turn: the icon the user saw is a fact about the run, not about the
+            // message that followed it.
+            "failed": record.get("failed").cloned().unwrap_or_else(|| json!(false)),
         })),
         mode: ToolMode::Agent,
         permission,

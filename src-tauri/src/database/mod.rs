@@ -556,6 +556,10 @@ impl Database {
                     "permission",
                     "kind",
                     "parentSessionId",
+                    // A sub-agent's outcome. Copied through on a follow-up so a run
+                    // that failed is still drawn as failed until it is saved again
+                    // with a new result.
+                    "failed",
                 ] {
                     if let Some(value) = metadata.get(key) {
                         object.insert(key.to_string(), value.clone());
@@ -606,7 +610,7 @@ impl Database {
         // short strings. A missing `kind` is a chat, which is what every
         // conversation written before this reads as.
         let metadata = json(
-            &serde_json::json!({"pinned": session["pinned"].as_bool().unwrap_or(false), "renamed": session["renamed"].as_bool().unwrap_or(false), "renamedByUser": session["renamedByUser"].as_bool().unwrap_or(false), "dotColor": dot_color, "mode": session["mode"].as_str().unwrap_or("chat"), "permission": session["permission"].as_str(), "kind": session["kind"].as_str().unwrap_or("chat"), "parentSessionId": session["parentSessionId"].as_str()}),
+            &serde_json::json!({"pinned": session["pinned"].as_bool().unwrap_or(false), "renamed": session["renamed"].as_bool().unwrap_or(false), "renamedByUser": session["renamedByUser"].as_bool().unwrap_or(false), "dotColor": dot_color, "mode": session["mode"].as_str().unwrap_or("chat"), "permission": session["permission"].as_str(), "kind": session["kind"].as_str().unwrap_or("chat"), "parentSessionId": session["parentSessionId"].as_str(), "failed": session["failed"].as_bool().unwrap_or(false)}),
         )?;
 
         // Token counts and timing are rolled up from the messages in the same

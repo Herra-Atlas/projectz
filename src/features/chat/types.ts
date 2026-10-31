@@ -107,6 +107,15 @@ export type ToolStep = {
    * reopened conversation still states them.
    */
   stats?: ToolStepStats;
+  /**
+   * The sub-agent run this call started, present only on a `sub_agent` row.
+   *
+   * The run reports back minutes after the call returned, and several agents can
+   * be in flight at once. The id is what puts that report on the row that asked
+   * for it; without it the report has to be matched by position, which is wrong
+   * the moment two agents finish out of order.
+   */
+  agentId?: string;
 };
 
 /**
@@ -381,6 +390,15 @@ export type ChatSessionHeader = {
    * and continue from the app.
    */
   kind?: "chat" | "subagent" | "job" | "telegram";
+  /**
+   * Whether a sub-agent run ended as a failure.
+   *
+   * On the header rather than derived from the transcript, because the panel's
+   * list is drawn from headers alone: opening every run to find out whether it
+   * failed would cost a read per row. Absent on a chat, and on any run whose row
+   * predates this, which reads as "did not fail".
+   */
+  failed?: boolean;
   /**
    * The conversation that spawned this run, present only when `kind` is
    * `subagent`. The panel groups runs under the chat they came from.

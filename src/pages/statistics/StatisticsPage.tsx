@@ -87,7 +87,7 @@ export default function StatisticsPage({
         <TimeframeSwitcher value={range} onChange={setRange} />
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto p-5 sm:p-7">
+      <div className="min-h-0 flex-1 overflow-y-auto p-5 sm:p-7" data-find-scope="" data-find-label="statistics">
         {error && <p role="alert" className="mb-5 text-sm text-[var(--danger)]">{error}</p>}
 
         <FigureRow report={report} axis={current.axis} />

@@ -103,7 +103,7 @@ export default function JobEditor({
   };
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto p-5 sm:p-7">
+    <div className="min-h-0 flex-1 overflow-y-auto p-5 sm:p-7" data-find-scope="" data-find-label="job">
       <div className="mx-auto max-w-[760px] space-y-6">
         <header className="flex items-center justify-between gap-3 border-b border-[var(--line)] pb-4">
           <h2 className="text-[15px] font-semibold">{job ? "Edit job" : "New job"}</h2>

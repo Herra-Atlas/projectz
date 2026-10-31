@@ -35,7 +35,9 @@ pub const READ_FILE: ToolSpec = ToolSpec {
                   one line per numbered row. A long file is returned in windows: the result \
                   states the range it covers and the `offset` that reaches the next part, so \
                   use offset and limit to page through a large file rather than asking for all \
-                  of it. Reading is preferred over guessing a file's contents.",
+                  of it. When a question is about the whole file -- a refactor, a review, a full \
+                  audit -- pass `full: true` instead and the file arrives in one result. Reading \
+                  is preferred over guessing a file's contents.",
     parameters: r#"{
         "type": "object",
         "properties": {
@@ -50,6 +52,10 @@ pub const READ_FILE: ToolSpec = ToolSpec {
             "limit": {
                 "type": "integer",
                 "description": "Number of lines to return. Defaults to 2000. A window that would be too large to send stops early and says where to continue, so a big limit is safe to ask for."
+            },
+            "full": {
+                "type": "boolean",
+                "description": "Return the whole file instead of a window, for when the question needs all of it. Costs far more context than a window, so use it deliberately. Cannot be combined with offset or limit; a file above the size ceiling is refused rather than cut."
             }
         },
         "required": ["path"],
@@ -89,19 +95,71 @@ async fn read(arguments: Value, root: PathBuf, context: ToolContext) -> Result<S
         return describe_image(&resolved, media_type, &context).await;
     }
     if let Some(document) = crate::documents::extract(&resolved) {
+        refuse_conflicting_window(&arguments)?;
         let text = document?;
         // The offset and limit apply to the extracted text, so a long document is
         // paged the same way a long source file is -- through the same window
-        // function, so both say where to continue in the same words.
-        let offset = positive_usize(arguments.get("offset"), "offset")?.unwrap_or(1);
-        let limit =
-            Some(positive_usize(arguments.get("limit"), "limit")?.unwrap_or(DEFAULT_READ_LINES));
-        return Ok(format!(
-            "[Text extracted from {path}]\n\n{}",
+        // function, so both say where to continue in the same words. `full` reads
+        // the extracted text whole, so the ceiling is measured against the prose
+        // the model receives rather than the bytes the document sits in.
+        let rendered = if is_full(&arguments) {
+            whole_file(&text, &path)?
+        } else {
+            let offset = positive_usize(arguments.get("offset"), "offset")?.unwrap_or(1);
+            let limit = Some(
+                positive_usize(arguments.get("limit"), "limit")?.unwrap_or(DEFAULT_READ_LINES),
+            );
             read_slice(&text, offset, limit)
-        ));
+        };
+        return Ok(format!("[Text extracted from {path}]\n\n{rendered}"));
     }
     run(arguments, root)
+}
+
+/// Whether this call asked for the whole file.
+///
+/// The normal read is bounded twice -- by [`READ_CHAR_BUDGET`] here and by the
+/// shared tool-output cap one level up -- so a large file is delivered in
+/// windows. That is the right default: it is cheaper, and it always leaves the
+/// caller a way to reach the rest. It is not the only request worth answering.
+/// "Refactor this module", "review this file" and "what does this file do" are
+/// questions about all of it, and paging through four windows to answer one of
+/// them spends four calls and a round trip each.
+///
+/// So `full` is the deliberate opt-in, and both caps are lifted for exactly this
+/// call. It is a request rather than a guarantee: [`FULL_READ_CHAR_BUDGET`] still
+/// refuses a file no single result can carry, because a result that size that
+/// arrives cut in half is worse than a refusal -- the model would be reasoning
+/// over a file with a hole it cannot see.
+pub fn is_full(arguments: &Value) -> bool {
+    arguments
+        .get("full")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Refuses `full` beside `offset` or `limit`.
+///
+/// The two are different requests, and resolving them -- one silently winning --
+/// is how a caller ends up holding half a file believing it asked for all of it.
+/// `write_document` refuses `content` beside `source` for the same reason.
+fn refuse_conflicting_window(arguments: &Value) -> Result<(), String> {
+    if !is_full(arguments) {
+        return Ok(());
+    }
+    let named = ["offset", "limit"].into_iter().find(|field| {
+        // A `null` is how a model that names every field says "not this one", so
+        // it is absent rather than a conflict -- the same reading every other
+        // argument here takes.
+        arguments.get(*field).is_some_and(|value| !value.is_null())
+    });
+    match named {
+        Some(field) => Err(format!(
+            "`full` reads the whole file, so `{field}` cannot be sent with it. Send `full` on its \
+             own, or use `offset` and `limit` to page through the file."
+        )),
+        None => Ok(()),
+    }
 }
 
 /// The question a read of an image asks the vision model.
@@ -180,6 +238,8 @@ fn run(arguments: Value, root: PathBuf) -> Result<String, String> {
         .get("path")
         .and_then(Value::as_str)
         .ok_or("read_file requires a string `path`")?;
+    refuse_conflicting_window(&arguments)?;
+    let full = is_full(&arguments);
     let offset = positive_usize(arguments.get("offset"), "offset")?.unwrap_or(1);
     // A limit the caller did not ask for is not "no limit". Reading a whole
     // 5,000-line file spends the entire context window on material the model
@@ -187,7 +247,8 @@ fn run(arguments: Value, root: PathBuf) -> Result<String, String> {
     // out of it -- so the model would receive the head and the tail with a hole
     // between them and no way to ask for what was missing. A bounded default
     // that reports what it withheld is both cheaper and more honest: the model
-    // can page to the region it actually wants.
+    // can page to the region it actually wants. `full` is the one deliberate way
+    // to say the whole file is the thing being asked about.
     let limit =
         Some(positive_usize(arguments.get("limit"), "limit")?.unwrap_or(DEFAULT_READ_LINES));
 
@@ -208,6 +269,19 @@ fn run(arguments: Value, root: PathBuf) -> Result<String, String> {
             MAX_TEXT_BYTES / (1024 * 1024)
         ));
     }
+    // A whole read has its own, far tighter ceiling, and it is checked in bytes
+    // *before* the file is loaded: the character check below is exact, but it
+    // costs a read of whatever it is judging, and a file this far over the budget
+    // cannot fit it whatever it contains. Four bytes per character is the widest
+    // UTF-8 can be, so passing this gate is necessary rather than sufficient.
+    if full && meta.len() > FULL_READ_BYTE_CEILING {
+        return Err(format!(
+            "{} is {:.1} MB, larger than a single whole read can carry. Read it in windows with \
+             `offset` and `limit`, or use grep to find the lines you need.",
+            resolved.display(),
+            meta.len() as f64 / (1024.0 * 1024.0)
+        ));
+    }
     let body = std::fs::read_to_string(&resolved).map_err(|error| {
         // Named for what it is, because the raw OS error reads as a bug in the
         // app: a UTF-16 or binary file is not text, and no amount of re-reading
@@ -223,6 +297,9 @@ fn run(arguments: Value, root: PathBuf) -> Result<String, String> {
         }
     })?;
 
+    if full {
+        return whole_file(&body, path);
+    }
     Ok(read_slice(&body, offset, limit))
 }
 
@@ -241,6 +318,49 @@ const DEFAULT_READ_LINES: usize = 2_000;
 /// a person reads. Above it the whole-file index is the problem rather than the
 /// window: refusing names the two tools that can work inside it instead.
 const MAX_TEXT_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Largest whole-file result a `full` read will return, in characters.
+///
+/// Roughly 75k tokens of numbered text. The window is the normal answer to a
+/// large file, so this exists for the case where the whole of it is the question
+/// -- and it has to be several times the window to be worth having. It is still
+/// a ceiling rather than an absence of one: a result larger than this that
+/// arrived cut would leave the model reading a file with a hole it cannot page
+/// out of, so a file over the line is refused by name with its size and the way
+/// to reach the rest.
+///
+/// Measured on what is *sent* -- the content plus its line numbering -- because
+/// the numbering is part of the request. A 165k-character file fits with room to
+/// spare, which is the size the feature exists for; a pathological file of
+/// twenty thousand one-character lines does not, and is refused rather than
+/// expanded to a size nobody asked for.
+const FULL_READ_CHAR_BUDGET: usize = 300_000;
+
+/// The same ceiling in bytes, for the check that runs before the file is loaded.
+///
+/// Four bytes is the widest one UTF-8 character can be, so a file over this many
+/// bytes is over the character budget whatever it contains -- which makes the
+/// refusal cheap, and leaves the exact count to the check after the read.
+const FULL_READ_BYTE_CEILING: u64 = (FULL_READ_CHAR_BUDGET as u64) * 4;
+
+/// Renders the whole file, or refuses it by name.
+///
+/// The last thing between a `full` request and the request body: numbered, with
+/// no window trailer, because there is nothing withheld to point at. The size
+/// includes the line numbering, because the numbering is part of what is sent --
+/// a file of exactly the budget would otherwise arrive just over it.
+fn whole_file(body: &str, label: &str) -> Result<String, String> {
+    let lines = body.lines().count();
+    let size = body.chars().count();
+    if size + lines * LINE_OVERHEAD > FULL_READ_CHAR_BUDGET {
+        return Err(format!(
+            "{label} is {size} characters over {lines} lines, past the {FULL_READ_CHAR_BUDGET} \
+             character ceiling for a single whole read. Read it in windows with `offset` and \
+             `limit` instead: the first window names the offset that continues it."
+        ));
+    }
+    Ok(numbered_slice(body, 1, None))
+}
 
 /// List a directory's entries.
 pub const LIST_DIR: ToolSpec = ToolSpec {
@@ -346,7 +466,11 @@ fn list_dir(arguments: Value, root: PathBuf) -> Result<String, String> {
 /// and silently returning the whole file instead would be worse than an error.
 fn positive_usize(value: Option<&Value>, field: &str) -> Result<Option<usize>, String> {
     match value {
-        None => Ok(None),
+        // An explicit `null` is how a model that names every field says "not this
+        // one", and the rest of the app already reads it that way -- the tool
+        // cache keys it as an absent argument. Refusing it only here made the same
+        // written call a cache hit when repeated and an error when first made.
+        None | Some(Value::Null) => Ok(None),
         Some(Value::Number(number)) => {
             let parsed = number
                 .as_u64()
@@ -586,7 +710,7 @@ pub fn numbered_slice(body: &str, offset: usize, limit: Option<usize>) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     /// A unique temporary directory for one test.
     ///
@@ -789,6 +913,110 @@ mod tests {
             !out.contains("omitted from the middle"),
             "the shared cap cut the middle out: {out}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `full` returns the file the window would have withheld.
+    ///
+    /// The window exists for a reason, and this is the deliberate way past it:
+    /// a question about the whole file gets the whole file in one result, with no
+    /// trailer pointing at a part that is not there. The size is chosen well over
+    /// the shared cap so the assertion proves the result is too large to have
+    /// arrived through the ordinary path at all.
+    #[test]
+    fn full_returns_the_whole_file_past_the_read_budget() {
+        let root = temp_root();
+        let total = 2_000;
+        let body = (1..=total)
+            .map(|n| format!("line{n} padding padding padding padding padding"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(root.join("big.txt"), &body).expect("write");
+
+        let out = run(json!({ "path": "big.txt", "full": true }), root.clone()).expect("read");
+        assert!(out.starts_with("1\tline1 "), "{out}");
+        assert!(out.contains(&format!("{total}\tline{total} ")), "{out}");
+        assert!(
+            !out.contains("showing lines"),
+            "a whole read must not present itself as a window: {out}"
+        );
+        assert!(!out.contains("Read more with offset="), "{out}");
+        assert!(
+            out.chars().count() > super::super::output::MAX_TOOL_OUTPUT,
+            "the fixture must be larger than the shared cap for this test to mean anything"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The size this feature exists for comes back whole.
+    ///
+    /// The ceiling is measured on the numbered result, so a file with many lines
+    /// pays for its numbering too. This pins that a 165k-character file -- the
+    /// case `full` was added for -- is comfortably inside it, rather than refused
+    /// by an overhead rule nobody asked for.
+    #[test]
+    fn a_file_of_the_size_the_feature_exists_for_comes_back_whole() {
+        let root = temp_root();
+        let line = "the quick brown fox jumps over the lazy dog, twice over.";
+        let lines = 165_000 / (line.len() + 1);
+        let body = vec![line; lines].join("\n");
+        std::fs::write(root.join("big.txt"), &body).expect("write");
+
+        let out = run(json!({ "path": "big.txt", "full": true }), root.clone()).expect("read");
+        assert!(
+            out.contains(&format!("{lines}\t{line}")),
+            "the last line should be present"
+        );
+        assert!(!out.contains("Read more with offset="), "not a window");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `full` is a whole-file request, so a window argument is refused rather
+    /// than silently overridden.
+    ///
+    /// Resolving one in favour of the other is how a caller ends up holding half a
+    /// file believing it asked for all of it -- the same rule `write_document`
+    /// applies to `content` beside `source`.
+    #[test]
+    fn full_cannot_be_combined_with_offset_or_limit() {
+        let root = temp_root();
+        std::fs::write(root.join("a.txt"), "1\n2\n3\n").expect("write");
+
+        for window in [json!({ "offset": 2 }), json!({ "limit": 1 })] {
+            let mut arguments = window;
+            arguments["path"] = json!("a.txt");
+            arguments["full"] = json!(true);
+            let error = run(arguments, root.clone()).expect_err("a conflict should be refused");
+            assert!(error.contains("`full`"), "{error}");
+            assert!(error.contains("cannot be sent with it"), "{error}");
+        }
+        // A null is how a model that names every field says "not this one", so it
+        // is not a conflict.
+        let out = run(
+            json!({ "path": "a.txt", "full": true, "limit": Value::Null }),
+            root.clone(),
+        )
+        .expect("a null limit is absent, not a conflict");
+        assert!(out.contains("3\t3"), "{out}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A file larger than one result can carry is refused by name, not cut.
+    ///
+    /// The alternative -- return as much as fits -- is the hole this whole module
+    /// exists to avoid: the model would read a file that appears complete and is
+    /// not. The refusal states the size and the door that still works.
+    #[test]
+    fn full_refuses_a_file_past_its_ceiling_instead_of_cutting_it() {
+        let root = temp_root();
+        let body = "x".repeat(FULL_READ_CHAR_BUDGET + 100);
+        std::fs::write(root.join("huge.txt"), &body).expect("write");
+
+        let error = run(json!({ "path": "huge.txt", "full": true }), root.clone())
+            .expect_err("a file past the ceiling cannot be returned whole");
+        assert!(error.contains("ceiling"), "{error}");
+        assert!(error.contains("offset"), "{error}");
+        assert!(error.contains("limit"), "{error}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

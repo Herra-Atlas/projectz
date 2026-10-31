@@ -21,6 +21,14 @@ export interface ChatRepository {
    * a real state, and it is different from not having asked yet.
    */
   listMessages(id: string): Promise<ChatMessage[]>;
+  /**
+   * One session with its transcript, read without going through the sidebar list.
+   *
+   * The list is conversations, and a sub-agent run is deliberately not in it --
+   * but the Overview view can still be asked for one, and it needs the same
+   * header-plus-messages shape a conversation has. Rejects when the id is gone.
+   */
+  readSession(id: string): Promise<ChatSession>;
   save(session: ChatSession): Promise<void>;
   /**
    * Saves everything except the transcript.
@@ -55,6 +63,10 @@ class SqliteChatRepository implements ChatRepository {
     // `sessionId` in camelCase because that is what Tauri matches the Rust
     // `session_id` argument against on the way in.
     return invoke<ChatMessage[]>("database_list_session_messages", { sessionId: id });
+  }
+
+  readSession(id: string): Promise<ChatSession> {
+    return invoke<ChatSession>("database_read_session", { id });
   }
 
   save(session: ChatSession): Promise<void> {

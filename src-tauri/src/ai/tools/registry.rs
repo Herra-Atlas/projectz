@@ -124,6 +124,13 @@ pub struct ToolContext {
 pub struct Sink {
     searches: std::sync::Arc<std::sync::Mutex<Vec<crate::websearch::WebSearchOutput>>>,
     diffs: std::sync::Arc<std::sync::Mutex<Vec<super::diff::Diff>>>,
+    /// The id each `sub_agent` call started, in the order the calls were made.
+    ///
+    /// The row needs it to match the run's later report to the call that asked
+    /// for it. Several agents can be spawned in one round and their reports
+    /// arrive in whatever order they finish, so a report matched to "the last row
+    /// without output" lands on the wrong agent. The id is the only exact key.
+    subagents: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl ToolContext {
@@ -151,6 +158,17 @@ impl ToolContext {
             diffs.push(diff);
         }
     }
+
+    /// Queues the id of a sub-agent this call started.
+    ///
+    /// The acknowledgement the model reads already names the id, but that is
+    /// prose; the row needs a value it can compare against the report's
+    /// `agent_id` without parsing.
+    pub fn report_subagent(&self, agent_id: String) {
+        if let Ok(mut subagents) = self.sink.subagents.lock() {
+            subagents.push(agent_id);
+        }
+    }
 }
 
 impl Sink {
@@ -170,6 +188,17 @@ impl Sink {
         self.diffs
             .lock()
             .map(|mut diffs| std::mem::take(&mut *diffs))
+            .unwrap_or_default()
+    }
+
+    /// Takes the sub-agent ids reported since the last drain.
+    ///
+    /// Drained per call for the same reason the diffs are: this is the only
+    /// place that knows which `sub_agent` call started which run.
+    pub fn drain_subagents(&self) -> Vec<String> {
+        self.subagents
+            .lock()
+            .map(|mut ids| std::mem::take(&mut *ids))
             .unwrap_or_default()
     }
 }
@@ -503,6 +532,12 @@ impl ToolRegistry {
     /// reading an untruncated dump is no better informed than one reading the
     /// first and last screens of it.
     ///
+    /// One call can opt out ([`output::is_uncapped`]), and it has to: the cap
+    /// keeps the head *and* the tail and drops what is between them, which for a
+    /// file deliberately asked for whole is the one thing the caller needed. A
+    /// tool that opts out bounds its own result instead, so this is a narrower cap
+    /// rather than no cap.
+    ///
     /// A tool's own failure comes back as an `Err` carrying text for the model
     /// rather than as a run-ending error: the model needs to see why a call
     /// failed in order to correct it, and a wrong path is its mistake to fix,
@@ -513,6 +548,9 @@ impl ToolRegistry {
         arguments: Value,
         context: ToolContext,
     ) -> Result<String, String> {
+        // Decided before the arguments move into the executor, because the answer
+        // depends on them and the call itself does not get them back.
+        let uncapped = output::is_uncapped(name, &arguments);
         // A dynamic tool's closure is cloned out before the await, so the borrow
         // of `self` does not have to be held across it.
         let outcome = if let Some(tool) = self.tools.iter().find(|tool| tool.name == name) {
@@ -524,6 +562,7 @@ impl ToolRegistry {
             return Err(format!("Unknown tool: {name}"));
         };
         match outcome {
+            Ok(text) if uncapped => Ok(text),
             Ok(text) => Ok(output::truncate(text)),
             Err(error) => Err(output::truncate(format!("{name} failed: {error}"))),
         }
@@ -553,7 +592,7 @@ fn field_names(schema: &Value) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::ai::tools::ToolMode;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     fn spec() -> ToolSpec {
         ToolSpec {
@@ -724,6 +763,11 @@ mod tests {
     /// async test attribute, so this file needs no extra dev-dependency for what
     /// is a two-line helper.
     fn blocking_run(registry: &ToolRegistry, name: &str) -> String {
+        blocking_run_with(registry, name, json!({}))
+    }
+
+    /// The same, with arguments, for a test whose point is the argument.
+    fn blocking_run_with(registry: &ToolRegistry, name: &str, arguments: Value) -> String {
         let context = ToolContext {
             cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sink: Sink::default(),
@@ -733,11 +777,49 @@ mod tests {
         match tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("test runtime")
-            .block_on(registry.run(name, json!({}), context))
+            .block_on(registry.run(name, arguments, context))
         {
             Ok(text) => text,
             Err(error) => error,
         }
+    }
+
+    /// The shared cap has exactly one exception, and it is the call that asked.
+    ///
+    /// A whole-file read that arrived cut would carry the head and the tail with
+    /// the middle removed -- the one part the caller said it needed. The record
+    /// has to agree with the model too, which is why `is_uncapped` is one function
+    /// rather than a condition written twice.
+    #[test]
+    fn a_full_read_is_not_cut_by_the_shared_cap() {
+        // Over the cap, under any window: the difference the test is measuring.
+        let long = "x".repeat(output::MAX_TOOL_OUTPUT + 5_000);
+        let registry = ToolRegistry {
+            tools: vec![ToolSpec {
+                parameters: r#"{
+                    "type": "object",
+                    "properties": { "full": { "type": "boolean" } },
+                    "additionalProperties": false
+                }"#,
+                execute: |_, _| {
+                    Box::pin(std::future::ready(Ok(
+                        "x".repeat(output::MAX_TOOL_OUTPUT + 5_000)
+                    )))
+                },
+                ..spec()
+            }],
+            dynamic: Vec::new(),
+        };
+
+        let whole = blocking_run_with(&registry, "read_file", json!({ "full": true }));
+        assert_eq!(whole, long, "an opted-in result must arrive whole");
+
+        let capped = blocking_run_with(&registry, "read_file", json!({}));
+        assert!(
+            capped.contains("omitted from the middle"),
+            "every other call is still capped: {capped}"
+        );
+        assert!(capped.chars().count() < whole.chars().count(), "{capped}");
     }
 
     #[test]

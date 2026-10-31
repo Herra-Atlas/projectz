@@ -121,6 +121,15 @@ function AppShell() {
   // than in the panel because it is raised from two places -- the sidebar and the
   // statistics page -- and both should reach one view through one path.
   const [overviewRequest, setOverviewRequest] = useState<{ id: string; key: number } | null>(null);
+  /**
+   * One sub-agent run the panel should open, raised by the transcript's notice.
+   *
+   * Held here for the same reason as `overviewRequest`: the click happens inside
+   * the chat column and the view lives in the panel beside it, so neither can
+   * reach the other without a value in the component that owns both. The key is
+   * a nonce -- asking for the same run twice is two requests.
+   */
+  const [subagentRequest, setSubagentRequest] = useState<{ id: string; key: number } | null>(null);
   const chat = useChatSessions(startupDone, sessionReloadKey, localModelId || model, endpointId);
   // Preferences live here so the chat view and the settings modal always agree
   // on the title-model choice without one re-reading a stale copy.
@@ -733,6 +742,10 @@ function AppShell() {
             setOpenSkill(null);
             setRequestedFile(path);
           }}
+          // The centred notice in the transcript opens the run it announces. The
+          // panel is told which run and opens itself; the id travels as a request
+          // rather than as a second piece of panel state held here.
+          onOpenSubAgent={(agentId) => setSubagentRequest({ id: agentId, key: Date.now() })}
           titleModels={preferences.sessionTitleModels}
           onAutoTitle={chat.setAutoTitle}
           workspaceRoot={workspaces.selected}
@@ -763,6 +776,8 @@ function AppShell() {
         onUrlRequestHandled={() => setRequestedUrl(null)}
         onRequestHandled={() => setRequestedFile(null)}
         overviewRequest={overviewRequest}
+        subagentRequest={subagentRequest}
+        onOpenOverview={handleOpenOverview}
         loadSession={chat.loadSessionForOverview}
         onClose={() => rightPanel.setOpen(false)}
         onOpen={() => rightPanel.setOpen(true)}

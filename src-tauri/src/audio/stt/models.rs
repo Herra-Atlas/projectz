@@ -8,8 +8,9 @@
 //! caller that ever needs to know.
 //!
 //! Precedence is deliberate and documented on `resolve`: a model that can hear
-//! is preferred, because one GGUF replacing a separate recognition engine is the
-//! whole reason it is installed.
+//! is preferred **while it is loaded**, because one GGUF replacing a separate
+//! recognition engine is the whole reason it is installed -- and a model that is
+//! installed but not running is never started by a recording.
 //!
 //! Whisper models come from `ggerganov/whisper.cpp` and Parakeet ones from
 //! `ggml-org/parakeet-GGUF`; the two are read by different executables in the
@@ -136,6 +137,15 @@ pub struct Model {
     pub engine: String,
     /// The audio.cpp family, for the rows that engine serves. Empty otherwise.
     pub family: String,
+    /// Whether this row can transcribe right now without a cold start.
+    ///
+    /// Always true for the two folder engines: whisper's file is read per
+    /// recording (or held by a server this app manages), and audio.cpp's server
+    /// starts on demand with its own terminal row and header chip to say so.
+    /// A GGUF speech model is the one engine whose start is a 2 GB process
+    /// nothing on screen announced, so its rows say whether one is already up --
+    /// and the page draws only the ones that are.
+    pub loaded: bool,
 }
 
 impl Model {
@@ -191,7 +201,12 @@ pub fn remove(path: &str) -> Result<(), String> {
 /// of its own, so it can only be listed by asking the app. Callers that have no
 /// handle (an engine's own asset count) pass `None` and see the two folder
 /// engines, which is the answer they were asking for.
-pub fn list(app: Option<&tauri::AppHandle>) -> Vec<Model> {
+///
+/// Async because the third engine's readiness is a question for a server, not
+/// for the registry: a speech model is "loaded" when `llama-server` is serving
+/// it, and the chat port counts -- one model can both talk and listen. That read
+/// is taken once for the whole list rather than once per row.
+pub async fn list(app: Option<&tauri::AppHandle>) -> Vec<Model> {
     let mut found = Vec::new();
     walk(&models_root().join("stt"), &mut found);
     // audio.cpp's recognisers live in the other engine's folder, and this page
@@ -208,12 +223,16 @@ pub fn list(app: Option<&tauri::AppHandle>) -> Vec<Model> {
                 parakeet: false,
                 engine: "audiocpp".to_string(),
                 family: model.family.clone(),
+                // The engine starts its own server on the first recording, and
+                // that start is visible: a terminal row and a header chip.
+                loaded: true,
             }),
     );
     // The GGUF speech models, whose audio encoder is the only reason they are
     // here. One that cannot hear is a chat model with a projector and has no
     // business on this page.
     if let Some(app) = app {
+        let loaded = crate::audio::speech::loaded_model().await;
         for model in crate::audio::speech::installed(app) {
             if !model.hears_audio {
                 continue;
@@ -228,6 +247,7 @@ pub fn list(app: Option<&tauri::AppHandle>) -> Vec<Model> {
                 parakeet: false,
                 engine: "llamacpp".to_string(),
                 family: String::new(),
+                loaded: loaded.as_deref() == Some(model.path.as_str()),
             });
         }
     }
@@ -266,26 +286,45 @@ impl Selected {
     }
 }
 
+/// The refusal a GGUF speech model that is not running answers with, wherever it
+/// is asked from: its name, and the one page that can make it usable.
+fn not_loaded(name: &str) -> String {
+    format!("{name} is not loaded. Load it in Settings > Local, or choose another recognition model.")
+}
+
 /// The model a recording should be transcribed with.
 ///
-/// **A speech model wins when one is installed.** That is the whole point of
-/// having it: one 2 GB GGUF replaces a separate recognition engine, so pressing
-/// the microphone must not load whisper beside it. The stored selection still
-/// answers for the two folder engines, and is what decides between them -- but a
-/// model that can hear is preferred over both, which is why selecting a whisper
-/// model does not bring it back while such a model exists.
-pub fn resolve(app: Option<&tauri::AppHandle>, settings: &SttSettings) -> Result<Selected, String> {
+/// **A loaded speech model wins.** That is the whole point of having it: one
+/// 2 GB GGUF replaces a separate recognition engine, so pressing the microphone
+/// must not load whisper beside it. The stored selection still answers for the
+/// two folder engines, and is what decides between them.
+///
+/// **A speech model that is not loaded is never a candidate.** It used to be
+/// preferred merely for being installed, so a microphone press started a 2 GB
+/// `llama-server` that nothing announced -- no terminal row, no header chip, no
+/// switch to end it; the app looked like it had done nothing while a process sat
+/// on the GPU. The settings page now draws such a row only while it is up, and
+/// this is the same rule for every other door into a recording: a voice note on
+/// Telegram, a scheduled job, or a path restored from an older settings record.
+pub async fn resolve(
+    app: Option<&tauri::AppHandle>,
+    settings: &SttSettings,
+) -> Result<Selected, String> {
     if let Some(app) = app {
-        if let Some(model) = crate::audio::speech::hearing(app) {
-            return Ok(Selected::Llamacpp(model));
+        // Asked of the server rather than of the registry: the chat model can be
+        // the speech model too, and that process is already resident.
+        if let Some(path) = crate::audio::speech::loaded_model().await {
+            if let Some(model) = crate::audio::speech::find(app, &path) {
+                if model.hears_audio {
+                    return Ok(Selected::Llamacpp(model));
+                }
+            }
         }
     }
 
-    // `list` carries every engine's rows for the settings page, so each fallback
-    // below names the engine instead of trusting the order: an audio.cpp gguf
-    // handed to `whisper-cli` is a model that cannot load, however plausible the
-    // list looked.
-    let installed = list(app);
+    // The two folder engines only: a speech model's readiness was just read
+    // above, and `None` keeps this from asking the server a second time.
+    let installed = list(None).await;
     let audio_models = super::audiocpp::models();
     if let Some(chosen) = settings.model.as_deref() {
         if super::audiocpp::owns_path(chosen) {
@@ -297,9 +336,21 @@ pub fn resolve(app: Option<&tauri::AppHandle>, settings: &SttSettings) -> Result
             }
         } else if let Some(found) = installed
             .iter()
-            .find(|model| model.engine != "audiocpp" && model.path == chosen)
+            .find(|model| model.engine == "whisper" && model.path == chosen)
         {
+            // Named by engine, not by "not audio.cpp": a GGUF speech path used to
+            // fall through here and be handed to `whisper-cli` as a model it
+            // cannot load.
             return Ok(Selected::WhisperFile(found.clone()));
+        } else if let Some(found) = app.and_then(|app| crate::audio::speech::find(app, chosen)) {
+            if found.hears_audio {
+                // Reachable only when it is not loaded: a loaded one answered
+                // above, and starting one here is what this function no longer
+                // does. Reported by name rather than answered silently by
+                // another engine, which would transcribe with a model the page
+                // does not show as chosen.
+                return Err(not_loaded(&found.name));
+            }
         }
     }
     // whisper.cpp is the engine this app came with, so it answers first.
@@ -310,6 +361,11 @@ pub fn resolve(app: Option<&tauri::AppHandle>, settings: &SttSettings) -> Result
     // answer rather than a second error about an engine nobody asked for.
     if let Some(first) = audio_models.into_iter().next() {
         return Ok(Selected::Audiocpp(first));
+    }
+    // Nothing usable is installed but a speech model is on disk: the useful thing
+    // to say is how to make it usable, not that nothing is installed.
+    if let Some(model) = app.and_then(crate::audio::speech::hearing) {
+        return Err(not_loaded(&model.name));
     }
     Err("No recognition model is installed. Download one from Settings > Voice.".to_string())
 }
@@ -394,5 +450,7 @@ fn describe(path: &PathBuf) -> Option<Model> {
         // so the engine stays whisper.cpp and `parakeet` is the distinction.
         engine: "whisper".to_string(),
         family: String::new(),
+        // A file the engine reads per recording has no warm state to be in.
+        loaded: true,
     })
 }

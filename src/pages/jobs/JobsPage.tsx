@@ -111,7 +111,7 @@ export default function JobsPage({ notify, onOpenSession }: { notify: Notify; on
       {editing ? (
         <JobEditor job={editing.job} jobs={jobs} onSubmit={submit} onCancel={() => setEditing(null)} notify={notify} />
       ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto p-5 sm:p-7">
+        <div className="min-h-0 flex-1 overflow-y-auto p-5 sm:p-7" data-find-scope="" data-find-label="jobs">
           <div className="mx-auto max-w-[860px] space-y-3">
             {loading && jobs.length === 0 && <p className="text-[13px] text-[var(--quiet)]">Loading…</p>}
             {!loading && jobs.length === 0 && (

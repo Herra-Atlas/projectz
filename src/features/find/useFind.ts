@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { loadFindOptions, saveFindOptions, type FindOptions } from "./options";
 import { matchText } from "./matcher";
-import { findScopes, revealMatch, textNodesIn } from "./scopes";
+import { findScopes, rememberPressedScope, revealMatch, textNodesIn } from "./scopes";
 import { HIGHLIGHTS_SUPPORTED, clearHighlights, paintMatches, setCurrentHighlight, setDimmedScopes } from "./highlights";
 
 /** One match and the scope it was found in, which is where it scrolls. */
@@ -260,6 +260,17 @@ export function useFind(): FindController {
 
   // A search never outlives the bar: the dim and the paint are removed with it.
   useEffect(() => clearHighlights, []);
+
+  // Which surface a press landed in, so Ctrl+F searches that one instead of
+  // every visible scope -- the chat and the right panel are on screen together
+  // whenever the panel is open. See `workingScope` in `scopes.ts`.
+  useEffect(() => {
+    const onPointerDown = (event: PointerEvent) => rememberPressedScope(event.target);
+    // Capture, because a surface may stop propagation of its own presses (the
+    // file tree's rows and menus do) without meaning to hide where it is.
+    window.addEventListener("pointerdown", onPointerDown, true);
+    return () => window.removeEventListener("pointerdown", onPointerDown, true);
+  }, []);
 
   return {
     open,

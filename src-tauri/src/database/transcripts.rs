@@ -295,5 +295,9 @@ pub fn session_header(row: SessionRow) -> Value {
         // the conversation that started them.
         "kind": metadata.get("kind").and_then(Value::as_str).unwrap_or("chat"),
         "parentSessionId": metadata.get("parentSessionId").and_then(Value::as_str),
+        // Only a sub-agent run can have failed, and absent reads as "did not":
+        // every row written before this existed ended without the flag, and a
+        // successful run is the ordinary case.
+        "failed": metadata.get("failed").and_then(Value::as_bool).unwrap_or(false),
     })
 }

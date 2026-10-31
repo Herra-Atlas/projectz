@@ -16,6 +16,20 @@ export type PendingApproval = {
   sessionId: string | null;
   approvalId: string;
   tool: string;
+  /**
+   * The call in words a row uses: "Write file", "Run command".
+   *
+   * Sent by the backend from the same table the transcript describes calls with,
+   * so the prompt and the row it is about cannot disagree. Empty on a transcript
+   * written before the field existed, and the raw tool name stands in.
+   */
+  label: string;
+  /**
+   * What the call will touch, with the fact that makes it decidable: the path and
+   * the number of lines, the destination of a move, a folder a delete takes with
+   * it. Empty when the command already says everything.
+   */
+  detail: string;
   /** Empty for a tool that is not a shell. */
   command: string;
   arguments: Record<string, unknown>;
@@ -74,7 +88,18 @@ export default function ToolApproval({ request, onAnswer, onCancel }: ToolApprov
   // Shown verbatim rather than summarised. A user approving `cargo build` has to
   // be looking at `cargo build`, and a shortened rendering of a long command is
   // exactly the kind of thing that hides an appended `&& rm`.
+  //
+  // Every other tool has no command, so its subject is the detail the backend
+  // built for it: the path and what will happen to it. Before that, a write asked
+  // only "Allow write_file", which named no file at all.
   const command = request.command.trim();
+  const detail = request.detail.trim();
+  const subject = detail || command || request.tool;
+  // Both halves in the tooltip even when only one fits the row: the prompt clips
+  // to a line, and a truncated path is what a reader must be able to see in full
+  // before allowing it.
+  const title = [detail, command].filter(Boolean).join(" · ") || request.tool;
+  const label = request.label.trim() || request.tool;
 
   return (
     <div
@@ -90,19 +115,19 @@ export default function ToolApproval({ request, onAnswer, onCancel }: ToolApprov
     >
       <ToolIcon tool={request.tool} />
       <span id="tool-approval-title" className="shrink-0 text-xs text-[var(--muted)]">
-        Allow
+        Allow {label}
       </span>
-      {/* The command in `--text` rather than as a heading: this is a row, and the
-          call it is about is named by the command beside it. Monospaced, because
+      {/* The subject in `--text` rather than as a heading: this is a row, and the
+          call it is about is named beside the verb. Monospaced, because a path or
           a command is code and proportional spacing makes `rm` and `rn` harder to
           tell apart at a glance. Clipped to one line so a long command cannot
           push the two buttons off the row and out of reach; the whole of it is in
           the tooltip, which is where a reader looks before allowing it. */}
       <span
         className="min-w-0 flex-1 truncate font-mono text-xs text-[var(--text)]"
-        title={command || request.tool}
+        title={title}
       >
-        {command || request.tool}
+        {subject}
       </span>
 
       {/* `type="button"` on both, because this still sits inside the composer's

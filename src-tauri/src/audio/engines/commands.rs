@@ -56,7 +56,7 @@ pub async fn audio_engines_builtin() -> Vec<EngineRow> {
             installed: whisper::is_installed(),
             // The whisper engine's own assets, so the count names the folder it
             // installs into rather than every recogniser the app can run.
-            assets: models::list(None).len(),
+            assets: models::list(None).await.len(),
             kind: "fixed".to_string(),
         },
         EngineRow {

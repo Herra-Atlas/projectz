@@ -91,7 +91,11 @@ export default function SheetPreview({ path, skill = null }: PreviewProps) {
         </div>
       )}
 
-      <div className="min-h-0 flex-1 overflow-auto">
+      {/* The grid is a find scope: a sheet is read by searching for a value in
+          it, and every cell is a text node the app's bar can paint. The sheet
+          tabs above stay outside -- they are the workbook's navigation, not its
+          contents. */}
+      <div className="min-h-0 flex-1 overflow-auto" data-find-scope="" data-find-label="sheet">
         <table className="border-collapse text-[11px] tabular-nums">
           <thead>
             {/* Both axes are frozen: without the row numbers a scrolled sheet

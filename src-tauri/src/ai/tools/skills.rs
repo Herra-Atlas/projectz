@@ -202,26 +202,36 @@ fn plural(count: usize) -> &'static str {
     }
 }
 
-/// Creates or edits a skill's own text.
+/// Creates, rewrites or corrects a skill's own text.
 ///
 /// Deliberately no delete. Deleting is the one operation with no undo, and a
 /// model that can remove a folder the user wrote by hand is a much larger claim
 /// than one that can stop it being applied — `enabled: false` already covers the
 /// reversible half. The user deletes their own skills in Settings.
+///
+/// **`edit` exists because `update` costs the whole file.** A skill's body is its
+/// instructions, and reproducing them to change a line is the one thing a model
+/// is worst at: the body is capped at 20,000 characters, it arrives through a
+/// single tool call that a long reply truncates mid-way, and every rewrite is
+/// another chance to drop a section nobody asked about. So a correction quotes
+/// only the text it changes, through the same matcher `edit_file` uses, and the
+/// rest of the file is copied through byte for byte.
 pub const SKILL_MANAGE: ToolSpec = ToolSpec {
     name: "skill_manage",
-    description: "Save a reusable set of instructions as a skill, or update one that already \
-                  exists. Use this when the user tells you how they want something done in a \
-                  way worth remembering. Prefer updating an existing skill over creating a \
-                  near-duplicate. This writes SKILL.md only; use `skill_write` for scripts and \
-                  references.",
+    description: "Save reusable instructions as a skill, or change one that already exists. Use this \
+                  when the user tells you how they want something done in a way worth remembering, \
+                  and prefer changing an existing skill over creating a near-duplicate. `edit` \
+                  changes part of a skill: pass `old_text`/`new_text` or `edits`, exactly as \
+                  edit_file does. `update` replaces the whole body and needs `instructions` — use it \
+                  only to rewrite a skill, never to correct one line. This writes SKILL.md only; use \
+                  `skill_write` for scripts and references.",
     parameters: r#"{
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["create", "update"],
-                "description": "Create a new skill, or replace the text of an existing one."
+                "enum": ["create", "update", "edit"],
+                "description": "Create a new skill, replace the whole text of an existing one (`update`), or change part of one (`edit`)."
             },
             "name": {
                 "type": "string",
@@ -229,18 +239,44 @@ pub const SKILL_MANAGE: ToolSpec = ToolSpec {
             },
             "existing_name": {
                 "type": "string",
-                "description": "The current name of the skill to update. Use this for update, so a rename does not create a second skill."
+                "description": "The current name of the skill to change. Use this for update and edit, so a rename does not create a second skill."
             },
             "description": {
                 "type": "string",
-                "description": "One line saying when this skill applies. This is the only text a model sees before deciding to read the skill, so write it as a trigger rather than a summary."
+                "description": "One line saying when this skill applies. This is the only text a model sees before deciding to read the skill, so write it as a trigger rather than a summary. Omit to keep the one already stored; an empty string removes it."
             },
             "instructions": {
                 "type": "string",
-                "description": "The full SKILL.md body, in the second person and specific enough to act on. Markdown."
+                "description": "The full SKILL.md body, in the second person and specific enough to act on. Markdown. Required for create and update; use `edits` for edit instead."
+            },
+            "old_text": {
+                "type": "string",
+                "description": "For edit: the text to replace, including its indentation. Use this for a single change."
+            },
+            "new_text": {
+                "type": "string",
+                "description": "For edit: the text to put in its place, for a single change."
+            },
+            "replace_all": {
+                "type": "boolean",
+                "description": "For edit: replace every occurrence of `old_text` instead of requiring exactly one."
+            },
+            "edits": {
+                "type": "array",
+                "description": "For edit: several changes applied together, all or nothing. Use instead of old_text/new_text.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "old_text": { "type": "string", "description": "The text to replace." },
+                        "new_text": { "type": "string", "description": "The text to put in its place." },
+                        "replace_all": { "type": "boolean", "description": "Replace every occurrence of this piece." }
+                    },
+                    "required": ["old_text", "new_text"],
+                    "additionalProperties": false
+                }
             }
         },
-        "required": ["action", "instructions"],
+        "required": ["action"],
         "additionalProperties": false
     }"#,
     // A write: it changes the folder the user will rely on later.
@@ -403,7 +439,14 @@ fn read(arguments: Value) -> Result<String, String> {
     }
 
     let (skill, instructions, files) = crate::skills::get(&skill.slug)?;
-    let mut out = format!("# {}\n\n{}", skill.name, instructions.trim());
+    // The trigger is printed because it is the one field a caller is expected to
+    // preserve, and it used to be invisible here: a model could read a skill, send
+    // the body back, and silently drop the description it was never shown.
+    let mut out = format!("# {}", skill.name);
+    if let Some(description) = labelled(&skill.description) {
+        out.push_str(&format!("\n\nWhen to use: {description}"));
+    }
+    out.push_str(&format!("\n\n{}", instructions.trim()));
     if !files.is_empty() {
         out.push_str("\n\nFiles in this skill (read one with `skill_read` and `path`):\n");
         for file in &files {
@@ -444,10 +487,95 @@ fn manage(arguments: Value) -> Result<String, String> {
             let updated = crate::skills::update(&existing.slug, &draft)?;
             Ok(format!("Updated the skill `{}`.", updated.name))
         }
+        "edit" => edit(&arguments),
         other => Err(format!(
-            "`{other}` is not a skill_manage action. Use \"create\" or \"update\"."
+            "`{other}` is not a skill_manage action. Use \"create\", \"update\" or \"edit\"."
         )),
     }
+}
+
+/// Changes part of a skill's text, quoting only what moves.
+///
+/// The `instructions` refusal is deliberate rather than lenient: a call carrying
+/// both a full body and a patch is a model that has not decided which operation
+/// it meant, and silently preferring one would either discard its patch or
+/// discard its rewrite. Naming the two doors is cheaper than guessing.
+fn edit(arguments: &Value) -> Result<String, String> {
+    let target = ["existing_name", "name"]
+        .iter()
+        .find_map(|field| {
+            arguments
+                .get(*field)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .ok_or("skill_manage edit requires `existing_name` — the skill to change")?;
+    if arguments.get("instructions").is_some() {
+        return Err(
+            "skill_manage edit changes text through `edits`; `instructions` belongs to \"update\", \
+             which replaces the whole body. Drop one of them."
+                .to_string(),
+        );
+    }
+    // An empty string is a real argument here -- it removes the trigger -- so this
+    // is trimmed but not filtered the way `draft_from`'s fields are.
+    let description = arguments
+        .get("description")
+        .and_then(Value::as_str)
+        .map(str::trim);
+    let edits = if super::patch::has_changes(arguments) {
+        super::patch::changes_of(arguments)?
+    } else {
+        Vec::new()
+    };
+    if edits.is_empty() && description.is_none() {
+        return Err(
+            "skill_manage edit needs `edits` (or `old_text`/`new_text`), or a `description` to \
+             change."
+                .to_string(),
+        );
+    }
+
+    let existing = crate::skills::resolve(target)?;
+    let patched = crate::skills::patch(&existing.slug, &edits, description)?;
+    if !patched.changed {
+        return Ok(format!(
+            "No change to the skill `{}`; the new text was identical.",
+            patched.skill.name
+        ));
+    }
+
+    let noun = if edits.len() == 1 {
+        "change"
+    } else {
+        "changes"
+    };
+    let mut out = if edits.is_empty() {
+        format!(
+            "Updated the description of the skill `{}`.",
+            patched.skill.name
+        )
+    } else {
+        format!(
+            "Applied {} {noun} to the skill `{}`.",
+            edits.len(),
+            patched.skill.name
+        )
+    };
+    if description.is_some() && !edits.is_empty() {
+        out.push_str(" Its description was updated too.");
+    }
+    if patched.lenient > 0 {
+        // The same reassurance `edit_file` gives: the text was located with
+        // whitespace or punctuation folded, and nothing else was touched.
+        out.push_str(&format!(
+            " {} located after ignoring whitespace or punctuation differences; only the matched \
+             text was replaced.",
+            patched.lenient
+        ));
+    }
+    Ok(out)
 }
 
 fn write(arguments: Value) -> Result<String, String> {
@@ -668,6 +796,30 @@ mod tests {
         assert_eq!(names_to_try("  Email inbox  "), vec!["Email inbox"]);
         assert_eq!(names_to_try("[leading]"), vec!["[leading]"]);
         assert_eq!(names_to_try("unclosed [bracket"), vec!["unclosed [bracket"]);
+    }
+
+    /// A call carrying both a whole body and a patch has not decided which
+    /// operation it meant; it is refused rather than letting one door win.
+    #[test]
+    fn an_edit_refuses_to_also_carry_a_whole_body() {
+        let error = edit(&json!({
+            "action": "edit",
+            "existing_name": "anything",
+            "instructions": "the whole body",
+            "old_text": "a",
+            "new_text": "b"
+        }))
+        .expect_err("refused");
+        assert!(error.contains("\"update\""), "{error}");
+    }
+
+    /// An edit with nothing to change says what it needs rather than writing
+    /// nothing and reporting success.
+    #[test]
+    fn an_edit_with_no_change_is_refused() {
+        let error =
+            edit(&json!({ "action": "edit", "existing_name": "anything" })).expect_err("refused");
+        assert!(error.contains("needs `edits`"), "{error}");
     }
 
     /// A model fixing a skill's wording should not have to restate its title.

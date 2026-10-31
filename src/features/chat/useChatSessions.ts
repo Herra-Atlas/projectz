@@ -235,7 +235,17 @@ export function useChatSessions(enabled: boolean, reloadKey = 0, modelId = "", p
     // even if a stale transcript is still in memory, and returning `null` here
     // lets the caller say so rather than drawing a record for a deleted session.
     const header = sessionsRef.current.find((session) => session.id === id);
-    if (!header) return null;
+    // A sub-agent run is stored as a session but is deliberately absent from the
+    // sidebar list, so it has no header here. The Overview action is offered on
+    // those rows too, so the record is read whole from the database instead of
+    // being refused -- the same header-plus-transcript the view already expects.
+    if (!header) {
+      try {
+        return await chatRepository.readSession(id);
+      } catch {
+        return null;
+      }
+    }
     // A transcript already in memory is not re-read: the figures are derived
     // from the same rows either way, and this is the common case once a
     // conversation has been opened.

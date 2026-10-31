@@ -55,7 +55,7 @@ export default function DatabasePage({ refreshKey }: DatabasePageProps) {
           {/* The scrolling region and the pager are siblings, so the pager stays
               put at the bottom instead of sitting below the last row. Only the
               table scrolls; the footer never leaves the viewport. */}
-          <div className="min-h-0 flex-1 overflow-auto">
+          <div className="min-h-0 flex-1 overflow-auto" data-find-scope="" data-find-label="database">
             {rows.length === 0 && !loading ? <p className="px-5 py-5 text-sm text-[var(--muted)]">This table is empty.</p> : <table className="w-full border-collapse text-left text-xs">
               <thead className="sticky top-0 z-10 bg-[var(--rail)]"><tr>{columns.map((column) => <th key={column} className="max-w-72 border-b border-r border-[var(--line)] px-3 py-2.5 font-medium text-[var(--muted)]">{column}</th>)}</tr></thead>
               <tbody>{rows.map((row, index) => <tr key={String(row.id ?? index)} className="align-top even:bg-[color-mix(in_srgb,var(--raised)_28%,transparent)]">{columns.map((column) => {

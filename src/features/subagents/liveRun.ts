@@ -160,6 +160,7 @@ export function foldEvent(run: LiveRun, event: AiEvent): void {
         if (metrics.output) open.output = metrics.output;
         if (metrics.diff) open.diff = metrics.diff;
         if (metrics.created) open.created = true;
+        if (metrics.agent_id) open.agentId = metrics.agent_id;
         delete open.startedAt;
       } else {
         // A result with no open row is still shown, for the same reason the chat
@@ -177,6 +178,7 @@ export function foldEvent(run: LiveRun, event: AiEvent): void {
           ...(metrics.output ? { output: metrics.output } : {}),
           ...(metrics.diff ? { diff: metrics.diff } : {}),
           ...(metrics.created ? { created: true } : {}),
+          ...(metrics.agent_id ? { agentId: metrics.agent_id } : {}),
         });
       }
       break;

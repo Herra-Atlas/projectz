@@ -160,6 +160,10 @@ pub async fn spawn(arguments: Value, context: ToolContext) -> Result<String, Str
     // it say -- has to have an answer from the moment the id exists, because the id
     // is handed to the model in the acknowledgement below.
     let record = registry::register(&agent_id, &display_label);
+    // Handed to the loop through the sink so the `sub_agent` row carries the id
+    // this run will report under. See `ToolContext::report_subagent` for why the
+    // row cannot match on anything looser.
+    context.report_subagent(agent_id.clone());
     // A flag of this agent's own, so Stop can end one run without ending the
     // parent or a sibling. A watcher in `run_agent` also sets it when the parent
     // is stopped, so the parent's own stop still reaches its agents.

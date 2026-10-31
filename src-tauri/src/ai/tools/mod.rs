@@ -23,6 +23,7 @@ mod glob;
 mod grep;
 pub mod host;
 mod output;
+pub(crate) mod patch;
 mod paths;
 mod policy;
 mod process;

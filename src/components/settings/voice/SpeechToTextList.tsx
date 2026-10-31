@@ -23,11 +23,16 @@ import { ANCHOR_ATTRIBUTE, SettingRow, SettingsSection, Toggle } from "../../Set
 /**
  * The recognise half of the Speech to text page.
  *
- * Two engines can transcribe, and they keep their files in two folders:
- * whisper.cpp reads `ggml-*.bin` (Parakeet through its own executable in the
- * same install), audio.cpp serves its own gguf packages from `models/audio`.
- * The choice is a model, not an engine, so both are listed here and grouped by
- * the folder they came from.
+ * Three engines can transcribe. whisper.cpp reads `ggml-*.bin` (Parakeet through
+ * its own executable in the same install), audio.cpp serves its own gguf
+ * packages from `models/audio`, and a GGUF speech model from the chat library is
+ * served by its own `llama-server`. The choice is a model, not an engine, so all
+ * are listed here and grouped by the engine that serves them.
+ *
+ * The third group is drawn only while its server is up: a speech model is a
+ * recognition engine when it is ready, and a row that started a 2 GB process on
+ * a click would be a trap -- which is exactly the process the app could not
+ * show anywhere else.
  *
  * Nothing downloads on its own: the engine is a button, the models are a page.
  */
@@ -115,7 +120,11 @@ export function SpeechToTextList({
   // audio.cpp needs its server, and a speech GGUF needs neither.
   const whisper = models.filter((model) => model.engine === "whisper");
   const audio = models.filter((model) => model.engine === "audiocpp");
-  const speech = models.filter((model) => model.engine === "llamacpp");
+  // Only the loaded ones: a speech model is a recognition engine when its server
+  // is up, and the row below would otherwise start a 2 GB process that neither
+  // the terminal nor the header chip announces. Its file keeps its entry in
+  // Settings · Local, which is where it is loaded.
+  const speech = models.filter((model) => model.engine === "llamacpp" && model.loaded);
 
   return (
     <>
@@ -236,44 +245,44 @@ export function SpeechToTextList({
           </div>
       </article>
 
-      <article>
-        <div
-          className="flex min-h-[68px] items-center gap-2 px-4 py-3"
-          {...{ [ANCHOR_ATTRIBUTE]: "stt.speech" }}
-        >
-          <span className="grid size-9 shrink-0 place-items-center rounded-md text-[var(--muted)]">
-            <AudioLines size={16} />
-          </span>
-          <div className="min-w-0 flex-1">
-            <h3 className="truncate text-sm font-medium">llama.cpp speech models</h3>
-            <p className="truncate text-xs text-[var(--quiet)]">
-              {speech.length === 1 ? "1 model" : `${speech.length} models`}
-            </p>
+      {/* Absent, not empty, while no speech model is loaded: an installed model
+          that is not running is not an engine this page can offer, and a
+          section that exists only to say "nothing" would be a fourth heading on
+          a page with two real ones. */}
+      {speech.length > 0 && (
+        <article>
+          <div
+            className="flex min-h-[68px] items-center gap-2 px-4 py-3"
+            {...{ [ANCHOR_ATTRIBUTE]: "stt.speech" }}
+          >
+            <span className="grid size-9 shrink-0 place-items-center rounded-md text-[var(--muted)]">
+              <AudioLines size={16} />
+            </span>
+            <div className="min-w-0 flex-1">
+              <h3 className="truncate text-sm font-medium">llama.cpp speech models</h3>
+              <p className="truncate text-xs text-[var(--quiet)]">
+                {speech.length === 1 ? "1 model" : `${speech.length} models`} · loaded
+              </p>
+            </div>
           </div>
-        </div>
-        <div
-          className="mb-3 ml-[2.75rem] border-l border-[var(--line)] py-1 pl-3"
-          {...{ [ANCHOR_ATTRIBUTE]: "stt.speechModels" }}
-        >
-          {/* No delete and no download here: the file is registered in the model
-              library, where it is installed and removed with its engine. */}
-          {speech.map((model) => (
-            <ModelRow
-              key={model.path}
-              model={model}
-              active={model.path === active}
-              onChoose={choose}
-              onSettings={onModelSettings}
-            />
-          ))}
-          {speech.length === 0 && (
-            <p className="py-2 text-xs text-[var(--quiet)]">
-              A GGUF model with an audio projector is listed here and is used instead of the
-              engines above. Add one in Settings · Local.
-            </p>
-          )}
-        </div>
-      </article>
+          <div
+            className="mb-3 ml-[2.75rem] border-l border-[var(--line)] py-1 pl-3"
+            {...{ [ANCHOR_ATTRIBUTE]: "stt.speechModels" }}
+          >
+            {/* No delete and no download here: the file is registered in the model
+                library, where it is installed and removed with its engine. */}
+            {speech.map((model) => (
+              <ModelRow
+                key={model.path}
+                model={model}
+                active={model.path === active}
+                onChoose={choose}
+                onSettings={onModelSettings}
+              />
+            ))}
+          </div>
+        </article>
+      )}
 
       <SettingsSection title="Dictation">
         <SettingRow

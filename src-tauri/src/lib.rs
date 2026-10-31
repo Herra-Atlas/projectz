@@ -326,6 +326,7 @@ pub fn run() {
             commands::database_list_subagents,
             commands::ai_running_subagents,
             commands::database_list_session_messages,
+            commands::database_read_session,
             commands::database_save_session,
             commands::database_delete_session,
             commands::database_clear_sessions,
