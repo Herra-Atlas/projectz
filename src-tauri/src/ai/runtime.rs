@@ -12,10 +12,15 @@ use crate::ai::remote::client::stream_chat;
 use crate::ai::remote::registry::EndpointRegistry;
 use crate::ai::types::{ChatEvent, ChatRequest, ChatResult};
 
-/// Output cap for a title request. A title is at most six words, so a small
-/// ceiling stops a reasoning model spending its budget deliberating about
-/// something nobody will read.
-const TITLE_MAX_TOKENS: u32 = 24;
+/// Output cap for a title request.
+///
+/// A title is a handful of words, so this is deliberately loose: it has to leave
+/// a reasoning model room to finish thinking *and* still emit the answer. At 24,
+/// and then 48, free reasoning models spent the whole budget before returning any
+/// `content` at all, and the title silently stayed as the opening prompt. A title
+/// is generated once per conversation, so the ceiling costs nothing measurable
+/// while still bounding a model that ignores the task.
+const TITLE_MAX_TOKENS: u32 = 256;
 
 /// Tries allowed per title model before moving to the next one. A retry covers
 /// a transient error or one unusable answer without giving the model up, while
@@ -314,24 +319,57 @@ impl AiRuntime {
                 }),
             ];
             for attempt in 1..=TITLE_ATTEMPTS {
-                match crate::ai::remote::client::complete_once(
+                // Let a reasoning model think on the first attempt; turn thinking
+                // off for the retry. The usual failure here is a model that spent
+                // the whole token budget deliberating and never emitted a title,
+                // and asking the identical question again would fail identically.
+                let thinking = if attempt == 1 {
+                    crate::ai::remote::client::Thinking::Allow
+                } else {
+                    crate::ai::remote::client::Thinking::Suppress
+                };
+                match crate::ai::remote::client::complete_once_raw(
                     &endpoint,
                     &model,
                     &messages,
                     Some(TITLE_MAX_TOKENS),
+                    thinking,
                 )
                 .await
                 {
-                    Ok(raw) => match crate::ai::prompts::title::sanitize_title(&raw) {
-                        Some(title) => return Ok(title),
-                        None => {
-                            // The model answered, but with nothing usable — an
-                            // apology, a refusal, or a paragraph. One more try
-                            // before giving up on this model.
-                            last_error = "The model did not return a usable title".to_string();
-                            info!(?selection, attempt, "unusable title output, retrying");
+                    Ok((raw, usage, payload)) => {
+                        match crate::ai::prompts::title::sanitize_title(&raw) {
+                            Some(title) => return Ok(title),
+                            None => {
+                                // The model answered, but with nothing usable — an
+                                // apology, a refusal, or a paragraph. One more try
+                                // before giving up on this model.
+                                last_error = "The model did not return a usable title".to_string();
+                                // The answer itself, in the log: "unusable" alone
+                                // cannot tell an empty completion from a one-word
+                                // label from a paragraph, and each needs a different
+                                // fix. `words` is the count the check rejected.
+                                // `finish` and `body` are the second half of that
+                                // question: `length` with an empty body means the
+                                // budget was spent before any answer was returned,
+                                // while a body naming a field we did not read is a
+                                // parser gap -- and the two need opposite fixes.
+                                info!(
+                                    ?selection,
+                                    attempt,
+                                    words = raw.split_whitespace().count(),
+                                    raw = %crate::ai::prompts::title::preview(&raw),
+                                    finish = payload
+                                        .pointer("/choices/0/finish_reason")
+                                        .and_then(serde_json::Value::as_str)
+                                        .unwrap_or("unknown"),
+                                    completion_tokens = usage.completion_tokens.unwrap_or(0),
+                                    body = %crate::ai::prompts::title::preview(&payload.to_string()),
+                                    "unusable title output, retrying"
+                                );
+                            }
                         }
-                    },
+                    }
                     Err(error) => {
                         info!(?selection, attempt, %error, "title request failed");
                         last_error = error;

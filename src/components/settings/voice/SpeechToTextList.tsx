@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 
 import { formatBytes } from "../../../features/downloads/format";
+import { cachedSttModels, loadSttModels, subscribeSttModels } from "../../../features/stt/modelList";
 import type { Notify } from "../../../features/notifications/types";
 import type { SttModel, SttSettings } from "../../../features/stt/types";
 import { useStt } from "../../../features/stt/useStt";
@@ -48,7 +49,10 @@ export function SpeechToTextList({
   notify: Notify;
 }) {
   const { status, progress, installing, install } = useStt((message) => notify("error", message));
-  const [models, setModels] = useState<SttModel[]>([]);
+  // `null` until the shared list has been read once, so an empty section is not
+  // drawn while the answer is still in flight. On every later visit the cache
+  // answers on the first frame -- see `features/stt/modelList.ts`.
+  const [models, setModels] = useState<SttModel[] | null>(cachedSttModels);
   const [chosen, setChosen] = useState<string | null>(null);
   // Kept beside `chosen` because both live in the same record, and the list is
   // the only place that reads it.
@@ -56,8 +60,10 @@ export function SpeechToTextList({
   const [autoSend, setAutoSend] = useState(false);
   const [silenceMs, setSilenceMs] = useState(1500);
 
-  const load = useCallback(() => {
-    void invoke<SttModel[]>("stt_models").then(setModels).catch(() => undefined);
+  useEffect(() => subscribeSttModels(setModels), []);
+
+  const load = useCallback((force = false) => {
+    void loadSttModels(force).catch(() => undefined);
     void invoke<SttSettings>("stt_settings")
       .then((next) => {
         setChosen(next.model);
@@ -70,13 +76,18 @@ export function SpeechToTextList({
 
   // Read on mount, and again whenever a download lands. The download page is a
   // sibling, so an install there has no other way to reach this list.
+  //
+  // The mount read is forced even when the cache answered: a row's `loaded`
+  // flag changes when a speech model starts, and a page opened after that must
+  // not keep drawing the world as it was. The cached rows are already on screen,
+  // so this correction costs no flash.
   useEffect(() => {
-    load();
+    load(true);
   }, [load]);
   useEffect(() => {
     let live = true;
     let stop: (() => void) | undefined;
-    void listen("downloads-installed", () => load()).then((unlisten) => {
+    void listen("downloads-installed", () => load(true)).then((unlisten) => {
       if (live) stop = unlisten;
       else unlisten();
     });
@@ -102,7 +113,7 @@ export function SpeechToTextList({
   const remove = useCallback(
     (model: SttModel) => {
       void invoke("stt_remove_model", { model: model.path })
-        .then(load)
+        .then(() => load(true))
         .catch((reason: unknown) =>
           notify("error", `The model could not be deleted: ${String(reason)}`),
         );
@@ -114,17 +125,18 @@ export function SpeechToTextList({
   const percent = progress === null ? null : Math.round(progress * 100);
   // A model is chosen explicitly, or implied by being the only one installed,
   // which is what the backend does when nothing is stored.
-  const active = chosen ?? models[0]?.path ?? null;
+  const known = models ?? [];
+  const active = chosen ?? known[0]?.path ?? null;
   // Grouped by the engine that serves the file, which is the one fact that
   // decides what installing more of it even means: whisper needs a pinned build,
   // audio.cpp needs its server, and a speech GGUF needs neither.
-  const whisper = models.filter((model) => model.engine === "whisper");
-  const audio = models.filter((model) => model.engine === "audiocpp");
+  const whisper = known.filter((model) => model.engine === "whisper");
+  const audio = known.filter((model) => model.engine === "audiocpp");
   // Only the loaded ones: a speech model is a recognition engine when its server
   // is up, and the row below would otherwise start a 2 GB process that neither
   // the terminal nor the header chip announces. Its file keeps its entry in
   // Settings · Local, which is where it is loaded.
-  const speech = models.filter((model) => model.engine === "llamacpp" && model.loaded);
+  const speech = known.filter((model) => model.engine === "llamacpp" && model.loaded);
 
   return (
     <>
@@ -186,7 +198,7 @@ export function SpeechToTextList({
             />
           ))}
 
-          {whisper.length === 0 && (
+          {models !== null && whisper.length === 0 && (
             <p className="py-2 text-xs text-[var(--quiet)]">
               {engine
                 ? "No models yet. Download one — Whisper or Parakeet — to start transcribing."
@@ -207,7 +219,11 @@ export function SpeechToTextList({
             <div className="min-w-0 flex-1">
               <h3 className="truncate text-sm font-medium">audio.cpp</h3>
               <p className="truncate text-xs text-[var(--quiet)]">
-                {audio.length === 1 ? "1 model" : `${audio.length} models`}
+                {models === null
+                  ? "Reading models…"
+                  : audio.length === 1
+                    ? "1 model"
+                    : `${audio.length} models`}
               </p>
             </div>
             <button
@@ -237,7 +253,7 @@ export function SpeechToTextList({
                 onRemove={remove}
               />
             ))}
-            {audio.length === 0 && (
+            {models !== null && audio.length === 0 && (
               <p className="py-2 text-xs text-[var(--quiet)]">
                 No audio.cpp model yet. Download one, or add it on the Audio models page.
               </p>

@@ -85,11 +85,6 @@ const PAGES: IndexPage[] = [
         label: "Show token metrics",
         keywords: ["tokens", "usage", "stats", "per reply"],
       },
-      {
-        anchor: "general.sendWith",
-        label: "Send with",
-        keywords: ["enter", "ctrl", "keyboard", "shortcut", "newline"],
-      },
     ],
   },
   {
@@ -445,6 +440,22 @@ const PAGES: IndexPage[] = [
         anchor: "audio.models",
         label: "Audio models",
         keywords: ["audio model", "gguf", "kokoro", "download", "voice", "transcribe", "parakeet", "options"] },
+    ],
+  },
+  {
+    view: "keybinds",
+    name: "Keybinds",
+    entries: [
+      {
+        anchor: "keybinds.sendWith",
+        label: "Send with",
+        keywords: ["enter", "ctrl", "keyboard", "shortcut", "newline", "send message"],
+      },
+      {
+        anchor: "keybinds.pushToTalk",
+        label: "Push to talk",
+        keywords: ["shortcut", "microphone", "dictation", "hotkey", "voice"],
+      },
     ],
   },
   {

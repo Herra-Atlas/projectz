@@ -217,24 +217,75 @@ impl WeightsQuant {
 /// the metadata block and reports "no shape" for a perfectly good model.
 const HEADER_READ_BYTES: usize = 64 * 1024 * 1024;
 
+/// How much of a model file is read on the first attempt.
+///
+/// The architecture keys sit at the front of the metadata block -- ahead of the
+/// tokenizer, which is what makes the block large -- so most models answer
+/// inside a couple of megabytes. [`read_shape`] grows past this when a parse
+/// needs more, so this is a starting point rather than a limit.
+const SHAPE_FIRST_READ_BYTES: usize = 2 * 1024 * 1024;
+
 /// Reads the architecture out of a GGUF header.
 ///
 /// Returns `None` rather than an error for anything unreadable. The caller
 /// reports a less precise figure, and a page of settings that refuses to open
 /// because a model file is in an unexpected format is worse than one that shows
 /// an estimate without the KV component.
+///
+/// Cached per path and modification stamp, exactly like
+/// [`read_capabilities`]: every speech and model page lists the whole library,
+/// and without this each open re-read tens of megabytes per model from disk.
 pub fn read_shape(path: &std::path::Path) -> Option<ModelShape> {
-    use std::io::Read;
+    use std::collections::HashMap;
+    use std::io::{Read, Seek, SeekFrom};
+    use std::sync::{LazyLock, Mutex};
+    use std::time::UNIX_EPOCH;
+
+    static CACHE: LazyLock<Mutex<HashMap<std::path::PathBuf, (u64, u64, Option<ModelShape>)>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|age| age.as_secs())
+        .unwrap_or(0);
+    let length = metadata.len();
+    if let Ok(cache) = CACHE.lock() {
+        if let Some((cached_length, cached_modified, shape)) = cache.get(path) {
+            if *cached_length == length && *cached_modified == modified {
+                return *shape;
+            }
+        }
+    }
+
     let mut file = std::fs::File::open(path).ok()?;
-    // The metadata block holds the tokenizer -- every token id and piece, which
-    // on a modern vocabulary is a couple of megabytes on its own -- and the
-    // architecture keys this parser wants sit *before* it. The read is still
-    // capped, because a corrupt length would otherwise ask for an arbitrary
-    // amount, but the cap has to clear a real vocabulary rather than a toy one.
-    let mut header = vec![0u8; HEADER_READ_BYTES];
-    let read = file.read(&mut header).ok()?;
-    header.truncate(read);
-    read_shape_from_bytes(&header)
+    let mut size = SHAPE_FIRST_READ_BYTES;
+    let shape = loop {
+        // Each attempt reads from the front: the growing window is a longer
+        // prefix of the same block, not a suffix of the last one.
+        file.seek(SeekFrom::Start(0)).ok()?;
+        let mut header = vec![0u8; size];
+        let read = file.read(&mut header).ok()?;
+        header.truncate(read);
+        // A full buffer may have cut the metadata block short, so a missing
+        // shape is not yet evidence of absence: grow and ask again. A short read
+        // means the file ended, and `None` is then its real answer.
+        let complete = read < size;
+        if let Some(shape) = read_shape_from_bytes(&header) {
+            break shape;
+        }
+        if complete || size >= HEADER_READ_BYTES {
+            return None;
+        }
+        size = (size * 2).min(HEADER_READ_BYTES);
+    };
+
+    if let Ok(mut cache) = CACHE.lock() {
+        cache.insert(path.to_path_buf(), (length, modified, Some(shape)));
+    }
+    Some(shape)
 }
 
 /// The same read, over bytes already in hand.
@@ -440,12 +491,30 @@ pub fn read_capabilities(path: &std::path::Path) -> Option<ModelCapabilities> {
         }
     }
 
-    use std::io::Read;
+    use std::io::{Read, Seek, SeekFrom};
     let mut file = std::fs::File::open(path).ok()?;
-    let mut header = vec![0u8; HEADER_READ_BYTES];
-    let read = file.read(&mut header).ok()?;
-    header.truncate(read);
-    let capabilities = read_capabilities_from_bytes(&header)?;
+    // Grown from a small prefix exactly like `read_shape`. The chat template sits
+    // behind the tokenizer, but on most models it is still well inside the first
+    // few megabytes -- and always reading the full 64 MB ceiling made importing a
+    // folder of models spend seconds per file on bytes nothing looked at.
+    let mut size = SHAPE_FIRST_READ_BYTES;
+    let capabilities = loop {
+        file.seek(SeekFrom::Start(0)).ok()?;
+        let mut header = vec![0u8; size];
+        let read = file.read(&mut header).ok()?;
+        header.truncate(read);
+        // A full buffer may have cut the metadata block short, so a missing
+        // answer is not evidence of absence: grow and ask again. A short read
+        // means the file ended, and `None` is then its real answer.
+        let complete = read < size;
+        if let Some(capabilities) = read_capabilities_from_bytes(&header) {
+            break capabilities;
+        }
+        if complete || size >= HEADER_READ_BYTES {
+            return None;
+        }
+        size = (size * 2).min(HEADER_READ_BYTES);
+    };
 
     if let Ok(mut cache) = CACHE.lock() {
         cache.insert(path.to_path_buf(), (length, modified, capabilities));

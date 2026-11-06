@@ -49,6 +49,15 @@ export type Notification = {
   anchor: NotificationAnchor;
   /** Absolute timestamp, or null for a row that waits to be cleared. */
   expiresAt: number | null;
+  /**
+   * How far along the work this row reports is, from 0 to 100.
+   *
+   * Optional because most rows are a single event rather than a stretch of one:
+   * a failure has no fraction. When present the row draws the app's progress
+   * bar under its message, so a long operation says it is moving rather than
+   * leaving the reader to guess whether it has stalled.
+   */
+  progress?: number | null;
 };
 
 /**
@@ -59,7 +68,13 @@ export type Notification = {
  * takes this exact shape for its `onNotify`, so it is narrowed to the two tones
  * that make sense for a one-off event.
  */
-export type Notify = (tone: Exclude<NotificationTone, "confirm">, message: string, key?: string) => void;
+export type Notify = (
+  tone: Exclude<NotificationTone, "confirm">,
+  message: string,
+  key?: string,
+  /** 0-100, drawn as the row's progress bar. Omit for a one-off report. */
+  progress?: number | null,
+) => void;
 
 /**
  * A notification that asks a question or stays while work is in progress.

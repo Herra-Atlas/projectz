@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen } from "@tauri-apps/api/event";
@@ -8,7 +8,7 @@ import Welcome from "./Welcome";
 import { Markdown } from "./Markdown";
 import { PathText } from "./PathText";
 import { expandWorkspacePaths, trimWorkspacePaths } from "../../features/workspace/workspacePaths";
-import { isOverRightPanel } from "../../features/rightPanel/externalDrop";
+import { isOverOpenDialog, isOverRightPanel } from "../../features/rightPanel/externalDrop";
 import { playAlertSound } from "../../features/notifications/sound";
 import { cachedNotificationSettings, soundFor, type AlertKind } from "../../features/notifications/settings";
 import FileChanges from "./FileChanges";
@@ -642,6 +642,11 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   const modelRestoredRef = useRef<Set<string>>(new Set());
   const threadRef = useRef<HTMLDivElement>(null);
   const autoFollowRef = useRef(true);
+  // The conversation the thread is currently showing. Only a change of this is a
+  // reason to start following the bottom again -- a stored transcript replacing
+  // the same conversation is not, and treating it as one is what used to drag a
+  // reader who had scrolled up back down the moment the answer landed.
+  const followSessionRef = useRef<string | null>(null);
   const runIdRef = useRef("");
   const requestStartedAtRef = useRef(0);
   const generationStartedAtRef = useRef(0);
@@ -726,11 +731,13 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   const titleSession = useSessionTitle({
     selections: titleModels ?? EMPTY_TITLE_MODELS,
     onTitle: onAutoTitle,
-    // Naming a conversation is a background nicety. If every configured model
-    // fails, the chat is still fine and the title simply stays as the opening
-    // message, so the failure is logged rather than put in front of the user as
-    // a notification they cannot act on.
-    onError: (message) => console.warn("Title generation failed:", message),
+    // Naming a conversation is a background nicety, but a feature that never
+    // works and never says why reads as broken. The hook asks once per
+    // conversation, so one row says what happened and which setting to look at.
+    onError: (message) => {
+      console.warn("Title generation failed:", message);
+      onNotify("error", `Conversation could not be named: ${message}`);
+    },
   });
   const titleSessionRef = useRef(titleSession);
   titleSessionRef.current = titleSession;
@@ -863,7 +870,14 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     // would empty the transcript for as long as the load takes -- showing the
     // user a conversation that has lost its history and then repopulating it.
     if (session || !sessionLoading) setMessages(session?.messages ?? []);
-    autoFollowRef.current = true;
+    // Re-arm only when the conversation really changed. This effect also runs
+    // when the current conversation's transcript is rewritten -- a reply
+    // finishing, a background agent reporting -- and re-arming there overrode the
+    // reader's position and yanked them back to the bottom mid-read.
+    if (followSessionRef.current !== nextId) {
+      followSessionRef.current = nextId;
+      autoFollowRef.current = true;
+    }
     // Each conversation carries the mode and access level it was last worked in,
     // so switching restores them rather than falling back to Chat.
     //
@@ -916,23 +930,37 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     setRunning(Boolean(run));
   }, [activeId, session?.id, session?.messages, sessionLoading]);
 
-  useEffect(() => {
-    if (!localModelId) {
-      setContextLimit(null);
-      return;
-    }
-    let active = true;
-    invoke<{ context: number }>("local_runtime_settings", { modelId: localModelId }).then((settings) => {
-      if (active) setContextLimit(settings.context);
+  /**
+   * The local model's context size, read from its runtime settings.
+   *
+   * The ring's denominator for a local model comes from here and nowhere else,
+   * so it has to follow the setting rather than being read once when the model
+   * was chosen. Callers are the model changing, a load finishing, and the save
+   * itself (which now says so through `local-model-event`).
+   */
+  const localModelIdRef = useRef(localModelId);
+  localModelIdRef.current = localModelId;
+  const readContextLimit = useCallback((id: string) => {
+    invoke<{ context: number }>("local_runtime_settings", { modelId: id }).then((settings) => {
+      // The model can be switched while the read is in flight; a figure for the
+      // previous one would be a limit the next request does not run at.
+      if (localModelIdRef.current === id) setContextLimit(settings.context);
     }).catch(() => {
       // The composer ring needs a figure to draw against even when the settings
       // read failed. The same default the backend would have used, so the ring
       // does not briefly claim a different limit from the one the model is
       // actually about to run at.
-      if (active) setContextLimit(DEFAULT_CONTEXT);
+      if (localModelIdRef.current === id) setContextLimit(DEFAULT_CONTEXT);
     });
-    return () => { active = false; };
-  }, [localModelId]);
+  }, []);
+
+  useEffect(() => {
+    if (!localModelId) {
+      setContextLimit(null);
+      return;
+    }
+    readContextLimit(localModelId);
+  }, [localModelId, modelRefreshKey, readContextLimit]);
 
   // Learn what the selected remote model supports. A local model keeps its own
   // context setting above and has no capabilities to read.
@@ -1079,18 +1107,23 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       // The position is in physical pixels, and it is the only thing that says
       // *where* the drop was aimed -- the listener is on the whole window.
       const scale = window.devicePixelRatio || 1;
-      const overPanel = isOverRightPanel(payload.position.x / scale, payload.position.y / scale);
+      const x = payload.position.x / scale;
+      const y = payload.position.y / scale;
+      // Anything dropped on another owner's surface is theirs: the Files tree
+      // copies it into the folder under the pointer, and an open Settings dialog
+      // registers a model. Both have their own listeners, and this one is
+      // window-wide, so acting here as well would answer one gesture twice --
+      // which is where "This file type is not supported yet" came from when a
+      // GGUF was dropped on Settings → Local.
+      const claimed = isOverRightPanel(x, y) || isOverOpenDialog(x, y);
       if (payload.type === "drop") {
         setDraggingFiles(false);
-        // A file dropped on the right panel belongs to the panel: the Files tree
-        // copies it into the folder under the pointer through its own listener.
-        // Attaching it to the composer as well would answer one gesture twice.
-        if (!overPanel) void addPaths(payload.paths);
+        if (!claimed) void addPaths(payload.paths);
         return;
       }
-      // No "drop files to attach" overlay while the pointer is over a panel that
-      // is not going to attach anything.
-      if (payload.type === "enter" || payload.type === "over") setDraggingFiles(!overPanel);
+      // No "drop files to attach" overlay while the pointer is over a surface
+      // that is not going to attach anything.
+      if (payload.type === "enter" || payload.type === "over") setDraggingFiles(!claimed);
     });
     return () => { unlistenPromise.then((unlisten) => unlisten()); };
   }, []);
@@ -1804,11 +1837,20 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   }, []);
 
 
-  useEffect(() => {
+  /*
+   * Follow the newest content, but only while the reader is already at the bottom.
+   *
+   * Layout effect rather than an ordinary one so the jump lands in the same paint
+   * as the row that caused it, and `streamActivity` is a dependency because a
+   * tool call grows the thread without touching the text or the reasoning: before
+   * this, only a thinking segment pulled the view along, so a run that called
+   * tools sat one row behind the newest step while the user was at the bottom.
+   */
+  useLayoutEffect(() => {
     const thread = threadRef.current;
     if (!thread) return;
     if (autoFollowRef.current) thread.scrollTop = thread.scrollHeight;
-  }, [messages, streamText, streamReasoning]);
+  }, [messages, streamText, streamReasoning, streamActivity, running]);
 
   const handleThreadScroll = () => {
     const thread = threadRef.current;
@@ -2045,6 +2087,14 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       if (payload.modelId && payload.modelId !== localModelId) return;
       if (payload.kind === "loaded") {
         resumePendingChat();
+        // The server that just came up may be running a different context size
+        // than the one the ring was told about -- a reload is exactly how a
+        // changed setting takes effect, so the figure is read again here.
+        if (localModelId) readContextLimit(localModelId);
+        return;
+      }
+      if (payload.kind === "settings") {
+        if (localModelId) readContextLimit(localModelId);
         return;
       }
       if (payload.kind === "failed") {
@@ -2058,7 +2108,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
       }
     });
     return () => { unlistenPromise.then((unlisten) => unlisten()); };
-  }, [localModelId, onClearNotification, onMessagesChange]);
+  }, [localModelId, readContextLimit, onClearNotification, onMessagesChange]);
 
   // A status check while a load is in flight, as a backstop for an event that
   // never arrives (a process killed from outside, a webview that missed the

@@ -27,11 +27,12 @@ use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::ai::runtime::AiRuntime;
 
 mod client;
+pub mod commands;
 
 /// The port this server listens on.
 ///
@@ -49,6 +50,40 @@ const ALIAS: &str = "projectz-speech";
 
 /// How long a 2 GB model may take to report healthy.
 const READY: Duration = Duration::from_secs(120);
+
+/// The id the panel's log stream and its terminal row carry.
+///
+/// Not a port and not a path: the two other servers in this app already speak
+/// through ids of this shape (`audiocpp`, `audiocpp-wake`), and the panel picks
+/// which command to read logs from by exactly this string.
+pub const SESSION: &str = "speech-model";
+
+/// What the panel keeps, readable after the line arrived.
+///
+/// The same two halves the other servers' logs work in: every line is emitted as
+/// it arrives for an open terminal, and held here so a panel opened afterwards
+/// reads what it missed.
+static LOG_BUFFER: LazyLock<Mutex<Vec<String>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// The bound on that buffer. Long enough for a load's log in full, short enough
+/// that a server left running overnight does not grow the process.
+const MAX_LOG_LINES: usize = 2_000;
+
+/// Unix seconds when this app spawned the server, or nothing.
+///
+/// The same contract the chat model's chip uses: a start this app did not make
+/// has no recoverable time, so it is unknown rather than guessed.
+static SPAWNED_AT: LazyLock<Mutex<Option<i64>>> = LazyLock::new(|| Mutex::new(None));
+
+/// What the panel and the settings pages are told about the server.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Status {
+    pub running: bool,
+    /// The resident model's name, which is what a terminal row is titled after.
+    pub model: Option<String>,
+    pub started_at: Option<i64>,
+}
 
 /// One installed model that can listen, speak, or both.
 ///
@@ -140,18 +175,26 @@ struct Running {
     /// Which model, and which projector, the process was started for -- so a
     /// settings change restarts it instead of silently serving the old weights.
     model: String,
+    /// The name a terminal row is titled after, because a path is not a title.
+    name: String,
     projector: Option<String>,
+    /// Held so `stop` can announce the end without every caller passing one.
+    app: AppHandle,
 }
 
 static SERVER: LazyLock<tokio::sync::Mutex<Option<Running>>> =
     LazyLock::new(|| tokio::sync::Mutex::new(None));
 
-/// Whether a speech server is up right now.
+/// Whether a server is up that is serving this exact model.
 ///
-/// A chat server counts: when it is running the speech model, `/tts` and
-/// `input_audio` are already being served by it.
-pub async fn running() -> bool {
-    client::health_at(PORT).await || client::health_at(CHAT_PORT).await
+/// This is the question "would speaking now cost a cold start", and the old
+/// answer -- _is anything listening_ -- was the wrong one: a healthy chat server
+/// on the other port is not a warm voice, so a reply read aloud with no voice
+/// chosen started a second two-gigabyte model behind the user's back. Asked of
+/// the server's own `/props`, on both ports, because the chat server may be
+/// serving this same file and then there is nothing to start.
+pub async fn serves(model: &SpeechModel) -> bool {
+    client::serves(PORT, &model.path).await || client::serves(CHAT_PORT, &model.path).await
 }
 
 /// The model the running server is serving, if one is.
@@ -167,6 +210,31 @@ pub async fn loaded_model() -> Option<String> {
     // No server of ours: the chat server may be the speech model, which is the
     // common case -- one model that both talks and listens.
     client::props_model(CHAT_PORT).await
+}
+
+/// The server's own record, for the panel's mount probe and the header chip.
+pub async fn status() -> Status {
+    let guard = SERVER.lock().await;
+    match guard.as_ref() {
+        Some(current) => Status {
+            running: true,
+            model: Some(current.name.clone()),
+            started_at: SPAWNED_AT.lock().ok().and_then(|stamp| *stamp),
+        },
+        None => Status {
+            running: false,
+            model: None,
+            started_at: None,
+        },
+    }
+}
+
+/// Everything the server has printed, oldest first.
+pub fn logs() -> Vec<String> {
+    match LOG_BUFFER.lock() {
+        Ok(buffer) => buffer.clone(),
+        Err(_) => Vec::new(),
+    }
 }
 
 /// Starts the server for `model` if it is not already serving those exact files,
@@ -232,22 +300,39 @@ async fn start(app: &AppHandle, model: &SpeechModel) -> Result<u16, String> {
     }
     command
         .stdin(std::process::Stdio::null())
-        // Nothing is drawn from these: the speech server's log is not a surface
-        // this app has, and a piped stdout nobody reads is a deadlock waiting for
-        // the first full buffer.
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        // On a pipe, so the terminal row can show what the engine says -- the
+        // same way `llama-server`'s output reaches the panel. Both streams:
+        // llama.cpp logs a load on stderr, and a failure nobody can read is the
+        // one message this used to be able to produce.
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     crate::child::hide_console_async(&mut command);
 
-    let child = command
+    let mut child = command
         .spawn()
         .map_err(|error| format!("The speech model could not be started: {error}"))?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    // A fresh start begins with an empty panel, whatever the last one printed:
+    // the log belongs to the process it came from.
+    if let Ok(mut buffer) = LOG_BUFFER.lock() {
+        buffer.clear();
+    }
+    if let Some(stdout) = stdout {
+        tauri::async_runtime::spawn(pump_logs(app.clone(), stdout));
+    }
+    if let Some(stderr) = stderr {
+        tauri::async_runtime::spawn(pump_logs(app.clone(), stderr));
+    }
     *SERVER.lock().await = Some(Running {
         child,
         model: model.path.clone(),
+        name: model.name.clone(),
         projector: model.projector.clone(),
+        app: app.clone(),
     });
+    stamp_spawned(app, Some(model.name.as_str()));
 
     let deadline = Instant::now() + READY;
     while Instant::now() < deadline {
@@ -269,8 +354,13 @@ async fn start(app: &AppHandle, model: &SpeechModel) -> Result<u16, String> {
             };
             if let Some(status) = exited {
                 *guard = None;
+                drop(guard);
+                // The row was made when the spawn succeeded, so the end has to be
+                // announced too -- otherwise a failed load leaves a terminal tab
+                // whose process is gone.
+                stamp_spawned(app, None);
                 return Err(format!(
-                    "The speech model stopped while loading ({status}). Check that its engine supports audio models."
+                    "The speech model stopped while loading ({status}). Its log is in the panel's terminal."
                 ));
             }
         }
@@ -280,12 +370,77 @@ async fn start(app: &AppHandle, model: &SpeechModel) -> Result<u16, String> {
     Err("The speech model did not come up in time.".to_string())
 }
 
+/// Records whether a server of this app's is resident, and tells the panel.
+///
+/// The terminal row is created from this event, so the row exists while the
+/// model is still loading rather than only after it answers -- which is exactly
+/// when its log is worth reading.
+fn stamp_spawned(app: &AppHandle, model: Option<&str>) {
+    if let Ok(mut stamp) = SPAWNED_AT.lock() {
+        *stamp = model.map(|_| now_unix_seconds());
+    }
+    let _ = app.emit(
+        "speech-model-state",
+        serde_json::json!({ "running": model.is_some(), "model": model, "session": SESSION }),
+    );
+}
+
+/// Reads one of the server's streams into the log buffer, line by line.
+///
+/// Every line is deferred to the panel and held here, so a terminal opened later
+/// reads what it missed. Blank lines are dropped: a load prints them in runs.
+async fn pump_logs<R>(app: AppHandle, stream: R)
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    use tokio::io::AsyncBufReadExt;
+    let mut reader = tokio::io::BufReader::new(stream);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                let shown = line.trim_end_matches(['\n', '\r']);
+                if shown.is_empty() {
+                    continue;
+                }
+                if let Ok(mut buffer) = LOG_BUFFER.lock() {
+                    buffer.push(shown.to_string());
+                    let excess = buffer.len().saturating_sub(MAX_LOG_LINES);
+                    buffer.drain(0..excess);
+                }
+                let _ = app.emit(
+                    "local-model-log",
+                    serde_json::json!({ "modelId": SESSION, "line": shown }),
+                );
+            }
+        }
+    }
+}
+
+/// Unix seconds, for the one fact the panel cannot get anywhere else: when this
+/// app started the process whose row it is drawing.
+fn now_unix_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Stops the server, if one is running. The cost of an idle 2 GB model is the
 /// reason every release path calls this.
+///
+/// The end is announced as well as the start: the panel made a terminal row for
+/// this process, and a row whose process was stopped from somewhere else -- a
+/// chat model loading, an uninstall -- would otherwise sit there watching a
+/// process that no longer exists.
 pub async fn stop() {
     let mut guard = SERVER.lock().await;
     if let Some(mut current) = guard.take() {
         let _ = current.child.kill().await;
+        drop(guard);
+        stamp_spawned(&current.app, None);
     }
 }
 

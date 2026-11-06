@@ -1859,8 +1859,8 @@ fn prepend_environment(
 /// The token figures a non-streaming reply reported.
 ///
 /// Read from the response to one short internal request -- a title, a taste batch -- where
-/// there is no stream to count events from. The plain [`complete_once`] drops them; taste
-/// keeps them, because a learning run's spend is a figure the user can see.
+/// there is no stream to count events from. A title drops them; taste keeps them, because a
+/// learning run's spend is a figure the user can see.
 ///
 /// Every field is an `Option` because "the provider did not say" and "the provider spent
 /// nothing" are different facts, and the statistics page has to be able to tell them apart:
@@ -1886,28 +1886,19 @@ pub enum Thinking {
     Suppress,
 }
 
-/// Runs one non-streaming completion and returns what it said *and* what it cost.
+/// Runs one non-streaming completion and returns its text, its cost and the
+/// provider's own response.
 ///
-/// The plain [`complete_once`] below is this with the figures dropped, so there is one
-/// implementation of the request and one opinion about where a provider puts its usage.
-pub async fn complete_once_with_usage(
-    endpoint: &Endpoint,
-    model: &str,
-    messages: &[Value],
-    max_tokens: Option<u32>,
-) -> Result<(String, ReportedUsage), String> {
-    let (content, usage, _) =
-        complete_once_raw(endpoint, model, messages, max_tokens, Thinking::Allow).await?;
-    Ok((content, usage))
-}
-
-/// The same request, with the provider's own response kept.
+/// **The payload is kept because two callers need different parts of it.** A
+/// short internal task reads only the text; a caller that has to explain a reply
+/// it could not use needs the raw body, because `reasoning_content` is a
+/// *fallback* for the text and a provider that sent both loses its thinking.
+/// There is one implementation of the request and one opinion about where a
+/// provider puts its usage.
 ///
-/// [`complete_once_with_usage`] keeps only the text and the figures, which is everything a
-/// caller normally wants. This keeps the payload that text was read out of, for a caller
-/// that has to explain a reply it could not use: `reasoning_content` is a *fallback* there,
-/// so a provider that sent both loses its thinking. The request itself is identical, and
-/// there is one implementation of it.
+/// `thinking` is a parameter rather than a constant because the retry of a short
+/// completion turns it off: repeating a request that spent its whole budget
+/// thinking would fail identically (see [`Thinking`]).
 pub async fn complete_once_raw(
     endpoint: &Endpoint,
     model: &str,
@@ -1951,14 +1942,13 @@ pub async fn complete_once_raw(
         .json()
         .await
         .map_err(|error| format!("Invalid response: {error}"))?;
-    // A reasoning model may answer with no content and put its thinking in
-    // `reasoning_content` instead. That is a usable answer, not a failure, so it
-    // is read before giving up.
-    let content = payload["choices"][0]["message"]["content"]
-        .as_str()
-        .or_else(|| payload["choices"][0]["message"]["reasoning_content"].as_str())
-        .unwrap_or_default()
-        .to_string();
+    // The same field hunt the streaming path does, from one function: a provider
+    // may answer with `content` as an array of blocks, put its thinking in
+    // `reasoning` / `reasoning_content` / `thinking` instead, or use the legacy
+    // `choices[0].text`. Reading only a string `content` made a perfectly good
+    // answer look empty -- which is what "unusable title output, raw=<empty>"
+    // was, on a provider whose models do answer.
+    let content = assistant_text(&payload).unwrap_or_default();
     // Read here rather than by each caller, so the one place that knows a provider's shape
     // is the one place that reads its figures -- including the cache token, which several
     // providers spell differently and which `stream_event` already knows how to find.
@@ -1974,24 +1964,144 @@ pub async fn complete_once_raw(
     Ok((content, usage, payload))
 }
 
-/// Runs one non-streaming completion and returns only its text.
+/// The text of a non-streaming answer, from whichever field the provider used.
 ///
-/// Used for short internal tasks such as generating a conversation title, where there is no
-/// UI to stream into and no need for events or tools.
+/// This is the non-streaming twin of [`crate::ai::remote::stream_event::parse_chunk`],
+/// and it exists because providers disagree about where an answer goes:
 ///
-/// `max_tokens` is passed through because an uncapped request lets a reasoning model
-/// deliberate at length before answering, and every token beyond the few words the task
-/// needs is latency the caller waits for. It is an `Option` so a caller with no natural
-/// limit can still omit it.
-pub async fn complete_once(
-    endpoint: &Endpoint,
-    model: &str,
-    messages: &[Value],
-    max_tokens: Option<u32>,
-) -> Result<String, String> {
-    complete_once_with_usage(endpoint, model, messages, max_tokens)
-        .await
-        .map(|(content, _usage)| content)
+/// - `choices[0].message.content` may be a string **or** an array of content
+///   blocks (`[{"type":"text","text":"…"}]`).
+/// - A reasoning model may leave `content` empty and answer in `reasoning`
+///   (OpenRouter), `reasoning_content` (DeepSeek) or `thinking` (several
+///   gateways), each of which may again be a string or blocks.
+/// - Some gateways still use the legacy `choices[0].text`.
+///
+/// `content` wins when it has any text, so a model that produced both a real
+/// answer and its thinking is read from the answer. Only an empty or absent
+/// `content` falls through to the thinking, which is the same rule the streaming
+/// path uses.
+fn assistant_text(payload: &Value) -> Option<String> {
+    let message = payload.pointer("/choices/0/message");
+    let content = message
+        .and_then(|message| message.get("content"))
+        .and_then(text_value)
+        .filter(|text| !text.trim().is_empty());
+    if content.is_some() {
+        return content;
+    }
+    for key in [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details",
+        "thinking",
+    ] {
+        let text = message
+            .and_then(|message| message.get(key))
+            .and_then(text_value)
+            .filter(|text| !text.trim().is_empty());
+        if text.is_some() {
+            return text;
+        }
+    }
+    payload
+        .pointer("/choices/0/text")
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_owned)
+}
+
+/// A provider value that may be a string or an array of text-bearing blocks.
+fn text_value(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(text.to_string());
+    }
+    let blocks = value.as_array()?;
+    let joined: String = blocks
+        .iter()
+        .filter_map(|block| {
+            block
+                .get("text")
+                .and_then(Value::as_str)
+                .or_else(|| block.get("content").and_then(Value::as_str))
+        })
+        .collect();
+    (!joined.trim().is_empty()).then_some(joined)
+}
+
+#[cfg(test)]
+mod answer_text_tests {
+    use super::assistant_text;
+    use serde_json::json;
+
+    /// The ordinary OpenAI shape.
+    #[test]
+    fn reads_a_plain_content_string() {
+        let body = json!({ "choices": [{ "message": { "content": "A plain title" } }] });
+        assert_eq!(assistant_text(&body), Some("A plain title".to_string()));
+    }
+
+    /// A content array, which several gateways return for the same answer.
+    #[test]
+    fn joins_content_blocks() {
+        let body = json!({ "choices": [{ "message": { "content": [
+            { "type": "text", "text": "A plain " },
+            { "type": "text", "text": "title" }
+        ] } }] });
+        assert_eq!(assistant_text(&body), Some("A plain title".to_string()));
+    }
+
+    /// A thinking model that left `content` empty. Each spelling a provider uses
+    /// is read, because the one we did not read is why a title looked empty.
+    #[test]
+    fn falls_back_to_every_reasoning_spelling() {
+        for key in ["reasoning", "reasoning_content", "thinking"] {
+            let body = json!({ "choices": [{ "message": { "content": "", key: "A title" } }] });
+            assert_eq!(
+                assistant_text(&body),
+                Some("A title".to_string()),
+                "field {key}"
+            );
+        }
+    }
+
+    /// OpenRouter's structured reasoning blocks.
+    #[test]
+    fn reads_reasoning_detail_blocks() {
+        let body = json!({ "choices": [{ "message": {
+            "content": null,
+            "reasoning_details": [
+                { "type": "reasoning.text", "text": "A title" }
+            ]
+        } }] });
+        assert_eq!(assistant_text(&body), Some("A title".to_string()));
+    }
+
+    /// A real answer wins over the thinking that led to it.
+    #[test]
+    fn prefers_content_over_reasoning() {
+        let body = json!({ "choices": [{ "message": {
+            "content": "The answer",
+            "reasoning": "The thinking"
+        } }] });
+        assert_eq!(assistant_text(&body), Some("The answer".to_string()));
+    }
+
+    /// The legacy completions shape, which some gateways still return.
+    #[test]
+    fn reads_the_legacy_completion_shape() {
+        let body = json!({ "choices": [{ "text": "A legacy title" }] });
+        assert_eq!(assistant_text(&body), Some("A legacy title".to_string()));
+    }
+
+    /// Nothing anywhere is an empty answer, not a panic.
+    #[test]
+    fn an_empty_answer_is_none() {
+        assert_eq!(assistant_text(&json!({})), None);
+        assert_eq!(
+            assistant_text(&json!({ "choices": [{ "message": { "content": "  " } }] })),
+            None
+        );
+    }
 }
 
 fn prepare_messages(

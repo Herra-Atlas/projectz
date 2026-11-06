@@ -4,7 +4,8 @@ import { Keyboard, X } from "lucide-react";
 
 import type { Notify } from "../../features/notifications/types";
 import type { Keybinds } from "../../features/keybinds/types";
-import { SettingsPageTitle, SettingRow, SettingsSection } from "../SettingsSection";
+import type { GeneralSettings } from "../../features/settings/generalSettings";
+import { SettingsPageTitle, SettingRow, SettingsSection, Segmented } from "../SettingsSection";
 
 /**
  * The shortcuts the operating system owns.
@@ -18,7 +19,14 @@ import { SettingsPageTitle, SettingRow, SettingsSection } from "../SettingsSecti
  * accelerator the OS refuses fails right here, at the field, rather than on the
  * next press when the user is trying to talk.
  */
-export function KeybindsPage({ notify }: { notify: Notify }) {
+type KeybindsPageProps = {
+  notify: Notify;
+  /** The key that sends the draft. Changed here, beside the other shortcuts. */
+  sendWith: GeneralSettings["sendWith"];
+  onSendWithChange: (sendWith: GeneralSettings["sendWith"]) => void;
+};
+
+export function KeybindsPage({ notify, sendWith, onSendWithChange }: KeybindsPageProps) {
   const [keybinds, setKeybinds] = useState<Keybinds | null>(null);
   const [capturing, setCapturing] = useState(false);
 
@@ -49,6 +57,18 @@ export function KeybindsPage({ notify }: { notify: Notify }) {
       <SettingsPageTitle>
         <h2 className="text-[17px] font-semibold tracking-tight">Keybinds</h2>
       </SettingsPageTitle>
+
+      <SettingsSection title="Composer">
+        {/* Lives here rather than on General because it is a key, not a general
+            preference: the answer to "what sends my message" belongs beside the
+            other shortcuts, in one place the user can look. */}
+        <SettingRow
+          anchor="keybinds.sendWith"
+          label="Send with"
+          description="Which key sends the draft. Hold the other modifier to add a line break instead."
+          control={<Segmented label="Send with" value={sendWith} options={["Enter", "Ctrl + Enter"]} onChange={(value) => onSendWithChange(value as GeneralSettings["sendWith"])} />}
+        />
+      </SettingsSection>
 
       <SettingsSection title="Voice">
         <SettingRow

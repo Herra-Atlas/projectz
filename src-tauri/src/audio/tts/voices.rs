@@ -62,6 +62,11 @@ pub struct VoiceEntry {
 pub async fn list(app: Option<&tauri::AppHandle>) -> Vec<VoiceEntry> {
     let mut entries = Vec::new();
     collect(&models_root().join("tts"), &mut entries);
+    // Asked once for the whole list, not once per voice: the server either is
+    // running or is not, and a per-row probe was one HTTP round trip per file --
+    // which is most of what made this page slow with a large library.
+    let audio_running =
+        crate::audio::audiocpp::running(crate::audio::audiocpp::Purpose::Speech).await;
     for model in super::audiocpp::voices() {
         let sample_rate = super::audiocpp::known_rate(&model.path.display().to_string()).await;
         entries.push(VoiceEntry {
@@ -70,7 +75,7 @@ pub async fn list(app: Option<&tauri::AppHandle>) -> Vec<VoiceEntry> {
             sample_rate,
             size: model.size,
             engine: "audiocpp".to_string(),
-            loaded: crate::audio::audiocpp::running(crate::audio::audiocpp::Purpose::Speech).await,
+            loaded: audio_running,
         });
     }
     // One entry per speech model, not one per language or voice: the model is

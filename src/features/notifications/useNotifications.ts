@@ -24,7 +24,7 @@ const SWEEP_MS = 250;
 export function useNotifications() {
   const [notifications, setNotifications] = useState<Notification[]>([]);
 
-  const notify = useCallback<Notify>((tone, message, key) => {
+  const notify = useCallback<Notify>((tone, message, key, progress) => {
     const notification: Notification = {
       id: Date.now() + Math.random(),
       key,
@@ -32,6 +32,7 @@ export function useNotifications() {
       message,
       anchor: "corner",
       expiresAt: tone === "loading" ? null : Date.now() + EXPIRY_MS,
+      progress: progress ?? null,
     };
     setNotifications((current) => [
       ...current.filter((item) =>

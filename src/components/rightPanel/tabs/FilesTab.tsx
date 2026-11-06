@@ -95,6 +95,20 @@ export default function FilesTab({ workspace, skill = null, onCloseSkill, reques
     setPreview(null);
   }, []);
 
+  /**
+   * Opens one more file in the preview, by path relative to the open root.
+   *
+   * Used by the Markdown preview for its links: the target is very often a file
+   * inside a folder nobody expanded, so it is handed over as a synthetic entry
+   * exactly as an outside request is -- `FilePreview` reads by path and never
+   * looks the row up in the tree. The root is stamped by `showPreview`, so a link
+   * behaves like a row click: switching roots clears it like anything else.
+   */
+  const openRelativePath = useCallback((path: string) => {
+    const name = path.slice(path.lastIndexOf("/") + 1);
+    showPreview({ name, path, isDir: false, hasChildren: false });
+  }, [showPreview]);
+
   /** The right-click being answered, or null. `target: null` is the blank space. */
   const [menu, setMenu] = useState<{ point: { x: number; y: number }; target: TreeEntry | null } | null>(null);
   /** The one rename or create field currently open, or null. */
@@ -506,7 +520,7 @@ export default function FilesTab({ workspace, skill = null, onCloseSkill, reques
   // skill's `assets/` is read through the same bytes command, and that command
   // needs to know which root the path is relative to.
   if (preview) {
-    return <FilePreview entry={preview} workspace={workspace} skill={skill} onBack={closePreview} onPreviewInBrowser={onPreviewInBrowser} onNotify={onNotify} />;
+    return <FilePreview entry={preview} workspace={workspace} skill={skill} onBack={closePreview} onPreviewInBrowser={onPreviewInBrowser} onOpenRelativePath={openRelativePath} onNotify={onNotify} />;
   }
 
   if (!workspace && !skill) {

@@ -1603,6 +1603,7 @@ pub fn local_path_exists(path: String) -> bool {
 
 #[tauri::command]
 pub fn local_runtime_settings_save(
+    app: AppHandle,
     runtime: State<'_, AiRuntime>,
     model_id: String,
     mut settings: crate::ai::local::LocalRuntimeSettings,
@@ -1623,9 +1624,18 @@ pub fn local_runtime_settings_save(
             ));
         }
     }
-    runtime
+    let saved = runtime
         .local_models()
-        .save_runtime_settings(&model_id, settings)
+        .save_runtime_settings(&model_id, settings)?;
+    // The composer draws the ring's limit from this record, and the chat page is
+    // mounted for the life of the window: without a word from the writer it kept
+    // the context size it read when the model was selected, so a changed setting
+    // looked ignored until the app restarted.
+    let _ = app.emit(
+        "local-model-event",
+        serde_json::json!({"kind": "settings", "modelId": model_id}),
+    );
+    Ok(saved)
 }
 
 /// The argument list these settings produce, so the page can show it as one line.
@@ -1700,6 +1710,21 @@ pub fn local_models_add(
     path: String,
 ) -> Result<crate::ai::local::LocalModel, String> {
     runtime.local_models().add(path)
+}
+
+/// Registers every file from one drop, reporting progress as it goes.
+///
+/// Separate from `local_models_add` because a batch is not a single add repeated:
+/// the work runs off the main thread, each file reports its own outcome through
+/// `local-model-add-progress`, and one duplicate does not discard the rest.
+#[tauri::command]
+pub async fn local_models_add_many(
+    app: AppHandle,
+    runtime: State<'_, AiRuntime>,
+    paths: Vec<String>,
+    engine_id: Option<String>,
+) -> Result<usize, String> {
+    crate::ai::local::import::add_many(app, runtime.local_models(), paths, engine_id).await
 }
 
 #[tauri::command]

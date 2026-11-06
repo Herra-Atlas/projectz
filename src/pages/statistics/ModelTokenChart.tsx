@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { Legend, Line, LineChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { formatTokens } from "../../features/chat/sessionStats";
 import { modelLabel, type ModelNames } from "../../features/statistics/modelLabels";
@@ -25,6 +26,64 @@ function rankModels(rows: ModelBucket[]): string[] {
     totals.set(row.model_id, (totals.get(row.model_id) ?? 0) + row.completion_tokens);
   }
   return [...totals.entries()].sort((a, b) => b[1] - a[1]).map(([model]) => model);
+}
+
+/** What Recharts hands a custom tooltip, narrowed to what this chart reads. */
+type TooltipProps = {
+  active?: boolean;
+  label?: ReactNode;
+  payload?: ReadonlyArray<{ payload?: Record<string, number | string> }>;
+};
+
+/**
+ * The hover card for the per-model chart.
+ *
+ * **Only models that spent something in this bucket are listed.** A model that
+ * ranked over the whole period still has a zero column in every bucket it did
+ * not appear in, and printing `in 0 · out 0 · 0 req` for each of those buried
+ * the models the reader was actually looking for. Filtering happens here rather
+ * than in the data because a missing column would break the line series.
+ *
+ * The figure leads with the **total**, which is what the chart plots, then the
+ * input/output split and the request count. Before this the card showed only the
+ * split, so the number the line was drawing had to be added up by hand.
+ */
+function ModelTooltip({ active, label, payload, labels, models }: TooltipProps & { labels: Map<string, string>; models: string[] }) {
+  if (!active || !payload?.length) return null;
+  const point = payload[0]?.payload;
+  if (!point) return null;
+  const entries = models
+    .map((model) => ({
+      model,
+      total: Number(point[model] ?? 0),
+      input: Number(point[`${model}__in`] ?? 0),
+      output: Number(point[`${model}__out`] ?? 0),
+      requests: Number(point[`${model}__req`] ?? 0),
+    }))
+    .filter((entry) => entry.total > 0)
+    .sort((left, right) => right.total - left.total);
+  if (entries.length === 0) return null;
+  return (
+    <div className="rounded-lg border border-[var(--line)] bg-[var(--rail)] px-2.5 py-2 shadow-[0_10px_30px_-18px_rgba(0,0,0,0.6)]">
+      <p className="mb-1 text-[11px] text-[var(--muted)]">{label}</p>
+      <ul className="flex flex-col gap-1.5">
+        {entries.map((entry) => (
+          <li key={entry.model}>
+            <span className="flex items-center gap-1.5 text-[12px] text-[var(--text)]">
+              <span
+                className="size-2 shrink-0 rounded-full"
+                style={{ background: SERIES_COLORS[models.indexOf(entry.model) % SERIES_COLORS.length] }}
+              />
+              {labels.get(entry.model) ?? entry.model}
+            </span>
+            <span className="block pl-3.5 text-[11px] tabular-nums text-[var(--muted)]">
+              Total {formatTokens(entry.total)} · in {formatTokens(entry.input)} · out {formatTokens(entry.output)} · {entry.requests.toLocaleString()} req
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 
 type ModelTokenChartProps = {
@@ -115,26 +174,11 @@ export default function ModelTokenChart({ timeline, axis, names }: ModelTokenCha
           <Tooltip
             cursor={{ stroke: "var(--line)" }}
             isAnimationActive={false}
-            contentStyle={{
-              background: "var(--rail)",
-              border: "1px solid var(--line)",
-              borderRadius: 8,
-              fontSize: 12,
-            }}
-            labelStyle={{ color: "var(--muted)" }}
-            formatter={(value, name, item) => {
-              const model = String(name);
-              // The row the pointer is over, so the hovered model's split can be
-              // read without adding three series per model to the chart.
-              const row = item?.payload as Record<string, number | string> | undefined;
-              const input = row?.[`${model}__in`];
-              const output = row?.[`${model}__out`];
-              const requests = row?.[`${model}__req`];
-              const detail = typeof input === "number" && typeof output === "number" && typeof requests === "number"
-                ? `in ${formatTokens(input)} · out ${formatTokens(output)} · ${requests.toLocaleString()} req`
-                : formatTokens(Number(value));
-              return [detail, labels.get(model) ?? model];
-            }}
+            // A custom card rather than `formatter`: Recharts renders one entry
+            // per series on the row, and there is no way to drop an entry from
+            // the formatter alone. The card also says the total and keeps the
+            // series colours, which the formatter could not.
+            content={(props) => <ModelTooltip {...(props as unknown as TooltipProps)} labels={labels} models={models} />}
           />
           <Legend
             verticalAlign="bottom"

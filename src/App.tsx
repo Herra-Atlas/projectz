@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
@@ -28,6 +28,7 @@ import { loadGeneralSettings } from "./features/settings/generalSettings";
 import { loadNotificationSettings } from "./features/notifications/settings";
 import { createPortal } from "react-dom";
 import type { ChatMessage, SessionActivity, SessionRunStatus } from "./features/chat/types";
+import type { ModelSelection } from "./features/models/types";
 import type { WorkingMode } from "./features/chat/chatMode";
 import "./App.css";
 
@@ -45,7 +46,7 @@ function PageFallback() {
 }
 
 type LocalRuntimeStatus = { loaded_model_id: string | null; loading_model_id: string | null; selected_model_id: string | null; base_url: string; started_at: number | null };
-type LocalModelEvent = { kind: "loading" | "loaded" | "failed" | "unloaded"; modelId?: string; modelPath?: string; message?: string };
+type LocalModelEvent = { kind: "loading" | "loaded" | "failed" | "unloaded" | "settings"; modelId?: string; modelPath?: string; message?: string };
 type StartupProgress = { phase: string; message: string; progress: number };
 
 /**
@@ -134,6 +135,24 @@ function AppShell() {
   // Preferences live here so the chat view and the settings modal always agree
   // on the title-model choice without one re-reading a stale copy.
   const { preferences, savePreferences } = usePreferences(startupDone);
+  /**
+   * The chain that names a new conversation.
+   *
+   * The configured chain wins. With none configured it falls back to the model
+   * already answering the chat, because an empty list was the commonest reason
+   * titles never appeared at all -- and one tiny completion is a better answer
+   * than a sidebar full of opening prompts.
+   *
+   * Memoised on purpose: `useSessionTitle` clears its "already named" marks
+   * whenever this array's identity changes, so a fresh literal per render would
+   * re-name every conversation on every keystroke.
+   */
+  const titleModels: ModelSelection[] = useMemo(() => {
+    if (preferences.sessionTitleModels.length > 0) return preferences.sessionTitleModels;
+    if (localModelId) return [{ localModelId }];
+    if (endpointId && model) return [{ endpointId, model }];
+    return [];
+  }, [preferences.sessionTitleModels, localModelId, endpointId, model]);
   // Theme and accent, applied to the document element rather than passed to the
   // tree: every screen already reads the tokens they set, so this is what makes
   // the change cover surfaces this component has never heard of.
@@ -277,6 +296,10 @@ function AppShell() {
         } else if (payload.kind === "loaded") {
           setLocalRuntime((current) => ({ ...current, loaded_model_id: payload.modelId ?? null, loading_model_id: null }));
           notify("success", "Local model ready");
+        } else if (payload.kind === "settings") {
+          // The runtime record moved, not the process. The chat page's context
+          // ring re-reads the figure from this event; the loader's own state is
+          // untouched, and must not be cleared as if a load had failed.
         } else if (payload.kind === "unloaded") {
           setLocalRuntime((current) => ({ ...current, loaded_model_id: null, loading_model_id: null, started_at: null }));
           setResidentServers((current) => ({ ...current, llama: null, llamaStartedAt: null }));
@@ -746,7 +769,7 @@ function AppShell() {
           // panel is told which run and opens itself; the id travels as a request
           // rather than as a second piece of panel state held here.
           onOpenSubAgent={(agentId) => setSubagentRequest({ id: agentId, key: Date.now() })}
-          titleModels={preferences.sessionTitleModels}
+          titleModels={titleModels}
           onAutoTitle={chat.setAutoTitle}
           workspaceRoot={workspaces.selected}
           // Reopening a conversation restores the folder it was working in. The

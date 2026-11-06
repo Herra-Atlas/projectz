@@ -14,6 +14,7 @@ use tauri::{AppHandle, Emitter};
 
 pub mod device;
 pub mod engines;
+pub mod import;
 pub mod memory;
 pub mod parser;
 mod settings;
@@ -176,6 +177,14 @@ struct ProcessState {
     /// nothing is loaded, so nothing was loaded for a job.
     loaded_for_job: bool,
     logs: VecDeque<String>,
+    /// The argument list this process was started with.
+    ///
+    /// Kept so a second Load of the model that is already running can tell
+    /// "nothing changed" from "the settings changed while it was up". Without
+    /// it the early return below was unconditional, so editing the context size
+    /// and pressing Load did nothing: the server kept the `--ctx-size` it was
+    /// started with, and the composer's ring kept saying the old figure.
+    started_args: Vec<String>,
 }
 
 pub struct LocalModelManager {
@@ -375,8 +384,14 @@ impl LocalModelManager {
             hears_audio: None,
             speaks: None,
         };
+        // The stored rows, not `list()`: a duplicate is a path comparison, and
+        // `list()` inspects every registered model -- a `stat` and up to two
+        // header reads each. Dropping a folder of models re-ran that whole
+        // library scan once per file, which is most of why an import of ten
+        // models took minutes. The path is persisted, so the cheap read answers
+        // exactly the same question.
         if self
-            .list()
+            .stored()
             .iter()
             .any(|existing| existing.path == model.path)
         {
@@ -545,7 +560,13 @@ impl LocalModelManager {
             return Err("The GGUF file is no longer available at its saved path".to_string());
         }
         let mut process = self.process.lock().unwrap();
-        if process.loaded_model_id.as_deref() == Some(&id) {
+        // A load of the model that is already running is only a no-op when the
+        // arguments it was started with still match the settings. A changed
+        // context size, template or flag is a different server, so it restarts
+        // -- the same rule `unload_if_loaded` applies to a changed engine.
+        let settings = self.runtime_settings(&id);
+        let args = settings.effective_args();
+        if process.loaded_model_id.as_deref() == Some(&id) && process.started_args == args {
             return Ok(());
         }
         stop_process(&mut process);
@@ -571,7 +592,6 @@ impl LocalModelManager {
         let runtime_dir = runtime_dir.clone();
         let model_id = id.clone();
         let model_path = model.path.clone();
-        let settings = self.runtime_settings(&id);
         // A projector that has been moved or deleted since it was chosen would
         // otherwise start a server that dies on first request with a message
         // about a file the settings page still shows as configured.
@@ -586,6 +606,8 @@ impl LocalModelManager {
         }
         process.loading_model_id = Some(id.clone());
         process.logs.clear();
+        // Recorded with the spawn so the next Load can compare against it.
+        process.started_args = args.clone();
         let mut command = Command::new(server);
         command
             .current_dir(&runtime_dir)
@@ -598,7 +620,7 @@ impl LocalModelManager {
             .arg("--port")
             .arg(SERVER_PORT.to_string())
             .arg("--no-webui")
-            .args(settings.effective_args())
+            .args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         // llama-server is a console program, and a packaged build has no console
@@ -755,6 +777,7 @@ fn stop_process(process: &mut ProcessState) {
     process.loading_model_id = None;
     process.started_at = None;
     process.loaded_for_job = false;
+    process.started_args.clear();
 }
 
 /// Unix seconds, for the one fact the frontend cannot get anywhere else: when

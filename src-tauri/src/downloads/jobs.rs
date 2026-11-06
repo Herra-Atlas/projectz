@@ -49,6 +49,14 @@ pub struct JobView {
     /// Bytes per second, smoothed. Zero when nothing is moving.
     pub speed: u64,
     pub error: Option<String>,
+    /// Whole seconds the job took, stamped when it reaches a terminal state.
+    ///
+    /// `None` while it is running or paused, because a duration that keeps
+    /// moving is just the row's clock and the progress row already has one.
+    /// Measured from the moment the job was added, so a pause is included in
+    /// the figure: this answers "how long has this taken", not "how many
+    /// seconds was it moving".
+    pub elapsed: Option<u64>,
 }
 
 /// What a running stream checks between chunks.
@@ -124,6 +132,8 @@ struct Job {
     view: JobView,
     flags: std::sync::Arc<Flags>,
     meter: Meter,
+    /// When this job's life began, for the duration its finished row states.
+    started: Instant,
 }
 
 pub struct Jobs(Mutex<Vec<Job>>);
@@ -179,9 +189,11 @@ impl Jobs {
                     total: None,
                     speed: 0,
                     error: None,
+                    elapsed: None,
                 },
                 flags: std::sync::Arc::clone(&flags),
                 meter: Meter::new(),
+                started: Instant::now(),
             },
         );
         (id, flags)
@@ -231,6 +243,12 @@ impl Jobs {
         job.view.error = error;
         if state != JobState::Done {
             job.view.speed = 0;
+        }
+        // The one place a duration can be stated: every terminal transition goes
+        // through here, and the clock is read once rather than on each render.
+        // A paused job is not finished, so it is left without one.
+        if matches!(state, JobState::Done | JobState::Stopped | JobState::Failed) {
+            job.view.elapsed = Some(job.started.elapsed().as_secs());
         }
     }
 

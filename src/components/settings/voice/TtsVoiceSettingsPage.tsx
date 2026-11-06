@@ -4,6 +4,7 @@ import { LoaderCircle, Play } from "lucide-react";
 
 import { SettingsPageTitle } from "../../SettingsSection";
 import { formatBytes } from "../../../features/downloads/format";
+import { loadTtsVoices } from "../../../features/tts/voiceList";
 import type { Notify } from "../../../features/notifications/types";
 import type { VoiceEntry, VoiceSpeed } from "../../../features/tts/types";
 import { useVoiceTest } from "../../../features/tts/useVoiceTest";
@@ -33,7 +34,7 @@ export function TtsVoiceSettingsPage({
   const load = useCallback(async () => {
     try {
       const [list, pace] = await Promise.all([
-        invoke<VoiceEntry[]>("tts_voices"),
+        loadTtsVoices(),
         invoke<VoiceSpeed>("tts_speed", { voice }),
       ]);
       setSpeed(pace);

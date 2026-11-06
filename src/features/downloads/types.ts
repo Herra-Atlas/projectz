@@ -60,6 +60,12 @@ export type DownloadJob = {
   /** Bytes per second, smoothed. Zero when nothing is moving. */
   speed: number;
   error: string | null;
+  /**
+   * Whole seconds the job took, once it has finished; null while it is still
+   * moving or paused. Read from the backend rather than counted here, because a
+   * job can start before this page is opened.
+   */
+  elapsed: number | null;
 };
 
 /** A row is identified by what it installs, not by its position in the list. */

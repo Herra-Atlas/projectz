@@ -5,6 +5,7 @@ import { Check, Download, LoaderCircle, Settings2, Trash2, Volume2 } from "lucid
 
 import { useBuiltinEngines } from "../../../features/audio/useBuiltinEngines";
 import { formatBytes } from "../../../features/downloads/format";
+import { cachedTtsVoices, loadTtsVoices, subscribeTtsVoices } from "../../../features/tts/voiceList";
 import type { Notify } from "../../../features/notifications/types";
 import type { TtsSettings, VoiceEntry } from "../../../features/tts/types";
 import { HoldToDelete } from "../../HoldToDelete";
@@ -39,7 +40,9 @@ export function SpeechSynthesisList({
   onOpenEngines: () => void;
   notify: Notify;
 }) {
-  const [voices, setVoices] = useState<VoiceEntry[] | null>(null);
+  // `null` until the shared list has been read once: a page opened after that
+  // draws its rows on the first frame rather than flashing "No voices yet".
+  const [voices, setVoices] = useState<VoiceEntry[] | null>(cachedTtsVoices);
   const [settings, setSettings] = useState<TtsSettings | null>(null);
   // A voice cannot speak before its engine exists, so the header's action is
   // chosen by the folder probe rather than always being "Download voice". That
@@ -47,24 +50,30 @@ export function SpeechSynthesisList({
   // with no `piper.exe` and no way to notice.
   const engines = useBuiltinEngines((message) => notify("error", message));
 
-  const refresh = useCallback(async () => {
+  useEffect(() => subscribeTtsVoices(setVoices), []);
+
+  const refresh = useCallback(async (force = false) => {
     try {
-      const [list, stored] = await Promise.all([
-        invoke<VoiceEntry[]>("tts_voices"),
+      // The list may come from the cache; `force` is for a delete or a load that
+      // changed it. `tts_settings` is a database read, so it is always asked.
+      const [, stored] = await Promise.all([
+        loadTtsVoices(force),
         invoke<TtsSettings>("tts_settings"),
       ]);
-      setVoices(list);
       setSettings(stored);
     } catch (reason) {
-      setVoices([]);
+      setVoices((current) => current ?? []);
       notify("error", `Could not read the voices: ${String(reason)}`);
     }
   }, [notify]);
 
   // Re-read on mount: this component is replaced while another page is open, so
-  // coming back from a download is a fresh mount rather than a stale list.
+  // coming back from a download is a fresh mount rather than a stale list. The
+  // cached rows are already on screen, so this is a correction, not a wait --
+  // and it is forced because a voice's `loaded` flag moves when a speech model
+  // starts, which a page opened afterwards has to see.
   useEffect(() => {
-    void refresh();
+    void refresh(true);
   }, [refresh]);
 
   // A speech model becomes the voice the moment it loads, which happens on the
@@ -74,7 +83,7 @@ export function SpeechSynthesisList({
     let live = true;
     let stop: (() => void) | undefined;
     void listen("tts-voice-changed", () => {
-      if (live) void refresh();
+      if (live) void refresh(true);
     }).then((unlisten) => {
       if (live) stop = unlisten;
       else unlisten();
@@ -115,7 +124,7 @@ export function SpeechSynthesisList({
       );
       // Re-read both: deleting the selected voice moves the selection back to the
       // built-in one, and the tick has to show where it actually went.
-      await refresh();
+      await refresh(true);
       void emit("tts-voice-changed").catch(() => undefined);
       notify("success", `${voice.name} deleted`);
     } catch (reason) {
@@ -124,9 +133,10 @@ export function SpeechSynthesisList({
   };
 
   const selected = settings?.voice ?? null;
-  const piper = (voices ?? []).filter((voice) => voice.engine === "piper");
-  const audiocpp = (voices ?? []).filter((voice) => voice.engine === "audiocpp");
-  const speech = (voices ?? []).filter((voice) => voice.engine === "llamacpp");
+  const known = voices ?? [];
+  const piper = known.filter((voice) => voice.engine === "piper");
+  const audiocpp = known.filter((voice) => voice.engine === "audiocpp");
+  const speech = known.filter((voice) => voice.engine === "llamacpp");
   const enginesKnown = engines.engines !== null;
   const piperInstalled = engines.installed("piper");
   const audiocppInstalled = engines.installed("audiocpp");
@@ -181,7 +191,11 @@ export function SpeechSynthesisList({
         onRemove={removeVoice}
         onSettings={(voice) => onVoiceSettings(voice, "piper")}
         anchor="tts.voices"
-        empty="No Piper voices yet. Download one, or add an .onnx voice you already have."
+        empty={
+          voices === null
+            ? null
+            : "No Piper voices yet. Download one, or add an .onnx voice you already have."
+        }
       />
 
       {/* audio.cpp's voices, which arrive through the same registry once the
@@ -216,7 +230,11 @@ export function SpeechSynthesisList({
         onRemove={removeVoice}
         onSettings={(voice) => onVoiceSettings(voice, "audiocpp")}
         anchor="tts.voicesAudiocpp"
-        empty="No audio.cpp voices yet. Download one from the audio.cpp models page."
+        empty={
+          voices === null
+            ? null
+            : "No audio.cpp voices yet. Download one from the audio.cpp models page."
+        }
       />
 
       {/* A speech model is one GGUF that speaks in every language it knows, so
@@ -243,7 +261,7 @@ export function SpeechSynthesisList({
             onChoose={choose}
             onSettings={(voice) => onVoiceSettings(voice, "llamacpp")}
             anchor="tts.voicesLlama"
-            empty=""
+            empty={null}
           />
         </>
       )}
@@ -323,7 +341,13 @@ function VoiceList({
   onRemove?: (voice: VoiceEntry) => void;
   onSettings: (voice: string) => void;
   anchor: string;
-  empty: string;
+  /**
+   * What the section says when it has no rows, or `null` to say nothing.
+   *
+   * `null` is "there is nothing to report yet": while the shared list is still
+   * being read, an empty section is not an empty library.
+   */
+  empty: string | null;
 }) {
   return (
     <div className="mb-3 ml-[2.75rem] border-l border-[var(--line)] py-1 pl-3" {...{ [ANCHOR_ATTRIBUTE]: anchor }}>
@@ -380,7 +404,9 @@ function VoiceList({
       })}
       {/* Nothing from this engine, while the other may carry some -- so the
           sentence is per section rather than page-wide. */}
-      {voices.length === 0 && <p className="py-2 text-xs text-[var(--quiet)]">{empty}</p>}
+      {empty !== null && voices.length === 0 && (
+        <p className="py-2 text-xs text-[var(--quiet)]">{empty}</p>
+      )}
     </div>
   );
 }

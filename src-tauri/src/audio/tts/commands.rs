@@ -175,15 +175,24 @@ pub async fn tts_voice_warm(
     voice: Option<String>,
 ) -> Result<bool, String> {
     let settings = TtsSettings::load(&database);
-    let target = voice.or_else(|| settings.voice.clone());
-    match voices::resolve(Some(&app), target.as_deref()).await {
+    // **A voice nobody chose is never warm.** `voices::resolve` falls back to the
+    // first installed speech model when nothing is stored, so an unattended read
+    // used to treat "there is a model on disk" as "the user asked to hear this",
+    // and a finished reply started a two-gigabyte server the user had never
+    // selected. Asking for a voice is the only thing that makes one ready.
+    let Some(target) = voice.or_else(|| settings.voice.clone()) else {
+        return Ok(false);
+    };
+    match voices::resolve(Some(&app), Some(&target)).await {
         Ok(Speaking::Piper(_)) => Ok(true),
         Ok(Speaking::Audiocpp(_)) => {
             Ok(crate::audio::audiocpp::running(crate::audio::audiocpp::Purpose::Speech).await)
         }
-        // A speech model is a server like audio.cpp's: whether speaking now would
-        // cost a cold start is whether that server is already up.
-        Ok(Speaking::Llamacpp(_)) => Ok(crate::audio::speech::running().await),
+        // A speech model is a server, so "warm" is whether *that model* is
+        // already being served. Asking whether anything was listening on the
+        // chat port answered a different question -- the chat model is not this
+        // voice -- which is how a cold 2 GB load was reported as ready.
+        Ok(Speaking::Llamacpp(model)) => Ok(crate::audio::speech::serves(&model).await),
         Err(_) => Ok(false),
     }
 }

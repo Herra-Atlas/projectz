@@ -137,9 +137,13 @@ export type WebSearchOutput = {
   results: { title: string; url: string; snippet: string }[];
 };
 
-/** One of the three payloads `local-model-event` carries. */
+/** One of the payloads `local-model-event` carries. */
 export type LocalModelEvent = {
-  kind: "loading" | "loaded" | "failed";
+  /**
+   * `settings` is the runtime record being saved: the composer's context ring is
+   * drawn from that record, so a save has to reach the page that reads it.
+   */
+  kind: "loading" | "loaded" | "failed" | "settings";
   modelId?: string;
   message?: string;
 };

@@ -15,6 +15,39 @@ import { type PanelViewId, usePanelViews } from "../../features/rightPanel/usePa
 import { clampPanelWidth, maxPanelWidth, MIN_PANEL_WIDTH } from "../../features/rightPanel/useRightPanel";
 
 /**
+ * The terminal session id of the GGUF speech server (`llama-server` on 43124).
+ *
+ * The same string the backend puts on its log lines and its state event, so a
+ * row, its output and the process it stands for are one name.
+ */
+const SPEECH_SESSION = "speech-model";
+
+/** The two audio.cpp servers, and the purpose each one's process serves. */
+type AudioPurpose = "speech" | "wake";
+const AUDIO_PURPOSE: Record<string, AudioPurpose> = {
+  audiocpp: "speech",
+  "audiocpp-wake": "wake",
+};
+
+/** The audio session ids. Anything else is the chat model, the speech model or a shell. */
+const isAudioSession = (id: string) => id in AUDIO_PURPOSE;
+const audioPurpose = (id: string): AudioPurpose => AUDIO_PURPOSE[id] ?? "speech";
+
+/**
+ * Stops the process a server row stands for.
+ *
+ * One place, because three callers ask and each engine has its own door: both
+ * audio.cpp purposes through `audio_stop`, the GGUF speech server through its
+ * own, and anything else -- a chat model, a stale row -- through the unload that
+ * already stops the speech server too.
+ */
+function stopServerSession(id: string): Promise<unknown> {
+  if (isAudioSession(id)) return invoke("audio_stop", { purpose: audioPurpose(id) });
+  if (id === SPEECH_SESSION) return invoke("speech_model_stop");
+  return invoke("local_model_unload");
+}
+
+/**
  * The drag surface on the panel's left edge.
  *
  * Its own component because it holds the only pointer-capture state in the panel,
@@ -312,13 +345,6 @@ export default function RightPanel({ open, width, workspace, skill = null, onClo
   // so one entry each.
   const audioRunningRef = useRef<Record<string, boolean>>({});
 
-  type AudioPurpose = "speech" | "wake";
-
-  /** The audio session ids, and the purpose each one's process serves. */
-  const isAudioSession = (id: string) => id === "audiocpp" || id === "audiocpp-wake";
-  const audioPurpose = (id: string): AudioPurpose =>
-    id === "audiocpp-wake" ? "wake" : "speech";
-
   /**
    * One audio engine's session, named after the model it is holding.
    *
@@ -348,15 +374,66 @@ export default function RightPanel({ open, width, workspace, skill = null, onClo
     [ensureServerSession],
   );
 
+  /**
+   * The GGUF speech server's session, named after the model it holds.
+   *
+   * A third server, and the one that used to have no identity at all: a TTS
+   * model loading behind a reply was a two-gigabyte process with nothing on
+   * screen. The row exists so its log and its stop are reachable, exactly as
+   * they are for `llama-server` and the audio.cpp engines.
+   */
+  const ensureSpeechSession = useCallback(async () => {
+    try {
+      const status = await invoke<{ running: boolean; model: string | null }>("speech_model_status");
+      if (status.running) {
+        ensureServerSession(SPEECH_SESSION, `speech · ${status.model ?? "loading"}`);
+      }
+    } catch {
+      // A status that cannot be read is not worth a row nobody asked for.
+    }
+  }, [ensureServerSession]);
+
   // The mount probe is what makes a session survive a closed panel: the start
   // event fired while this component was still mounted, but the *panel* was
   // closed, and on reopen nothing would otherwise re-ensure the sessions.
   // Asking the backend once per mount, per purpose, covers every reopen.
   useEffect(() => {
-    void Promise.all([ensureAudioSession("speech"), ensureAudioSession("wake")]).catch(
-      () => undefined,
-    );
-  }, [ensureAudioSession]);
+    void Promise.all([
+      ensureAudioSession("speech"),
+      ensureAudioSession("wake"),
+      ensureSpeechSession(),
+    ]).catch(() => undefined);
+  }, [ensureAudioSession, ensureSpeechSession]);
+
+  // The speech server announces its start *before* the model is ready, which is
+  // the point: the terminal is where a slow or failing load explains itself.
+  // The row and the view are opened together, the way a chat model's load opens
+  // its own -- a server starting is the request here because the user pressed
+  // Read, unlike the audio engines' idle starts.
+  useEffect(() => {
+    let live = true;
+    let stop: (() => void) | undefined;
+    void listen<{ running: boolean; model: string | null }>("speech-model-state", ({ payload }) => {
+      if (!live) return;
+      if (!payload.running) {
+        // The process is gone, so its row has nothing left to show. The close is
+        // local: whatever stopped it already knows, and calling stop again would
+        // be a second answer to the same question.
+        closeTerminalSession(SPEECH_SESSION);
+        return;
+      }
+      ensureServerSession(SPEECH_SESSION, `speech · ${payload.model ?? "loading"}`);
+      openView("terminal");
+      onOpen();
+    }).then((unlisten) => {
+      if (live) stop = unlisten;
+      else unlisten();
+    });
+    return () => {
+      live = false;
+      stop?.();
+    };
+  }, [ensureServerSession, closeTerminalSession, openView, onOpen]);
 
   useEffect(() => {
     let live = true;
@@ -422,9 +499,7 @@ export default function RightPanel({ open, width, workspace, skill = null, onClo
       closeTerminalSession(id);
       return;
     }
-    const stopAndClose = isAudioSession(session.id)
-      ? invoke("audio_stop", { purpose: audioPurpose(session.id) })
-      : invoke("local_model_unload");
+    const stopAndClose = stopServerSession(session.id);
     void Promise.resolve(stopAndClose)
       .then(() => closeTerminalSession(id))
       .catch((reason: unknown) =>
@@ -470,11 +545,7 @@ export default function RightPanel({ open, width, workspace, skill = null, onClo
       closeView(view);
       return;
     }
-    void Promise.allSettled(servers.map((session) =>
-      isAudioSession(session.id)
-        ? invoke("audio_stop", { purpose: audioPurpose(session.id) })
-        : invoke("local_model_unload"),
-    )).then((results) => {
+    void Promise.allSettled(servers.map((session) => stopServerSession(session.id))).then((results) => {
       const failed = results.find((result) => result.status === "rejected");
       if (failed && failed.status === "rejected") {
         onNotify?.("error", `The server could not be stopped: ${String(failed.reason)}`);
@@ -686,8 +757,6 @@ export default function RightPanel({ open, width, workspace, skill = null, onClo
                 sessions={terminalSessions}
                 activeId={activeTerminalId}
                 workspace={workspace}
-                loadedModelId={loadedModelId}
-                loadingModelId={loadingModelId}
                 onSelect={setActiveTerminalId}
                 onNew={handleNewTerminal}
                 onClose={handleCloseTerminal}

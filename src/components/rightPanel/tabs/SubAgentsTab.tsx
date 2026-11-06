@@ -162,22 +162,22 @@ export default function SubAgentsTab({ subagents, onOpenUrl, requestedAgent = nu
           ) : (
             <div className="flex flex-col gap-6">
               {/* A spawned run's brief is its first turn; a follow-up has none of
-                  its own, and draws the message that started it instead. */}
-              {activeLive?.prompt && <TaskCard text={activeLive.prompt} />}
-              {transcript
-                ?.filter((message) => message.role === "user")
-                .map((message, index) => (
-                  <TaskCard key={`user-${index}`} text={message.content} />
-                ))}
-              {transcript
-                ?.filter((message) => message.role === "assistant")
-                .map((message, index) => (
+                  its own, and draws the message that started it instead. Both are
+                  drawn the way the chat draws a user turn -- the transcript is the
+                  same conversation, and a "Task" card at the top was a different
+                  shape for exactly the same data. */}
+              {activeLive?.prompt && <UserTurn text={activeLive.prompt} />}
+              {transcript?.map((message, index) =>
+                message.role === "user" ? (
+                  <UserTurn key={`user-${index}`} text={message.content} />
+                ) : message.role === "assistant" ? (
                   <div key={`assistant-${index}`}>
                     <ActivityPanel steps={message.activity ?? []} live={false} renderMarkdown={renderMarkdown} totalSeconds={message.metrics?.elapsed_seconds} />
                     <div className="markdown-content text-[14px] leading-7 text-[var(--text)]">{renderMarkdown(message.content)}</div>
                     <FileChanges steps={message.activity ?? []} live={false} />
                   </div>
-                ))}
+                ) : null,
+              )}
               {activeLive && (
                 <>
                   {activeLive.userText && <UserTurn text={activeLive.userText} />}
@@ -350,21 +350,18 @@ function RunMark({ id, running, failed = false, size = 14 }: { id: string; runni
   );
 }
 
-/** The user's turn in a follow-up, drawn as theirs rather than as the agent's brief. */
+/**
+ * The user's side of the conversation, drawn the way the chat page draws it.
+ *
+ * The brief a run was given and a follow-up the user typed are the same thing in
+ * the transcript -- a user turn -- so they get the same bubble. The old "Task"
+ * card made the first one look like a different kind of content, and it hoisted
+ * every later user turn above every answer because they were drawn in two passes.
+ */
 function UserTurn({ text }: { text: string }) {
   return (
-    <article className="ml-auto max-w-[85%] rounded-lg bg-[var(--raised)] px-3 py-2">
-      <p className="whitespace-pre-wrap break-words text-[13px] leading-6 text-[var(--text)]">{text}</p>
-    </article>
-  );
-}
-
-/** The brief a run was given, shown above its answer. */
-function TaskCard({ text }: { text: string }) {
-  return (
-    <article className="rounded-lg border border-[var(--line)] bg-[var(--rail)] px-3 py-2">
-      <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--quiet)]">Task</p>
-      <p className="whitespace-pre-wrap break-words text-[13px] leading-6 text-[var(--muted)]">{text}</p>
+    <article className="ml-auto max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-[var(--raised)] px-4 py-3 text-[14px] leading-7 text-[var(--text)]">
+      {text}
     </article>
   );
 }

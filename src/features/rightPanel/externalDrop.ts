@@ -42,3 +42,19 @@ export function isOverRightPanel(x: number, y: number): boolean {
   const element = document.elementFromPoint(x, y) as HTMLElement | null;
   return Boolean(element?.closest("[data-right-panel]"));
 }
+
+/**
+ * Whether an OS drop at this point landed on an open modal dialog.
+ *
+ * The same problem as the panel above, with a second owner: the settings window
+ * is opened with `showModal()`, but the chat page underneath stays mounted and
+ * keeps its window-wide drop listener. A `.gguf` dragged onto Settings → Local
+ * was therefore registered by the model importer *and* handed to the composer,
+ * which rejected it as an unsupported attachment -- one gesture answered twice,
+ * one of the answers being an error. Only the dialog's own listeners may act on
+ * a drop that lands inside it.
+ */
+export function isOverOpenDialog(x: number, y: number): boolean {
+  const element = document.elementFromPoint(x, y) as HTMLElement | null;
+  return Boolean(element?.closest("dialog"));
+}

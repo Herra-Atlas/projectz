@@ -115,7 +115,7 @@ export default function NotificationStack({ notifications, copiedId, onDismiss, 
             return (
               <div
                 key={notification.id}
-                className={`pz-toast-in pointer-events-auto flex items-start gap-2.5 overflow-hidden rounded-xl border bg-[color-mix(in_srgb,var(--panel)_93%,transparent)] py-2.5 pl-2.5 pr-2 shadow-[0_18px_44px_-24px_rgba(0,0,0,0.65)] backdrop-blur-md ${notification.tone === "error" ? "border-[color-mix(in_srgb,var(--danger)_32%,var(--line))]" : "border-[var(--line)]"}`}
+                className={`pz-toast-in pointer-events-auto relative flex items-start gap-2.5 overflow-hidden rounded-xl border bg-[color-mix(in_srgb,var(--panel)_93%,transparent)] py-2.5 pl-2.5 pr-2 shadow-[0_18px_44px_-24px_rgba(0,0,0,0.65)] backdrop-blur-md ${notification.tone === "error" ? "border-[color-mix(in_srgb,var(--danger)_32%,var(--line))]" : "border-[var(--line)]"}`}
               >
                 <span className={`mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg ${badgeClass(notification.tone)}`}>
                   {copied ? <Check size={15} /> : <ToneIcon tone={notification.tone} size={15} />}
@@ -137,6 +137,18 @@ export default function NotificationStack({ notifications, copiedId, onDismiss, 
                 >
                   <X size={14} />
                 </button>
+                {/* A row that reports a stretch of work carries its own progress,
+                    so a long import says it is moving instead of looking stalled.
+                    Drawn along the bottom edge and clipped by the row's radius,
+                    the same bar the downloads page uses for a transfer. */}
+                {typeof notification.progress === "number" && (
+                  <div aria-hidden="true" className="absolute inset-x-0 bottom-0 h-0.5 bg-[var(--line)]">
+                    <div
+                      className="h-full bg-[var(--accent)] transition-[width] duration-200"
+                      style={{ width: `${Math.max(0, Math.min(100, notification.progress))}%` }}
+                    />
+                  </div>
+                )}
               </div>
             );
           })}

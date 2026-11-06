@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
+import { loadSttModels } from "../../../features/stt/modelList";
 import type { SttModel } from "../../../features/stt/types";
 import type { Notify } from "../../../features/notifications/types";
 import { SettingsPageTitle } from "../../SettingsSection";
@@ -50,7 +51,7 @@ export function SttModelSettingsPage({
 
   useEffect(() => {
     let live = true;
-    void invoke<SttModel[]>("stt_models")
+    void loadSttModels()
       .then((models) => {
         if (live) setEntry(models.find((candidate) => candidate.path === model) ?? null);
       })

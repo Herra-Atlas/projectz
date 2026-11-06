@@ -46,7 +46,7 @@ import type { SettingsPage, SpeechStage } from "./settings/settingsPages";
 import { useTaste } from "../features/taste/useTaste";
 import { useMessaging } from "../features/communications/useMessaging";
 import { ANCHOR_ATTRIBUTE, FlashHighlight, SettingsPageTitle, SettingsSearchScope, SettingsSection, SETTINGS_HIGHLIGHT_EVENT } from "./SettingsSection";
-import { SettingRow, Segmented, Toggle } from "./SettingsSection";
+import { SettingRow, Toggle } from "./SettingsSection";
 import MainPage from "./settings/model/MainPage";
 import SubagentsPage from "./settings/model/SubagentsPage";
 import AuxiliaryPage from "./settings/model/AuxiliaryPage";
@@ -75,6 +75,9 @@ function fileLabel(path: string): string {
 }
 
 type EndpointDraft = { id: string; name: string; base_url: string; api_key: string; models: string[]; enabled: boolean };
+
+/** One file's outcome in a batch import, mirroring `local::import::AddProgress`. */
+type LocalModelAddProgress = { index: number; total: number; name: string; done: boolean; error: string | null };
 type SettingsModalProps = { open: boolean; onClose: () => void; onEndpointsChanged: () => void; preferences: Preferences; onPreferencesChange: (preferences: Preferences) => void; appearance: Appearance; onAppearanceChange: (appearance: Appearance) => void; notify: Notify;
   /**
    * Opens a skill's folder in the right panel's Files view.
@@ -661,27 +664,47 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
    * Adds GGUF files dropped from Explorer, and puts them on the engine they were
    * dropped on.
    *
-   * One loop rather than `Promise.all`: each add is a database write plus a read
-   * of the file's header, and a handful of models arriving in parallel contend
-   * for the same lock for no gain.
+   * **One call, on a background thread.** Reading a GGUF header is file I/O and
+   * can take seconds per file on a cold cache; the backend now does the whole
+   * batch off the main thread and emits `local-model-add-progress` after each
+   * file. The keyed notification follows those events, so a drop of ten models
+   * shows a moving bar instead of a window that looks frozen and no feedback
+   * until the last one lands.
+   *
+   * Failures are collected rather than raised one by one: a duplicate in the
+   * middle of a folder should not bury the success of the ones that landed.
    */
   const addDroppedModels = async (paths: string[], engineId: string | null) => {
-    let added = 0;
-    for (const path of paths) {
-      try {
-        const model = await invoke<LocalModel>("local_models_add", { path });
-        if (engineId) {
-          await invoke("local_model_engine_set", { modelId: model.id, engineId });
-        }
-        added += 1;
-      } catch (reason) {
-        notify("error", `Could not add ${path}: ${String(reason)}`);
+    const key = "local:add";
+    const failures: string[] = [];
+    const unlisten = await listen<LocalModelAddProgress>("local-model-add-progress", (event) => {
+      const progress = event.payload;
+      const completed = progress.done ? progress.index : progress.index - 1;
+      const percent = progress.total > 0 ? Math.round((completed / progress.total) * 100) : 0;
+      if (progress.error) failures.push(progress.error);
+      const detail = progress.error
+        ? `${progress.name} could not be added`
+        : progress.done
+          ? `Added ${progress.name}`
+          : `Adding ${progress.name}…`;
+      // The row stays `loading` for the whole batch so it cannot expire between
+      // two files; the final `success`/`error` below replaces it by key.
+      notify("loading", `${detail} (${completed}/${progress.total})`, key, percent);
+    });
+    try {
+      const added = await invoke<number>("local_models_add_many", { paths, engineId });
+      await refreshLocalModels();
+      onEndpointsChanged();
+      if (added > 0) {
+        notify("success", added === 1 ? "1 model added" : `${added} models added`, key, 100);
+      } else {
+        notify("error", failures[0] ?? "No models could be added", key);
       }
+    } catch (reason) {
+      notify("error", `Models could not be added: ${String(reason)}`, key);
+    } finally {
+      unlisten();
     }
-    if (added === 0) return;
-    await refreshLocalModels();
-    onEndpointsChanged();
-    notify("success", added === 1 ? "1 model added" : `${added} models added`);
   };
 
   /**
@@ -700,21 +723,27 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
     void getCurrentWebview()
       .onDragDropEvent((event) => {
         const payload = event.payload;
-        if (payload.type === "drop") {
-          setFileDropEngine(null);
-          const paths = payload.paths.filter((path) => path.toLowerCase().endsWith(".gguf"));
-          if (paths.length === 0) return;
-          void addDroppedModels(
-            paths,
-            engineAt(payload.position.x / scale(), payload.position.y / scale()),
-          );
-          return;
-        }
         if (payload.type === "leave") {
           setFileDropEngine(null);
           return;
         }
-        setFileDropEngine(engineAt(payload.position.x / scale(), payload.position.y / scale()));
+        const x = payload.position.x / scale();
+        const y = payload.position.y / scale();
+        // This listener is on the whole window, and the chat page has its own.
+        // A file dropped outside this dialog belongs to whatever it landed on --
+        // dragging a model over the chat must not register it here.
+        if (!document.elementFromPoint(x, y)?.closest("dialog")) {
+          setFileDropEngine(null);
+          return;
+        }
+        if (payload.type === "drop") {
+          setFileDropEngine(null);
+          const paths = payload.paths.filter((path) => path.toLowerCase().endsWith(".gguf"));
+          if (paths.length === 0) return;
+          void addDroppedModels(paths, engineAt(x, y));
+          return;
+        }
+        setFileDropEngine(engineAt(x, y));
       })
       .then((unlisten) => {
         if (live) stop = unlisten;
@@ -979,9 +1008,15 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
               </button>
             )}
             {/* On its own, at the bottom: System is not a category, and standing
-                apart says so. `mt-auto` pins it once the list fits; when the window
-                is too short, the whole nav scrolls and this comes last. */}
-            <div aria-hidden="true" className="hidden sm:mt-auto sm:block sm:h-px sm:bg-[var(--line)]" />
+                apart says so. `mt-auto` pins the pair once the list fits; when the
+                window is too short the whole nav scrolls and it resolves to
+                nothing, so `mb-2` keeps the rule's own space below it rather than
+                relying on free space that is not there.
+                `shrink-0` is what keeps the hairline visible on a short window: in
+                a scrolling column a 1px flex child is the first thing to collapse
+                to zero height, which is why the line disappeared exactly when the
+                list was long enough to scroll. */}
+            <div aria-hidden="true" className="hidden shrink-0 sm:mb-2 sm:mt-auto sm:block sm:h-px sm:bg-[var(--line)]" />
             <button type="button" data-settings-nav="keybinds" aria-label="Keybinds" onClick={() => setPage({ view: "keybinds" })} className={`flex min-h-9 shrink-0 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "keybinds" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Keyboard size={16} />Keybinds</button>
             <button type="button" data-settings-nav="system" aria-label="System" onClick={() => setPage({ view: "system" })} className={`flex min-h-9 shrink-0 items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--accent)] ${page.view === "system" ? "text-[var(--accent)]" : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"}`}><Info size={16} />System</button>
           </nav>
@@ -1245,7 +1280,11 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
               : page.view === "sttModel" ? <SttModelSettingsPage model={page.model} notify={notify} />
               : page.view === "downloads" ? <DownloadsPage notify={notify} />
               : page.view === "system" ? <SystemPage notify={notify} />
-              : page.view === "keybinds" ? <KeybindsPage notify={notify} />
+              : page.view === "keybinds" ? <KeybindsPage
+                notify={notify}
+                sendWith={generalSettings.sendWith}
+                onSendWithChange={(sendWith) => updateGeneralSettings({ ...generalSettings, sendWith })}
+              />
               : page.view === "model" ? <>
                 <SettingsPageTitle>
                   <h2 className="text-[17px] font-semibold tracking-tight">{page.model.name}</h2>
@@ -1318,7 +1357,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
                   <SettingRow
                     anchor="general.instructions"
                     label="Instructions"
-                    description="Kept in mind in app chats and jobs. Telegram uses these only when Communications → Settings → Communication instructions is empty."
+                    description="Guidance the assistant keeps in mind in every conversation and job, such as how you like answers written."
                     stacked
                     control={<textarea id="project-instructions" rows={5} value={generalSettings.instructions} onChange={(event) => updateGeneralSettings({ ...generalSettings, instructions: event.target.value })} placeholder={INSTRUCTION_EXAMPLES[instructionExampleIndex]} className="min-h-32 w-full resize-y rounded-md border border-[var(--line)] bg-[var(--rail)] px-3 py-2.5 text-[13px] leading-6 text-[var(--text)] placeholder:text-[var(--quiet)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]" />}
                   />
@@ -1330,12 +1369,6 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
                     label="Show token metrics"
                     description="Display prompt, completion, and generation figures under each reply."
                     control={<Toggle label="Show token metrics" checked={generalSettings.showMetrics} onChange={(showMetrics) => updateGeneralSettings({ ...generalSettings, showMetrics })} />}
-                  />
-                  <SettingRow
-                    anchor="general.sendWith"
-                    label="Send with"
-                    description="Which key sends the draft. Hold the other modifier to add a line break instead."
-                    control={<Segmented label="Send with" value={generalSettings.sendWith} options={["Enter", "Ctrl + Enter"]} onChange={(sendWith) => updateGeneralSettings({ ...generalSettings, sendWith })} />}
                   />
                 </SettingsSection>
               </> : page.view === "mainModel" ? <MainPage

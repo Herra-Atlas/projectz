@@ -11,19 +11,18 @@ type TerminalTabProps = {
   sessions: TerminalSession[];
   activeId: string | null;
   workspace: string | null;
-  loadedModelId: string | null;
-  loadingModelId: string | null;
   onSelect: (id: string) => void;
   onNew: () => void;
   onClose: (id: string) => void;
 };
 
-export default function TerminalTab({ sessions, activeId, workspace, loadedModelId, loadingModelId, onSelect, onNew, onClose }: TerminalTabProps) {
+export default function TerminalTab({ sessions, activeId, workspace, onSelect, onNew, onClose }: TerminalTabProps) {
   const [logs, setLogs] = useState<Record<string, string[]>>({});
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
-  const serverId = loadedModelId ?? loadingModelId;
   const active = sessions.find((session) => session.id === activeId);
+  /** The open row, when it stands for a process with a log behind it. */
+  const activeServerId = active?.kind === "server" ? active.id : null;
 
   useEffect(() => {
     let activeListener = true;
@@ -41,26 +40,29 @@ export default function TerminalTab({ sessions, activeId, workspace, loadedModel
   }, []);
 
   useEffect(() => {
-    if (!serverId) return;
+    if (!activeServerId) return;
     let mounted = true;
-    // Each engine answers its own command; llama keeps its own. The listener
-    // above is shared, so lines land on one map keyed by the id the session
-    // carries -- and the two audio engines are separate processes, so the
-    // session's id is what says which one's buffer to read.
-    const audio = serverId === "audiocpp-wake" ? "wake" : serverId === "audiocpp" ? "speech" : null;
+    // Each engine answers its own command. The listener above is shared, so
+    // lines land on one map keyed by the id the session carries -- and the
+    // servers are separate processes, so the session's id is what says which
+    // one's buffer to read. Anything else is the chat model's own server.
+    const audio =
+      activeServerId === "audiocpp-wake" ? "wake" : activeServerId === "audiocpp" ? "speech" : null;
     // The ONNX wake engine has no process, so its lines come from the app's own
     // buffer rather than from a child's stdout.
     const request: Promise<string[]> =
-      serverId === "openwakeword"
+      activeServerId === "openwakeword"
         ? invoke<string[]>("wake_logs")
-        : audio
-          ? invoke<string[]>("audio_logs", { purpose: audio })
-          : invoke<string[]>("local_model_logs");
+        : activeServerId === "speech-model"
+          ? invoke<string[]>("speech_model_logs")
+          : audio
+            ? invoke<string[]>("audio_logs", { purpose: audio })
+            : invoke<string[]>("local_model_logs");
     void request.then((lines) => {
-      if (mounted) setLogs((current) => ({ ...current, [serverId]: lines.slice(-MAX_LINES) }));
+      if (mounted) setLogs((current) => ({ ...current, [activeServerId]: lines.slice(-MAX_LINES) }));
     }).catch(() => undefined);
     return () => { mounted = false; };
-  }, [serverId]);
+  }, [activeServerId]);
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -106,7 +108,15 @@ export default function TerminalTab({ sessions, activeId, workspace, loadedModel
       {active?.kind === "server" ? (
         <div ref={scrollRef} data-find-scope="" data-find-label="terminal" className="min-h-0 flex-1 overflow-auto bg-[var(--page)] p-3 font-mono text-[11px] leading-5 text-[var(--text)]">
           {(logs[active.id] ?? []).map((line, index) => <div key={`${index}-${line}`} className="whitespace-pre-wrap break-all">{line}</div>)}
-          {!(logs[active.id]?.length) && <p className="text-[var(--quiet)]">{active.id === "audiocpp" ? "Waiting for the audio engine…" : "Waiting for llama-server output…"}</p>}
+          {!(logs[active.id]?.length) && (
+            <p className="text-[var(--quiet)]">
+              {active.id === "audiocpp"
+                ? "Waiting for the audio engine…"
+                : active.id === "speech-model"
+                  ? "Waiting for the speech model…"
+                  : "Waiting for llama-server output…"}
+            </p>
+          )}
         </div>
       ) : active ? (
         <>

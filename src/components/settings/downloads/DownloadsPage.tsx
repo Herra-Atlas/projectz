@@ -1,6 +1,7 @@
 import { Pause, Play, X } from "lucide-react";
 
 import { formatBytes, formatSpeed } from "../../../features/downloads/format";
+import { formatDuration } from "../../../features/chat/duration";
 import type { DownloadJob } from "../../../features/downloads/types";
 import type { Notify } from "../../../features/notifications/types";
 import { useDownloads } from "../../../features/downloads/useDownloads";
@@ -176,7 +177,8 @@ function timeRemaining(job: DownloadJob): string | null {
 }
 
 /** A transfer that is over, however it ended. */
-function FinishedRow({ job }: { job: DownloadJob }) {  const failed = job.state === "failed";
+function FinishedRow({ job }: { job: DownloadJob }) {
+  const failed = job.state === "failed";
   const stopped = job.state === "stopped";
   const label = failed ? "Failed" : stopped ? "Stopped" : "Installed";
 
@@ -188,6 +190,10 @@ function FinishedRow({ job }: { job: DownloadJob }) {  const failed = job.state 
         </h4>
         <p className="truncate text-[11px] text-[var(--quiet)]">
           {failed || stopped ? job.error ?? job.repo : job.repo}
+          {/* How long it took, from the backend's own clock: a row can be
+              finished before this page is opened, so counting from mount would
+              report the age of the page instead. */}
+          {job.elapsed !== null ? ` · ${formatDuration(job.elapsed)}` : ""}
         </p>
       </div>
       <span className="hidden shrink-0 text-[11px] tabular-nums text-[var(--muted)] sm:block">

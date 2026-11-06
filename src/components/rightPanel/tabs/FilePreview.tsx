@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronRight, Eye, FileText } from "lucide-react";
 import type { TreeEntry } from "../../../features/rightPanel/useFileTree";
 import { useFileEditor } from "../../../features/rightPanel/useFileEditor";
@@ -42,11 +42,20 @@ type FilePreviewProps = {
   onBack: () => void;
   /** Asked to show an HTML file in the Browser view rather than inline. */
   onPreviewInBrowser?: (fileUrl: string) => void;
+  /**
+   * Opens another file in this preview, by root-relative path.
+   *
+   * A Markdown preview's links point at files beside it, so following one is the
+   * same act as clicking that row in the tree -- and the tree owns both the root
+   * and the preview state, which is why the path goes up rather than being read
+   * here.
+   */
+  onOpenRelativePath?: (path: string) => void;
   /** Reported so a failed save reaches the app's one notification stack. */
   onNotify?: (tone: "success" | "error", message: string) => void;
 };
 
-export default function FilePreview({ entry, workspace, skill = null, onBack, onPreviewInBrowser, onNotify }: FilePreviewProps) {
+export default function FilePreview({ entry, workspace, skill = null, onBack, onPreviewInBrowser, onOpenRelativePath, onNotify }: FilePreviewProps) {
   const kind = previewKindFor(entry.path);
   const renderedOnly = kind !== null && isRenderedOnly(kind);
   const { text, state, error, set, retry, saveNow } = useFileEditor(entry.path, !renderedOnly, skill);
@@ -58,10 +67,35 @@ export default function FilePreview({ entry, workspace, skill = null, onBack, on
   // the tree is a code reader first and a renderer second.
   const [showingPreview, setShowingPreview] = useState(false);
 
+  /**
+   * Whether the next change of file is a link followed *from* the rendered view.
+   *
+   * A link is only clickable while the preview is showing, so the file it opens
+   * should also be shown rendered rather than as source. The reset below cannot
+   * tell the two apart on its own, and it runs after the render that already
+   * carries the new path -- hence a flag rather than an argument.
+   */
+  const keepPreviewRef = useRef(false);
+
   useEffect(() => {
+    if (keepPreviewRef.current) {
+      keepPreviewRef.current = false;
+      lastErrorRef.current = null;
+      return;
+    }
     setShowingPreview(false);
     lastErrorRef.current = null;
   }, [entry.path]);
+
+  /** Follows a link in the preview: the target opens here, still rendered. */
+  const openLinked = useCallback(
+    (path: string) => {
+      if (!onOpenRelativePath) return;
+      keepPreviewRef.current = true;
+      onOpenRelativePath(path);
+    },
+    [onOpenRelativePath],
+  );
 
   useEffect(() => {
     if (state !== "error" || !error || lastErrorRef.current === error) return;
@@ -109,7 +143,16 @@ export default function FilePreview({ entry, workspace, skill = null, onBack, on
       if (error) return <p className="px-3 py-2 text-xs text-[var(--danger)]">{error}</p>;
       return <p className="px-3 py-2 text-xs text-[var(--quiet)]">Reading…</p>;
     }
-    if (showingPreview && kind === "markdown") return <MarkdownPreview text={text} />;
+    if (showingPreview && kind === "markdown") {
+      return (
+        <MarkdownPreview
+          text={text}
+          basePath={entry.path}
+          onOpenPath={openLinked}
+          onOpenUrl={onPreviewInBrowser}
+        />
+      );
+    }
     // An `.svg` is a picture made of text, so it is drawn from the words rather
     // than from bytes -- see `SvgPreview`. Toggling back gives the source, which
     // is the view a vector file is usually opened for.
