@@ -340,10 +340,13 @@ pub fn database_list_sessions(
 /// fetching every message in the database to draw a list of titles is what made
 /// startup grow with history instead of with the number of conversations.
 #[tauri::command]
-pub fn database_list_session_headers(
+pub async fn database_list_session_headers(
     runtime: State<'_, AiRuntime>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    runtime.database().list_session_headers()
+    let database = runtime.database();
+    tauri::async_runtime::spawn_blocking(move || database.list_session_headers())
+        .await
+        .map_err(|error| format!("The conversation list stopped unexpectedly: {error}"))?
 }
 
 /// The sub-agent runs, newest first, optionally for one parent conversation.
@@ -383,11 +386,14 @@ pub fn ai_running_subagents(
 /// that as "not loaded", never as "empty" -- see `save_chat_session_tx` for why a
 /// short array is refused rather than written.
 #[tauri::command]
-pub fn database_list_session_messages(
+pub async fn database_list_session_messages(
     runtime: State<'_, AiRuntime>,
     session_id: String,
 ) -> Result<Vec<serde_json::Value>, String> {
-    runtime.database().list_session_messages(&session_id)
+    let database = runtime.database();
+    tauri::async_runtime::spawn_blocking(move || database.list_session_messages(&session_id))
+        .await
+        .map_err(|error| format!("The transcript read stopped unexpectedly: {error}"))?
 }
 
 /// One session with its transcript, whoever it belongs to.
@@ -604,8 +610,10 @@ pub async fn mcp_delete(
 /// No database and no filter: a skill is its folder, so there is no "disabled"
 /// set to exclude and nothing the page has not already seen on disk.
 #[tauri::command]
-pub fn skills_list() -> Result<Vec<crate::skills::Skill>, String> {
-    crate::skills::list()
+pub async fn skills_list() -> Result<Vec<crate::skills::Skill>, String> {
+    tauri::async_runtime::spawn_blocking(crate::skills::list)
+        .await
+        .map_err(|error| format!("The skill scan stopped unexpectedly: {error}"))?
 }
 
 /// One skill's body and the files beside it.
@@ -847,7 +855,7 @@ pub fn database_table_rows(
 /// column, so an unexpected value narrows the query rather than reaching SQL as
 /// syntax.
 #[tauri::command]
-pub fn database_usage_report(
+pub async fn database_usage_report(
     runtime: State<'_, AiRuntime>,
     range: String,
     since: String,
@@ -857,14 +865,81 @@ pub fn database_usage_report(
     if !TIMEFRAME_BUCKETS.contains(&bucket_sql.as_str()) {
         return Err("Unknown statistics bucket".into());
     }
-    runtime
+    let database = runtime.database();
+    tauri::async_runtime::spawn_blocking(move || {
+        database.usage_report(&range, &since, &previous_since, &bucket_sql)
+    })
+    .await
+    .map_err(|error| format!("The report stopped unexpectedly: {error}"))?
+}
+
+/// One line of the composer's context-ring breakdown.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptSection {
+    pub label: String,
+    pub characters: usize,
+}
+
+/// The leading system block, measured part by part.
+///
+/// Reads the same sources `prepend_environment` joins, without changing that
+/// function: the request path is the cached prefix and must stay byte-identical
+/// between turns, so this is a read-only second view rather than a refactor of
+/// the one the provider sees.
+///
+/// Characters rather than tokens, because only the provider knows the real
+/// count; the composer divides by the same four its other estimates use.
+#[tauri::command]
+pub fn ai_prompt_breakdown(runtime: State<'_, AiRuntime>, mode: String) -> Vec<PromptSection> {
+    let agent = mode.eq_ignore_ascii_case("agent");
+    let mut sections = Vec::new();
+    let instructions = runtime
         .database()
-        .usage_report(&range, &since, &previous_since, &bucket_sql)
+        .setting::<serde_json::Value>("app.general")
+        .and_then(|general| {
+            general
+                .get("instructions")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string)
+        });
+    if let Some(instructions) = instructions {
+        sections.push(PromptSection {
+            label: "Your instructions".into(),
+            characters: instructions.chars().count(),
+        });
+    }
+    let root = crate::ai::tools::workspace::root_string();
+    if let Some(note) = crate::ai::prompts::chat::environment_note(
+        agent,
+        (!root.is_empty()).then_some(root.as_str()),
+    ) {
+        sections.push(PromptSection {
+            label: "Environment".into(),
+            characters: note.chars().count(),
+        });
+    }
+    if agent {
+        if let Some(catalogue) = crate::ai::tools::skills::index() {
+            sections.push(PromptSection {
+                label: "Skills".into(),
+                characters: catalogue.chars().count(),
+            });
+        }
+    }
+    if let Some(taste) = crate::taste::cached_prompt() {
+        sections.push(PromptSection {
+            label: "Learned profile".into(),
+            characters: taste.chars().count(),
+        });
+    }
+    sections
 }
 
 /// The only bucket expressions the statistics page may request.
 ///
-/// Must stay in step with `TIMEFRAMES` in
 /// `src/features/statistics/timeframes.ts`, which supplies these literals.
 const TIMEFRAME_BUCKETS: &[&str] = &[
     "substr(created_at,1,13)",
@@ -873,24 +948,34 @@ const TIMEFRAME_BUCKETS: &[&str] = &[
     "substr(created_at,1,4)",
 ];
 
+/// Pulls the text out of a document that arrived as bytes.
+///
+/// The route a pasted or DOM-dropped file takes: the webview has the bytes and
+/// the file's name but no path, so the backend extracts from those bytes through
+/// the same readers `read_file` uses. Returning the text as `text/plain` is what
+/// makes a `.docx` and a `.txt` reach the model the same way.
 #[tauri::command]
-pub fn extract_pdf_attachment(
+pub fn extract_document_attachment(
     name: String,
     data_base64: String,
 ) -> Result<crate::ai::types::ChatAttachment, String> {
     const MAX_ATTACHMENT_SIZE: usize = 15 * 1024 * 1024;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data_base64)
-        .map_err(|_| "Invalid PDF data".to_string())?;
+        .map_err(|_| format!("Invalid file data for {name}"))?;
     if bytes.len() > MAX_ATTACHMENT_SIZE {
-        return Err("PDF files must be 15 MB or smaller".to_string());
+        return Err(format!("{name} is larger than 15 MB"));
     }
-    let text = pdf_extract::extract_text_from_mem(&bytes)
-        .map_err(|error| format!("Could not extract text from PDF: {error}"))?;
+    let text = match crate::documents::extract_bytes(&name, &bytes) {
+        Some(result) => result?,
+        None => {
+            return Err(format!(
+                "{name} is not a document that can be read as text."
+            ))
+        }
+    };
     if text.trim().is_empty() {
-        return Err(
-            "This PDF has no extractable text. Scanned PDFs are not supported yet.".to_string(),
-        );
+        return Err(format!("{name} has no extractable text."));
     }
     Ok(crate::ai::types::ChatAttachment {
         name,
@@ -915,6 +1000,20 @@ pub fn read_chat_attachment(path: String) -> Result<crate::ai::types::ChatAttach
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| "The file name is not valid UTF-8".to_string())?;
+    // A document's text layer is pulled out by the same reader `read_file` uses,
+    // so a dragged `.docx` and a pasted one reach the model identically. `None`
+    // is the signal that this is some other kind of file.
+    if let Some(result) = crate::documents::extract(file_path) {
+        let text = result?;
+        if text.trim().is_empty() {
+            return Err(format!("{name} has no extractable text."));
+        }
+        return Ok(crate::ai::types::ChatAttachment {
+            name: name.to_string(),
+            mime_type: "text/plain".to_string(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(text.as_bytes()),
+        });
+    }
     let extension = file_path
         .extension()
         .and_then(|value| value.to_str())
@@ -923,7 +1022,6 @@ pub fn read_chat_attachment(path: String) -> Result<crate::ai::types::ChatAttach
     let mime_type = match extension.as_str() {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
-        "pdf" => "application/pdf",
         "webp" => "image/webp",
         "gif" => "image/gif",
         "txt" | "log" => "text/plain",
@@ -944,20 +1042,6 @@ pub fn read_chat_attachment(path: String) -> Result<crate::ai::types::ChatAttach
         }
     };
     let bytes = fs::read(file_path).map_err(|error| format!("Could not read file: {error}"))?;
-    if mime_type == "application/pdf" {
-        let text = pdf_extract::extract_text_from_mem(&bytes)
-            .map_err(|error| format!("Could not extract text from PDF: {error}"))?;
-        if text.trim().is_empty() {
-            return Err(
-                "This PDF has no extractable text. Scanned PDFs are not supported yet.".to_string(),
-            );
-        }
-        return Ok(crate::ai::types::ChatAttachment {
-            name: name.to_string(),
-            mime_type: "text/plain".to_string(),
-            data_base64: base64::engine::general_purpose::STANDARD.encode(text.as_bytes()),
-        });
-    }
     if !mime_type.starts_with("image/") && std::str::from_utf8(&bytes).is_err() {
         return Err("This text file is not valid UTF-8".to_string());
     }
@@ -1531,30 +1615,35 @@ pub fn local_runtime_settings(
 /// thumb before anything is saved, or the estimate only moves after the setting
 /// is committed and stops answering the question the drag is asking.
 #[tauri::command]
-pub fn local_runtime_estimate(
+pub async fn local_runtime_estimate(
     runtime: State<'_, AiRuntime>,
     model_id: String,
     settings: crate::ai::local::LocalRuntimeSettings,
 ) -> Result<crate::ai::local::memory::MemoryEstimate, String> {
-    let Some(model) = runtime.local_models().model(&model_id) else {
-        return Err("That local model is no longer registered".to_string());
-    };
-    let device = crate::ai::local::device::DeviceMemory::local();
-    let mut estimate = crate::ai::local::memory::estimate(
-        std::path::Path::new(&model.path),
-        settings
-            .mmproj
-            .as_deref()
-            .filter(|path| !path.trim().is_empty())
-            .map(std::path::Path::new),
-        &settings,
-        device.map(|value| value.total_bytes),
-    );
-    // Computed here rather than in the frontend, so the one-directional rule --
-    // it may say the estimate does not fit, and never that it does -- has a single
-    // owner. A UI that decided for itself could report the opposite.
-    estimate.exceeds_device = estimate.exceeds_device();
-    Ok(estimate)
+    let manager = runtime.local_models();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(model) = manager.model(&model_id) else {
+            return Err("That local model is no longer registered".to_string());
+        };
+        let device = crate::ai::local::device::DeviceMemory::local();
+        let mut estimate = crate::ai::local::memory::estimate(
+            std::path::Path::new(&model.path),
+            settings
+                .mmproj
+                .as_deref()
+                .filter(|path| !path.trim().is_empty())
+                .map(std::path::Path::new),
+            &settings,
+            device.map(|value| value.total_bytes),
+        );
+        // Computed here rather than in the frontend, so the one-directional rule --
+        // it may say the estimate does not fit, and never that it does -- has a single
+        // owner. A UI that decided for itself could report the opposite.
+        estimate.exceeds_device = estimate.exceeds_device();
+        Ok(estimate)
+    })
+    .await
+    .map_err(|error| format!("The estimate stopped unexpectedly: {error}"))?
 }
 
 /// What the local GPU reports, when this build can ask it.
@@ -1700,8 +1789,13 @@ pub fn local_model_engine_set(
 }
 
 #[tauri::command]
-pub fn local_models_list(runtime: State<'_, AiRuntime>) -> Vec<crate::ai::local::LocalModel> {
-    runtime.local_models().list()
+pub async fn local_models_list(
+    runtime: State<'_, AiRuntime>,
+) -> Result<Vec<crate::ai::local::LocalModel>, String> {
+    let manager = runtime.local_models();
+    tauri::async_runtime::spawn_blocking(move || manager.list())
+        .await
+        .map_err(|error| format!("The model list stopped unexpectedly: {error}"))
 }
 
 #[tauri::command]

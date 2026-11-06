@@ -9,11 +9,13 @@
 //! non-streaming completion per batch with no tools at all. The title chain is the
 //! closer relative.
 //!
-//! # Why the profile is operation-edit rather than rewritten
+//! # Why the model only writes facts
 //!
 //! A model asked to rewrite the whole profile will silently drop a fact it was not
-//! asked to touch. See [`merge`]: operations name rows, code applies them, and the
-//! budget is enforced deterministically.
+//! asked to touch. The model therefore answers with one `FACT | CONFIDENCE` line at
+//! a time; [`merge`] decides what each line means, deduplicates it against the
+//! existing rows, and enforces the budget deterministically. Sections are chosen in
+//! code, so the request carries nothing the profile does not need.
 //!
 //! # Why the chat block is cached in a process global
 //!
@@ -25,14 +27,14 @@
 
 pub mod corpus;
 pub mod merge;
-pub mod ops;
 pub mod prompt;
+pub mod reply;
 pub mod runner;
 pub mod section;
 pub mod settings;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -94,6 +96,19 @@ pub struct TasteRunView {
     pub document: Option<String>,
 }
 
+/// The live record of one run, for the right panel's Taste view.
+///
+/// Lines rather than structured steps: a run is a handful of events (what it read,
+/// which batch, what changed), and a line is what the panel draws. It is kept after
+/// the run ends so the transcript of the last run can still be read; the next run
+/// starts a new one.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TasteProgressView {
+    pub started_at: Option<String>,
+    pub lines: Vec<String>,
+}
+
 /// Everything the settings page draws, in one read.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -105,12 +120,15 @@ pub struct TasteStatus {
     pub document: String,
     pub last_run: Option<TasteRunView>,
     pub running: bool,
+    pub progress: Option<TasteProgressView>,
     pub next_run_at: Option<String>,
 }
 
 struct Inner {
     database: Arc<Database>,
     running: AtomicBool,
+    /// Messages of the current (or last) run, read by the panel.
+    progress: Mutex<Option<TasteProgressView>>,
     wake: tokio::sync::Notify,
 }
 
@@ -131,6 +149,7 @@ impl Taste {
             inner: Arc::new(Inner {
                 database,
                 running: AtomicBool::new(false),
+                progress: Mutex::new(None),
                 wake: tokio::sync::Notify::new(),
             }),
         }
@@ -172,6 +191,12 @@ impl Taste {
                 .flatten()
                 .map(run_view),
             running: self.inner.running.load(Ordering::Relaxed),
+            progress: self
+                .inner
+                .progress
+                .lock()
+                .ok()
+                .and_then(|slot| slot.clone()),
             next_run_at: settings.next_run_at.clone(),
             settings,
         }
@@ -194,6 +219,13 @@ impl Taste {
         let previous = TasteSettings::load(&self.inner.database);
         let latest = self.inner.database.latest_taste_run().ok().flatten();
         let mut next = settings.clone();
+        // A switch with no model behind it would read as on and fail every run.
+        // The page disables turning it on, and clearing the last model turns it
+        // off here rather than refusing to save: removing a model is allowed at
+        // any time, and the switch must not be left on with nothing to run.
+        if !next.has_model() {
+            next.enabled = false;
+        }
         // The schedule is the backend's, not the frontend's. A page that was
         // open while a run finished still holds the old timestamp; trusting it
         // would make a toggle look like a due run and shorten the cadence. Keep
@@ -252,23 +284,48 @@ impl Taste {
         if !manual && !settings.enabled {
             return Err("Taste is switched off.".to_string());
         }
+        // A new run starts a new transcript; the previous one is a run record
+        // already, and mixing the two would make the panel read like one long run.
+        if let Ok(mut slot) = self.inner.progress.lock() {
+            *slot = Some(TasteProgressView {
+                started_at: Some(utc_now()),
+                lines: Vec::new(),
+            });
+        }
         emit(app, "started", None);
 
-        let outcome = match runner::run(&self.inner.database, runtime, &settings).await {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                // A database failure is the one case the runner could not record.
-                // Leave the next attempt soon rather than at the cadence, because
-                // the reason is likely to be transient.
-                if settings.enabled {
-                    let mut retry = settings.clone();
-                    retry.next_run_at = Some(TasteSettings::retry_after(Utc::now()));
-                    let _ = TasteSettings::save(&self.inner.database, &retry);
+        // The runner reports progress as lines. Each one is stored for the panel
+        // and emitted so an open page re-reads without polling.
+        let report = |line: &str| {
+            if let Ok(mut slot) = self.inner.progress.lock() {
+                if let Some(progress) = slot.as_mut() {
+                    progress.lines.push(line.to_string());
+                    // A long run is still bounded: the panel draws the recent steps,
+                    // not an unbounded log.
+                    if progress.lines.len() > 60 {
+                        progress.lines.remove(0);
+                    }
                 }
-                emit(app, "failed", None);
-                return Err(error);
             }
+            emit(app, "progress", None);
         };
+
+        let outcome =
+            match runner::run(&self.inner.database, runtime, &settings, manual, &report).await {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    // A database failure is the one case the runner could not record.
+                    // Leave the next attempt soon rather than at the cadence, because
+                    // the reason is likely to be transient.
+                    if settings.enabled {
+                        let mut retry = settings.clone();
+                        retry.next_run_at = Some(TasteSettings::retry_after(Utc::now()));
+                        let _ = TasteSettings::save(&self.inner.database, &retry);
+                    }
+                    emit(app, "failed", None);
+                    return Err(error);
+                }
+            };
 
         // Re-read before writing the schedule: the user may have switched the
         // feature off or changed its cadence while the run was in flight. Writing

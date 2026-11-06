@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import { ChevronRight, LoaderCircle } from "lucide-react";
 import ToolIcon from "../../components/ToolIcon";
 import type { ActivityStep } from "../../features/chat/types";
@@ -46,7 +46,7 @@ type FileChangesProps = {
  * Absent entirely when the reply wrote nothing, so a reply that only read files
  * carries no row claiming otherwise.
  */
-export default function FileChanges({ steps, live, onOpenFile }: FileChangesProps) {
+function FileChanges({ steps, live, onOpenFile }: FileChangesProps) {
   const [expanded, setExpanded] = useState(false);
   const changes = collectFileChanges(steps);
   if (!hasChanges(changes)) return null;
@@ -143,3 +143,7 @@ function FileChangeRow({ change, onOpenFile }: { change: FileChange; onOpenFile?
     </li>
   );
 }
+
+// `collectFileChanges` walks every step on each render; a stored reply's steps
+// do not change, so the memo keeps that walk off the streaming path.
+export default memo(FileChanges);

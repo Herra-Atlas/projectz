@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { Brain, ChevronRight, LoaderCircle } from "lucide-react";
 import ToolIcon from "../../components/ToolIcon";
 import { formatTokens } from "../../features/chat/sessionStats";
@@ -63,7 +63,7 @@ type ActivityPanelProps = {
  * `startedAt` on each running step are enough to derive it here, and a run that
  * has finished shows fixed figures from the backend instead.
  */
-export default function ActivityPanel({ steps, live, renderMarkdown, totalSeconds, startedAt }: ActivityPanelProps) {
+function ActivityPanel({ steps, live, renderMarkdown, totalSeconds, startedAt }: ActivityPanelProps) {
   const [open, setOpen] = useState(false);
   // Open by default while the work is happening, so a slow run shows what it is
   // doing rather than a collapsed line counting up. Closed once it is done, which
@@ -194,7 +194,13 @@ function ThoughtRow({
         // Aligned to the label, not to where the caret used to sit on the left.
         // The trace belongs to the thought, and it reads as belonging to the row
         // above it when it starts where that row's text starts.
-        <div className="markdown-content pb-1 pl-[26px] pt-0.5">{renderMarkdown(step.text)}</div>
+        //
+        // Height-capped like a tool's output: a model can think for thousands of
+        // tokens, and opened without a ceiling the trace pushed the answer and
+        // every step after it off screen. It scrolls inside itself instead.
+        <div className="markdown-content max-h-72 overflow-y-auto overscroll-contain pb-1 pl-[26px] pt-0.5 pr-1">
+          {renderMarkdown(step.text)}
+        </div>
       )}
     </li>
   );
@@ -712,3 +718,7 @@ export function formatSeconds(seconds: number): string {
   if (total < 60) return `${total}s`;
   return `${Math.floor(total / 60)}m ${total % 60}s`;
 }
+
+// A stored reply's steps never change, so this panel must not re-walk them when
+// a different message streams. Stable `steps` is what makes that possible.
+export default memo(ActivityPanel);

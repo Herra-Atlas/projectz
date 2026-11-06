@@ -1,56 +1,72 @@
-//! Turning unread conversations into bounded requests.
+//! Turning unread conversations into small requests.
+//!
+//! # Only the user's own words
+//!
+//! The profile describes the person, so the only text that can support it is text
+//! the person wrote. Assistant answers are the model's prose: they repeat the
+//! request, quote it back and explain things the user never said, and they are
+//! most of a transcript's characters. Reading them cost more than half of every
+//! request and produced facts like "works on a quiz page" -- a task, not a trait.
+//! The learner therefore reads `user` turns and nothing else.
+//!
+//! # Why the text is filtered before it is sent
+//!
+//! A turn is skipped when it cannot yield a fact: a command, a one-line reply, a
+//! pasted file, a block of code. This is a cheap deterministic pass, and it is the
+//! first of two: the reply is filtered again in [`super::merge`]. Together they
+//! are why a small model is asked a short question instead of a dump.
 //!
 //! # Why batches rather than one large request
 //!
-//! A first run can have months of history. Sending it all at once is expensive,
-//! slow, and likely to be truncated by the provider -- and a truncated reply is
-//! wasted spend. A batch is a unit that fits comfortably in a context window and
-//! that can be committed on its own: the profile is updated after each one, so a
-//! failure later in the run keeps the work already paid for.
+//! A first run can have months of history. A batch fits comfortably in a small
+//! model's window and can be committed on its own, so a failure later in the run
+//! keeps the work already paid for.
 //!
 //! # Why the watermark is per conversation
 //!
-//! A run advances only the conversations whose turns it actually sent. A batch
+//! A run advances only the conversations whose turns it actually read. A batch
 //! that failed is not marked read, and neither is a conversation the caps left
 //! for next time. Re-reading a turn costs tokens and teaches nothing new.
-//!
-//! # What is read
-//!
-//! User and assistant text only, and only turns the transcript actually draws.
-//! Tool results, reasoning and the hidden turns a sub-agent reports through are
-//! not the user's words, and a profile built from them would describe the model's
-//! work rather than the person's preferences.
 
 use std::collections::HashSet;
 
 use crate::database::Database;
 
 /// Most conversations one run may touch.
-pub const MAX_SESSIONS: usize = 48;
+pub const MAX_SESSIONS: usize = 32;
 
-/// Most turns read from one conversation in one run.
+/// Most user turns read from one conversation in one run.
 ///
 /// A conversation longer than this is read across runs rather than in one giant
 /// request; the watermark makes that continuation exact rather than approximate.
-pub const MAX_MESSAGES_PER_SESSION: usize = 120;
+pub const MAX_MESSAGES_PER_SESSION: usize = 80;
 
 /// Longest text kept from one turn.
 ///
-/// The start of a message is where the request and the conclusion usually are;
-/// the middle of a pasted file is not a preference.
-pub const MAX_MESSAGE_CHARS: usize = 1_600;
+/// The opening of a message is where a statement about the person usually is; the
+/// middle of a pasted document is not a preference.
+pub const MAX_MESSAGE_CHARS: usize = 700;
 
-/// Characters of conversation in one request. Roughly 4.5k English tokens.
-pub const MAX_BATCH_CHARS: usize = 18_000;
+/// Characters of user text in one request. Roughly 2.5k English tokens.
+pub const MAX_BATCH_CHARS: usize = 10_000;
 
 /// Most requests one run may make. A first run over a large history stops here and
-/// leaves the rest for the next cadence.
-pub const MAX_BATCHES: usize = 5;
+/// leaves the rest for the next cadence or a manual run.
+pub const MAX_BATCHES: usize = 3;
 
-/// One visible turn.
+/// Visible rows read per user turn.
+///
+/// A conversation interleaves user and assistant messages, so a cap on user turns
+/// needs a row budget twice as large plus one row to detect that there is more.
+const ROWS_PER_USER_TURN: usize = 2;
+
+/// The shortest turn worth sending -- below this it is "thanks", "ok" or "yes".
+const MIN_TURN_CHARS: usize = 10;
+const MIN_TURN_WORDS: usize = 3;
+
+/// One visible user turn.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Turn {
-    pub role: String,
     pub text: String,
     /// The row's ordinal, so a batch knows exactly how far it read.
     pub ordinal: i64,
@@ -58,15 +74,13 @@ pub struct Turn {
 
 /// One conversation's contribution to one batch.
 ///
-/// A long conversation can appear in several batches. Each part carries that
-/// batch's slice; the watermark is the last ordinal in the slice, not the last in
-/// the conversation.
+/// `read_through` is the last row read, whatever its role. It is what the
+/// watermark advances to, so a conversation that ends with an assistant answer is
+/// not left pending forever waiting for a user turn that already passed.
 #[derive(Clone, Debug)]
 pub struct SessionPart {
     pub id: String,
-    pub title: String,
-    pub updated_at: String,
-    pub kind: String,
+    pub read_through: i64,
     pub turns: Vec<Turn>,
 }
 
@@ -83,19 +97,16 @@ impl Batch {
         self.messages == 0
     }
 
-    /// The furthest ordinal read in each conversation in this batch.
+    /// The furthest row read in each conversation in this batch.
     ///
     /// Deduplicated because a session is normally one part per batch, but the
     /// method does not rely on that: taking the maximum is correct either way.
     pub fn watermarks(&self) -> Vec<(String, i64)> {
         let mut marks: Vec<(String, i64)> = Vec::new();
         for session in &self.sessions {
-            let Some(last) = session.turns.last() else {
-                continue;
-            };
             match marks.iter_mut().find(|(id, _)| id == &session.id) {
-                Some((_, ordinal)) => *ordinal = (*ordinal).max(last.ordinal),
-                None => marks.push((session.id.clone(), last.ordinal)),
+                Some((_, ordinal)) => *ordinal = (*ordinal).max(session.read_through),
+                None => marks.push((session.id.clone(), session.read_through)),
             }
         }
         marks
@@ -119,10 +130,20 @@ pub struct Corpus {
 
 /// Reads every unread conversation into batches.
 pub fn build(database: &Database) -> Result<Corpus, String> {
-    let pending = database.taste_pending_sessions(MAX_SESSIONS)?;
-    let mut corpus = Corpus::default();
+    // One extra session answers "is there more?" without a second query.
+    let mut pending = database.taste_pending_sessions(MAX_SESSIONS + 1)?;
+    let more_sessions = pending.len() > MAX_SESSIONS;
+    if more_sessions {
+        pending.truncate(MAX_SESSIONS);
+    }
+    let mut corpus = Corpus {
+        truncated: more_sessions,
+        ..Corpus::default()
+    };
     let mut current = Batch::default();
     let mut seen_sessions = HashSet::new();
+    let row_limit = MAX_MESSAGES_PER_SESSION * ROWS_PER_USER_TURN;
+    let mut deferred = false;
 
     for session in pending {
         if corpus.batches.len() >= MAX_BATCHES {
@@ -130,28 +151,37 @@ pub fn build(database: &Database) -> Result<Corpus, String> {
             break;
         }
 
-        // One extra row tells us whether the cap cut a conversation short. Without
-        // it the run could not distinguish "this is all there is" from "there is
-        // more", and the report would be silent about a partial read.
-        let rows = database.taste_messages_after(
-            &session.id,
-            session.last_ordinal,
-            MAX_MESSAGES_PER_SESSION + 1,
-        )?;
+        let rows =
+            database.taste_messages_after(&session.id, session.last_ordinal, row_limit + 1)?;
         if rows.is_empty() {
             continue;
         }
-        let more = rows.len() > MAX_MESSAGES_PER_SESSION;
-        if more {
+        // One row beyond the budget means the conversation continues next run.
+        if rows.len() > row_limit {
             corpus.truncated = true;
         }
+        let rows = rows.into_iter().take(row_limit);
 
         let mut last_ordinal = session.last_ordinal;
+        let mut kept = 0;
         let mut part_had_turns = false;
-        for row in rows.into_iter().take(MAX_MESSAGES_PER_SESSION) {
-            last_ordinal = row.ordinal;
-            let text = clean(&row.content);
-            if text.is_empty() {
+
+        for row in rows {
+            let text = if row.role == "user" {
+                clean(&row.content)
+            } else {
+                String::new()
+            };
+            if !worth_reading(&text) {
+                // Not sent, but it was read: the part already in this batch follows
+                // it, and a batch is watermarked to the last row it consumed.
+                // `last_ordinal` moves too, so a run that read nothing but chatter
+                // still does not scan those rows again.
+                if let Some(part) = part_after_push(&mut current, &mut corpus.batches, &session.id)
+                {
+                    part.read_through = row.ordinal;
+                }
+                last_ordinal = row.ordinal;
                 continue;
             }
             // Start a new request before this turn if it would push the current one
@@ -160,49 +190,57 @@ pub fn build(database: &Database) -> Result<Corpus, String> {
             if current.messages > 0 && current.chars + text.chars().count() > MAX_BATCH_CHARS {
                 corpus.batches.push(std::mem::take(&mut current));
                 if corpus.batches.len() >= MAX_BATCHES {
+                    // This turn was not sent, so neither the batch nor the watermark
+                    // may claim it. It is read again next run.
                     corpus.truncated = true;
+                    deferred = true;
                     break;
                 }
             }
-            if current.sessions.is_empty()
-                || !current.sessions.iter().any(|entry| entry.id == session.id)
-            {
-                current.sessions.push(SessionPart {
-                    id: session.id.clone(),
-                    title: one_line(&session.title),
-                    updated_at: session.updated_at.clone(),
-                    kind: session.kind.clone(),
-                    turns: Vec::new(),
-                });
-            }
-            let part = current
+            let part = match current
                 .sessions
                 .iter_mut()
                 .find(|entry| entry.id == session.id)
-                .expect("just added");
+            {
+                Some(part) => part,
+                None => {
+                    current.sessions.push(SessionPart {
+                        id: session.id.clone(),
+                        read_through: row.ordinal,
+                        turns: Vec::new(),
+                    });
+                    current.sessions.last_mut().expect("just added")
+                }
+            };
+            part.read_through = row.ordinal;
+            last_ordinal = row.ordinal;
             current.chars += text.chars().count();
             current.messages += 1;
+            kept += 1;
             part.turns.push(Turn {
-                role: row.role,
                 text,
                 ordinal: row.ordinal,
             });
             part_had_turns = true;
+
+            if kept >= MAX_MESSAGES_PER_SESSION {
+                corpus.truncated = true;
+                break;
+            }
         }
 
         if part_had_turns {
             seen_sessions.insert(session.id.clone());
         } else {
-            // Everything unread in this conversation was empty after cleaning.
-            // Advancing the watermark is what stops the next run scanning it again.
+            // Everything unread in this conversation was skipped: empty, code, or
+            // the model's own words. Advancing the watermark is what stops the next
+            // run scanning it again.
             corpus
                 .empty_sessions
                 .push((session.id.clone(), last_ordinal));
         }
 
-        if corpus.batches.len() >= MAX_BATCHES {
-            corpus.truncated = true;
-            // The current batch has not been pushed yet, so it is still usable.
+        if deferred {
             break;
         }
     }
@@ -218,10 +256,32 @@ pub fn build(database: &Database) -> Result<Corpus, String> {
     Ok(corpus)
 }
 
+/// The session's part, in the batch being filled or in the one just pushed.
+///
+/// A skipped row after a split was still read. If the session's part has already
+/// moved into a finished batch, that part's watermark is the only place its
+/// ordinal can be recorded -- otherwise the same assistant and chatter rows are
+/// scanned again on every run.
+fn part_after_push<'a>(
+    current: &'a mut Batch,
+    batches: &'a mut [Batch],
+    id: &str,
+) -> Option<&'a mut SessionPart> {
+    if let Some(index) = current.sessions.iter().position(|entry| entry.id == id) {
+        return current.sessions.get_mut(index);
+    }
+    batches
+        .last_mut()?
+        .sessions
+        .iter_mut()
+        .find(|entry| entry.id == id)
+}
+
 /// Trims a stored message to what the model is shown.
 fn clean(raw: &str) -> String {
     let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
-    let text = normalized.trim();
+    let without_code = strip_code(&normalized);
+    let text = without_code.trim();
     if text.is_empty() {
         return String::new();
     }
@@ -233,9 +293,50 @@ fn clean(raw: &str) -> String {
     clipped
 }
 
-/// A title on one line, because it is drawn inside a prompt header.
-fn one_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+/// Drops fenced blocks, which are almost always a pasted file rather than a fact.
+///
+/// An unclosed fence hides the rest of the message, which is the honest reading of
+/// a half-pasted file: the prose before it is kept and the code is not.
+fn strip_code(text: &str) -> String {
+    let mut kept = String::with_capacity(text.len());
+    let mut in_fence = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if !in_fence {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+    }
+    kept
+}
+
+/// Whether a cleaned turn is worth spending prompt tokens on.
+///
+/// Deterministic and deliberately forgiving: the model is the second filter, and
+/// this one exists to keep commands, acknowledgements and code out of the request.
+fn worth_reading(text: &str) -> bool {
+    if text.is_empty() || text.starts_with('/') {
+        return false;
+    }
+    if text.chars().count() < MIN_TURN_CHARS {
+        return false;
+    }
+    // The word floor is a rule about space-separated languages. A Chinese or
+    // Japanese sentence is one "word" here and would otherwise be discarded and
+    // then marked read forever; the character floor above is its floor instead.
+    if text.split_whitespace().count() < MIN_TURN_WORDS && text.is_ascii() {
+        return false;
+    }
+    // A message that is mostly punctuation, markup or symbols is a paste, not a
+    // statement. Half the characters have to be words for it to be read.
+    let meaningful = text
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .count();
+    meaningful * 2 >= text.chars().count()
 }
 
 #[cfg(test)]
@@ -275,9 +376,20 @@ mod tests {
         let corpus = build(&database).expect("corpus");
         assert_eq!(corpus.batches.len(), 1);
         assert_eq!(corpus.sessions, 2);
-        assert_eq!(corpus.messages, 6);
+        // User turns only: two from the first conversation, one from the second.
+        assert_eq!(corpus.messages, 3);
         assert!(!corpus.truncated);
         assert_eq!(corpus.batches[0].sessions.len(), 2);
+        // Every kept turn is a user turn by construction; this is the count the
+        // page reports.
+        assert_eq!(
+            corpus.batches[0]
+                .sessions
+                .iter()
+                .map(|part| part.turns.len())
+                .sum::<usize>(),
+            corpus.messages
+        );
     }
 
     #[test]
@@ -298,16 +410,15 @@ mod tests {
     #[test]
     fn a_long_conversation_is_split_with_an_exact_watermark() {
         let database = database();
-        // Enough long turns to force a split under a deliberately small budget is
-        // not possible without changing the constant, so this checks the rule at
-        // its boundary: every batch's mark is the last ordinal it actually holds.
-        seed(&database, "long", "2026-01-02T00:00:00.000Z", 200);
+        seed(&database, "long", "2026-01-02T00:00:00.000Z", 400);
         let corpus = build(&database).expect("corpus");
         assert!(corpus.truncated, "the message cap should be reported");
         assert_eq!(corpus.messages, MAX_MESSAGES_PER_SESSION);
         let (session, ordinal) = corpus.batches[0].watermarks()[0].clone();
         assert_eq!(session, "long");
-        assert_eq!(ordinal, (MAX_MESSAGES_PER_SESSION - 1) as i64);
+        // 400 alternating rows are 200 user turns; the cap keeps the 80th, whose
+        // ordinal is 158 (every other row is the user's).
+        assert_eq!(ordinal, 158);
     }
 
     #[test]
@@ -334,7 +445,7 @@ mod tests {
     #[test]
     fn a_pasted_file_is_clipped_not_sent_whole() {
         let database = database();
-        let long = "x".repeat(MAX_MESSAGE_CHARS * 2);
+        let long = "word ".repeat(MAX_MESSAGE_CHARS);
         database
             .save_chat_session(&serde_json::json!({
                 "id": "paste",
@@ -348,5 +459,74 @@ mod tests {
         let turn = &corpus.batches[0].sessions[0].turns[0];
         assert_eq!(turn.text.chars().count(), MAX_MESSAGE_CHARS);
         assert!(turn.text.ends_with('…'));
+    }
+
+    /// The assistant's prose is not evidence about the user, and it is most of a
+    /// transcript's characters. It must never reach the learner.
+    #[test]
+    fn assistant_turns_are_not_sent() {
+        let database = database();
+        database
+            .save_chat_session(&serde_json::json!({
+                "id": "s1",
+                "title": "s1",
+                "createdAt": "2026-01-02T00:00:00.000Z",
+                "updatedAt": "2026-01-02T00:00:00.000Z",
+                "messages": [
+                    { "role": "user", "content": "I use Rust (programming language) for backend services." },
+                    { "role": "assistant", "content": "That is a good choice for backend services, and here is why in detail." }
+                ]
+            }))
+            .expect("seed");
+        let corpus = build(&database).expect("corpus");
+        assert_eq!(corpus.messages, 1);
+        assert!(corpus.batches[0].sessions[0].turns[0]
+            .text
+            .starts_with("I use Rust"));
+    }
+
+    /// A pasted code block is a file, not a preference. The prose around it is kept.
+    #[test]
+    fn a_code_block_is_dropped_and_the_prose_surrounding_it_is_kept() {
+        let database = database();
+        database
+            .save_chat_session(&serde_json::json!({
+                "id": "code",
+                "title": "code",
+                "createdAt": "2026-01-02T00:00:00.000Z",
+                "updatedAt": "2026-01-02T00:00:00.000Z",
+                "messages": [{
+                    "role": "user",
+                    "content": "I prefer TypeScript (programming language) for app code.\n```ts\nconst x: number = 1;\n```\n"
+                }]
+            }))
+            .expect("seed");
+        let corpus = build(&database).expect("corpus");
+        let text = &corpus.batches[0].sessions[0].turns[0].text;
+        assert!(text.contains("prefer TypeScript"), "{text}");
+        assert!(!text.contains("const x"), "{text}");
+    }
+
+    /// "thanks", "ok" and commands teach nothing, but their rows are still read so
+    /// the next run does not scan them again.
+    #[test]
+    fn chatter_and_commands_are_skipped_and_the_watermark_advances() {
+        let database = database();
+        database
+            .save_chat_session(&serde_json::json!({
+                "id": "chatter",
+                "title": "chatter",
+                "createdAt": "2026-01-02T00:00:00.000Z",
+                "updatedAt": "2026-01-02T00:00:00.000Z",
+                "messages": [
+                    { "role": "user", "content": "thanks" },
+                    { "role": "assistant", "content": "You are welcome." },
+                    { "role": "user", "content": "/compact" }
+                ]
+            }))
+            .expect("seed");
+        let corpus = build(&database).expect("corpus");
+        assert!(corpus.batches.is_empty());
+        assert_eq!(corpus.empty_sessions, vec![("chatter".to_string(), 2)]);
     }
 }

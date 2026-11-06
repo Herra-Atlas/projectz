@@ -19,6 +19,7 @@ function UsageTable<K extends string>({
   onSort,
   children,
   caption,
+  maxHeightClass = "max-h-[280px]",
 }: {
   head: string[];
   sortable: SortableColumn<K>[];
@@ -26,9 +27,18 @@ function UsageTable<K extends string>({
   onSort: (column: K) => void;
   children: React.ReactNode;
   caption: string;
+  /**
+   * How tall the scrolling body may grow.
+   *
+   * A parameter rather than a constant because the two callers sit in different
+   * places: a conversation list shares a row with nothing, while the models
+   * table shares a row with the Tools panel and was scrolling at a fixed 280px
+   * while the card around it had room for twice as many rows.
+   */
+  maxHeightClass?: string;
 }) {
   return (
-    <div className="max-h-[280px] overflow-auto">
+    <div className={`${maxHeightClass} overflow-auto`}>
       <table className="w-full border-collapse text-left text-xs">
         <caption className="sr-only">{caption}</caption>
         <thead className="sticky top-0 bg-[var(--panel)]">
@@ -149,6 +159,7 @@ export function ModelTable({ group, names }: { group: ModelGroup; names: ModelNa
       directionFor={directionFor}
       onSort={toggle}
       caption="Models used in this period"
+      maxHeightClass="min-h-0 flex-1"
     >
       {rows.map((model) => {
         const name = modelLabel(model, names);

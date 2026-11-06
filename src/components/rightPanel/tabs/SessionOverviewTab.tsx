@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { LoaderCircle } from "lucide-react";
 import { computeSessionStats, formatTimestamp } from "../../../features/chat/sessionStats";
 import type { ChatSession } from "../../../features/chat/types";
@@ -36,6 +36,11 @@ export default function SessionOverviewTab({ sessionId, loadSession }: SessionOv
   const [error, setError] = useState("");
   const [tab, setTab] = useState<SessionOverviewTabName>("Overview");
 
+  // One aggregate pass per loaded conversation, not one per render: the panel
+  // re-renders on unrelated App updates, and a 500-message transcript was being
+  // re-walked each time to draw the same figures.
+  const stats = useMemo(() => (session ? computeSessionStats(session) : null), [session]);
+
   // The loader closes over the chat hook's transcript cache, so its identity
   // changes as transcripts arrive. Read through a ref so a cache update does
   // not re-run the effect below and reload the conversation being shown.
@@ -69,7 +74,7 @@ export default function SessionOverviewTab({ sessionId, loadSession }: SessionOv
     );
   }
 
-  if (!session) {
+  if (!session || !stats) {
     return (
       <div className="flex h-full items-center justify-center gap-2 px-5 py-8 text-sm text-[var(--muted)]">
         <LoaderCircle size={15} className="animate-spin text-[var(--accent)]" />
@@ -77,8 +82,6 @@ export default function SessionOverviewTab({ sessionId, loadSession }: SessionOv
       </div>
     );
   }
-
-  const stats = computeSessionStats(session);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">

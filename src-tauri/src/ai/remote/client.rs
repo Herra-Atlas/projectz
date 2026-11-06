@@ -19,11 +19,22 @@ use crate::ai::types::{ChatAttachment, ChatEvent, ChatMessage, ReasoningEffort};
 #[cfg(test)]
 mod tests {
     use super::{
-        accumulate_usage, budget_notice, merge_round_usage, BUDGET_FINAL_REMAINING,
+        accumulate_usage, base64_byte_len, budget_notice, merge_round_usage, BUDGET_FINAL_REMAINING,
         REQUEST_ATTEMPTS,
     };
     use crate::ai::types::ReasoningEffort;
     use serde_json::{json, Value};
+
+    /// The size gate must agree with the decoder without paying for it: an
+    /// image attachment is never decoded, and its length is read from the
+    /// string so a 10 MB screenshot is not copied to learn a number.
+    #[test]
+    fn a_base64_size_is_measured_without_decoding() {
+        assert_eq!(base64_byte_len("TWFu"), 3);
+        assert_eq!(base64_byte_len("TWE="), 2);
+        assert_eq!(base64_byte_len("TQ=="), 1);
+        assert_eq!(base64_byte_len(""), 0);
+    }
 
     /// The retry is bounded, and it is more than one because a rate limit needs
     /// room to clear. What stops it from becoming an indefinite march is the
@@ -931,7 +942,7 @@ impl<'a> CallRunner<'a> {
                     tool_name: call.name.clone(),
                     // The same wording the transcript row uses, so the prompt and
                     // the call it is about cannot describe it two ways.
-                    label: crate::ai::tools::ui::label_for(&call.name).to_string(),
+                    label: crate::ai::tools::ui::label_for_call(&call.name, &arguments).to_string(),
                     // What the call will touch, with the fact needed to judge it.
                     // Without this the dialog only said "write_file", which names
                     // no file and cannot be answered with any confidence.
@@ -1557,6 +1568,36 @@ struct StreamOptions {
     include_usage: bool,
 }
 
+/// One display frame, and the unit a streamed reply is allowed to lag behind by.
+///
+/// Emitting once per provider token cost a JSON serialise, an IPC round trip and
+/// a JS callback per token to paint at most sixty times a second. The text still
+/// arrives in order -- it is the same string, appended in the same sequence.
+const DELTA_FLUSH: std::time::Duration = std::time::Duration::from_millis(16);
+
+/// Emits whatever text has accumulated since the last flush as one delta.
+fn flush_stream_text(
+    pending: &mut String,
+    kind: &str,
+    run_id: &str,
+    sequence: &mut u64,
+    on_event: &Arc<dyn Fn(ChatEvent) + Send + Sync>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    *sequence += 1;
+    on_event(ChatEvent {
+        run_id: run_id.to_string(),
+        session_id: None,
+        sequence: *sequence,
+        kind: kind.to_string(),
+        text: Some(std::mem::take(pending)),
+        error: None,
+        metrics: None,
+    });
+}
+
 async fn stream_completion(
     client: &reqwest::Client,
     endpoint: &Endpoint,
@@ -1606,12 +1647,24 @@ async fn stream_completion(
     let mut completion_id: Option<String> = None;
     let mut is_reasoning = false;
     let mut last_chunk_at = tokio::time::Instant::now();
+    // Accumulated text waiting for the next frame. Two buffers, not one: an
+    // answer and a thought are different kinds and are closed at different
+    // moments, so merging them would put one inside the other.
+    let mut pending_answer = String::new();
+    let mut pending_reasoning = String::new();
+    let mut last_delta_at = tokio::time::Instant::now();
     'stream: loop {
         let idle_for = tokio::time::Instant::now().duration_since(last_chunk_at);
         let idle_remaining = STREAM_IDLE_TIMEOUT.saturating_sub(idle_for);
         let chunk = tokio::select! {
             _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                if cancelled.load(Ordering::Relaxed) { return Ok((Vec::new(), content, metrics, reasoning)); }
+                if cancelled.load(Ordering::Relaxed) {
+                    // Flushed first: the reply is kept as a partial answer, and
+                    // the last few milliseconds of text belong to it.
+                    flush_stream_text(&mut pending_answer, "delta", run_id, &mut sequence, on_event);
+                    flush_stream_text(&mut pending_reasoning, "reasoning_delta", run_id, &mut sequence, on_event);
+                    return Ok((Vec::new(), content, metrics, reasoning));
+                }
                 if idle_remaining.is_zero() {
                     return Err(format!("Stream stalled: no response data for {} seconds", STREAM_IDLE_TIMEOUT.as_secs()));
                 }
@@ -1688,6 +1741,10 @@ async fn stream_completion(
                     if let Some(text) = chunk.content {
                         if is_reasoning {
                             is_reasoning = false;
+                            // The thought's tail goes before the phase change, or
+                            // the panel closes a thought that then keeps talking.
+                            flush_stream_text(&mut pending_reasoning, "reasoning_delta", run_id, &mut sequence, on_event);
+                            flush_stream_text(&mut pending_answer, "delta", run_id, &mut sequence, on_event);
                             on_event(ChatEvent {
                                 run_id: run_id.to_string(),
                                 session_id: None,
@@ -1699,20 +1756,13 @@ async fn stream_completion(
                             });
                         }
                         content.push_str(&text);
-                        sequence += 1;
-                        on_event(ChatEvent {
-                            run_id: run_id.to_string(),
-                            session_id: None,
-                            sequence,
-                            kind: "delta".into(),
-                            text: Some(text),
-                            error: None,
-                            metrics: None,
-                        });
+                        pending_answer.push_str(&text);
                     }
                     if let Some(text) = chunk.reasoning {
                         if !is_reasoning {
                             is_reasoning = true;
+                            flush_stream_text(&mut pending_answer, "delta", run_id, &mut sequence, on_event);
+                            flush_stream_text(&mut pending_reasoning, "reasoning_delta", run_id, &mut sequence, on_event);
                             on_event(ChatEvent {
                                 run_id: run_id.to_string(),
                                 session_id: None,
@@ -1724,24 +1774,34 @@ async fn stream_completion(
                             });
                         }
                         reasoning.push_str(&text);
-                        sequence += 1;
-                        on_event(ChatEvent {
-                            run_id: run_id.to_string(),
-                            session_id: None,
-                            sequence,
-                            kind: "reasoning_delta".into(),
-                            text: Some(text),
-                            error: None,
-                            metrics: None,
-                        });
+                        pending_reasoning.push_str(&text);
                     }
+                }
+                if finished {
+                    // The final text may be younger than the frame window, and
+                    // after a finish reason nothing else will carry it.
+                    flush_stream_text(&mut pending_answer, "delta", run_id, &mut sequence, on_event);
+                    flush_stream_text(&mut pending_reasoning, "reasoning_delta", run_id, &mut sequence, on_event);
                 }
                 is_finished |= finished;
             } else if let Some(data) = line.strip_prefix("data:") {
                 event_data.push(data.strip_prefix(' ').unwrap_or(data).to_string());
             }
         }
+        // One delta per frame at most. A provider that sends one token per
+        // network chunk gets the threshold; one that batches a paragraph still
+        // flushes at the end of the chunk, so text never waits longer than the
+        // chunk that carried it.
+        if last_delta_at.elapsed() >= DELTA_FLUSH {
+            flush_stream_text(&mut pending_answer, "delta", run_id, &mut sequence, on_event);
+            flush_stream_text(&mut pending_reasoning, "reasoning_delta", run_id, &mut sequence, on_event);
+            last_delta_at = tokio::time::Instant::now();
+        }
     }
+    // Whatever arrived after the last frame, including a stream that ended on
+    // `[DONE]` or closed without a finish reason.
+    flush_stream_text(&mut pending_answer, "delta", run_id, &mut sequence, on_event);
+    flush_stream_text(&mut pending_reasoning, "reasoning_delta", run_id, &mut sequence, on_event);
     Ok((tool_calls.finish(), content, metrics, reasoning))
 }
 
@@ -2104,6 +2164,20 @@ mod answer_text_tests {
     }
 }
 
+/// The number of bytes a base64 string decodes to, without decoding it.
+///
+/// Four characters carry three bytes, and each trailing `=` removes one. Used
+/// only for the attachment size gate, where the answer is needed before the bytes
+/// are and the string is already in hand.
+fn base64_byte_len(encoded: &str) -> usize {
+    let padding = encoded
+        .bytes()
+        .rev()
+        .take_while(|byte| *byte == b'=')
+        .count();
+    encoded.len().saturating_sub(padding) * 3 / 4
+}
+
 fn prepare_messages(
     messages: &[ChatMessage],
     attachments: &[ChatAttachment],
@@ -2115,11 +2189,16 @@ fn prepare_messages(
         }
         let mut content = vec![json!({"type":"text", "text":message.content})];
         for attachment in attachments {
-            let decoded = base64::engine::general_purpose::STANDARD.decode(&attachment.data_base64).map_err(|_| format!("Invalid file data for {}", attachment.name))?;
-            if decoded.len() > 15 * 1024 * 1024 { return Err(format!("{} is larger than 15 MB", attachment.name)); }
+            // The size gate reads the length arithmetic rather than decoding: an
+            // image attachment is never decoded at all, and decoding 10 MB to
+            // learn a number the string already carries was a full copy per send.
+            if base64_byte_len(&attachment.data_base64) > 15 * 1024 * 1024 {
+                return Err(format!("{} is larger than 15 MB", attachment.name));
+            }
             if matches!(attachment.mime_type.as_str(), "image/png" | "image/jpeg" | "image/webp" | "image/gif") {
                 content.push(json!({"type":"image_url", "image_url":{"url":format!("data:{};base64,{}", attachment.mime_type, attachment.data_base64)}}));
             } else {
+                let decoded = base64::engine::general_purpose::STANDARD.decode(&attachment.data_base64).map_err(|_| format!("Invalid file data for {}", attachment.name))?;
                 let text = String::from_utf8(decoded).map_err(|_| format!("{} is not valid UTF-8", attachment.name))?;
                 content.push(json!({"type":"text", "text":format!("\n\nAttached file: {}\n```\n{}\n```", attachment.name, text)}));
             }

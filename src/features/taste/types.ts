@@ -56,6 +56,12 @@ export type TasteRun = {
   document?: string | null;
 };
 
+/** The live transcript of the current (or most recent) run. */
+export type TasteProgress = {
+  startedAt?: string | null;
+  lines: string[];
+};
+
 /** Everything `taste_status` returns. */
 export type TasteStatus = {
   enabled: boolean;
@@ -65,11 +71,19 @@ export type TasteStatus = {
   document: string;
   lastRun?: TasteRun | null;
   running: boolean;
+  progress?: TasteProgress | null;
   nextRunAt?: string | null;
 };
 
 /** The event the backend emits on a state change or a run boundary. */
 export type TasteEvent = {
-  kind: "state" | "started" | "completed" | "failed" | "skipped" | string;
+  kind:
+    | "state"
+    | "started"
+    | "progress"
+    | "completed"
+    | "failed"
+    | "skipped"
+    | string;
   run?: TasteRun | null;
 };

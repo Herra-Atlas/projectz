@@ -1,64 +1,58 @@
 //! Applying what the model proposed, deterministically.
 //!
-//! The model does not write the profile. It proposes operations against rows it
-//! was shown, and this file decides what those operations mean:
+//! The model writes plain facts; it does not write the profile. This file decides
+//! what a fact means:
 //!
-//! - an `add` that is close to an existing fact becomes a reinforcement of that
-//!   fact rather than a second row saying the same thing;
-//! - an `update` or `remove` that names an id not in the profile is dropped;
-//! - text that is too short, too long or empty is dropped rather than stored;
+//! - a fact that does not read like a durable statement about the person is
+//!   dropped (a question, a request, a sentence about the assistant, a secret);
+//! - a first-person sentence is turned into the third person the profile uses;
+//! - an addition that says what an existing fact already says reinforces that row
+//!   rather than becoming a second one;
 //! - the result is trimmed to a hard character budget, lowest-confidence facts
 //!   first.
 //!
-//! # Why the merge is code and not a second model call
+//! # Why the filters are here and not only in the prompt
 //!
-//! A model asked to rewrite a list will occasionally omit a fact it was not asked
-//! to touch. That is invisible in the reply and expensive to discover later. An
-//! operation either applies to a row this file can see or it does not, so a fact
-//! can only leave the profile through an explicit `remove` or the budget.
+//! A prompt is advice; a small model breaks it. The prompt keeps the common case
+//! good, and this file keeps a bad case out of the profile. Both are cheap and
+//! deterministic -- no second model call to judge the first.
 //!
 //! # Why the budget is characters, not tokens
 //!
 //! The app has no tokenizer for every provider's vocabulary, and a character cap
 //! is deterministic. `MAX_DOCUMENT_CHARS` is sized so the rendered block is
-//! comfortably under a thousand tokens for the English prose this profile holds.
+//! comfortably under six hundred English tokens.
 
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
-use chrono::{DateTime, Utc};
-
 use crate::database::taste::TasteItemRow;
 
-use super::ops::{RawOp, RawReply};
+use super::reply::RawReply;
 use super::section::Section;
 
-/// The most text the rendered profile may hold. Roughly 900 English tokens.
-pub const MAX_DOCUMENT_CHARS: usize = 3_600;
+/// The most text the rendered profile may hold. Roughly 550 English tokens.
+pub const MAX_DOCUMENT_CHARS: usize = 2_200;
 
-/// The longest one fact may be. Long enough for a precise sentence, short enough
-/// that one fact cannot crowd out the section it belongs to.
-pub const MAX_ITEM_CHARS: usize = 220;
+/// The longest one fact may be. A fact is one sentence, not a paragraph.
+pub const MAX_ITEM_CHARS: usize = 160;
 
 /// The shortest text worth storing. Below this it is a label rather than a fact.
-const MIN_ITEM_CHARS: usize = 8;
+const MIN_ITEM_CHARS: usize = 10;
 
-/// A ceiling on row count as well as characters, so a hundred tiny facts cannot
-/// turn the profile into a list nobody reads.
-const MAX_ITEMS: usize = 48;
+/// A ceiling on row count as well as characters, so a list of tiny facts cannot
+/// turn the profile into something nobody reads.
+const MAX_ITEMS: usize = 32;
 
 /// How much two facts may overlap and still be considered the same fact.
 ///
 /// Deliberately below 1.0: "Prefers Rust for backend services" and "Prefers Rust
 /// for backend work" are one preference, and a profile that stored both would
-/// spend its budget repeating itself. The containment score in [`similarity`] is
-/// what lets a more specific version of an existing fact replace it instead of
-/// becoming a second row.
+/// spend its budget repeating itself.
 const SIMILARITY: f32 = 0.6;
 
-const DEFAULT_CONFIDENCE: f32 = 0.7;
-const CONFIDENCE_FLOOR: f32 = 0.05;
-const REINFORCE_STEP: f32 = 0.05;
+/// Below this the model is saying it is not sure, so the fact is not stored.
+const CONFIDENCE_FLOOR: f32 = 0.5;
 
 /// Words that carry no identity on their own. Excluded from similarity so two
 /// unrelated sentences cannot look alike because they both say "the user".
@@ -66,6 +60,55 @@ const STOPWORDS: [&str; 30] = [
     "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from", "has", "have", "in",
     "is", "it", "its", "of", "on", "or", "that", "the", "their", "them", "they", "this", "to",
     "user", "was", "with",
+];
+
+/// A line that opens with one of these is not a fact about the person.
+///
+/// Everything here is a request, a task, an act the assistant performed, or a
+/// hedge that states nothing. Third-person fact verbs (`Uses`, `Prefers`, `Works`,
+/// `Is`, `Lives`) are deliberately absent: "Is a backend developer" is a fact,
+/// while "Is this a good idea?" is a question and already carries a `?`.
+const NOT_A_FACT_WORDS: [&str; 40] = [
+    "how",
+    "what",
+    "why",
+    "when",
+    "where",
+    "who",
+    "can",
+    "could",
+    "would",
+    "should",
+    "please",
+    "write",
+    "create",
+    "build",
+    "make",
+    "add",
+    "fix",
+    "run",
+    "show",
+    "give",
+    "help",
+    "explain",
+    "find",
+    "search",
+    "tell",
+    "summarize",
+    "summarise",
+    "translate",
+    "generate",
+    "implement",
+    "wants",
+    "needs",
+    "asked",
+    "requested",
+    "helped",
+    "helping",
+    "might",
+    "maybe",
+    "possibly",
+    "perhaps",
 ];
 
 /// What one merge changed.
@@ -89,101 +132,42 @@ pub fn merge(items: &mut Vec<TasteItemRow>, reply: &RawReply, now: &str) -> Merg
     };
     let mut next_id = items.iter().map(|item| item.id).max().unwrap_or(0) + 1;
 
-    for operation in &reply.ops {
-        match operation {
-            RawOp::Add {
-                section,
-                text,
-                confidence,
-            } => {
-                let Some(section) = Section::parse(section) else {
-                    outcome.ignored += 1;
-                    continue;
-                };
-                let text = clean_text(text);
-                if !is_usable(&text) {
-                    outcome.ignored += 1;
-                    continue;
-                }
-                let confidence = confidence
-                    .unwrap_or(DEFAULT_CONFIDENCE)
-                    .clamp(CONFIDENCE_FLOOR, 1.0);
-
-                // An addition that says what an existing row already says is an
-                // edit to that row. The longer wording wins because a model that
-                // restates a fact usually does so with more context; the
-                // confidence is the higher of the two, because neither statement
-                // weakens the other.
-                if let Some(index) = similar_index(items, section, &text) {
-                    let existing = &mut items[index];
-                    if text.chars().count() > existing.text.chars().count() {
-                        existing.text = text;
-                    }
-                    existing.confidence = existing.confidence.max(confidence);
-                    existing.updated_at = now.to_string();
-                    existing.last_seen_at = now.to_string();
-                    outcome.updated += 1;
-                    continue;
-                }
-
-                items.push(TasteItemRow {
-                    id: next_id,
-                    section: section.as_str().to_string(),
-                    text,
-                    confidence,
-                    created_at: now.to_string(),
-                    updated_at: now.to_string(),
-                    last_seen_at: now.to_string(),
-                });
-                next_id += 1;
-                outcome.added += 1;
-            }
-            RawOp::Update {
-                id,
-                text,
-                confidence,
-            } => {
-                let text = clean_text(text);
-                if !is_usable(&text) {
-                    outcome.ignored += 1;
-                    continue;
-                }
-                let Some(item) = items.iter_mut().find(|item| item.id == *id) else {
-                    outcome.ignored += 1;
-                    continue;
-                };
-                item.text = text;
-                if let Some(confidence) = confidence {
-                    item.confidence = confidence.clamp(CONFIDENCE_FLOOR, 1.0);
-                }
-                item.updated_at = now.to_string();
-                item.last_seen_at = now.to_string();
-                outcome.updated += 1;
-            }
-            RawOp::Reinforce { id, confidence } => {
-                let Some(item) = items.iter_mut().find(|item| item.id == *id) else {
-                    outcome.ignored += 1;
-                    continue;
-                };
-                // A reinforcement is agreement, so it can only raise confidence.
-                // It never changes the wording: the fact already said what it says.
-                let raised = confidence
-                    .map(|value| value.clamp(CONFIDENCE_FLOOR, 1.0))
-                    .unwrap_or(item.confidence + REINFORCE_STEP);
-                item.confidence = item.confidence.max(raised).min(1.0);
-                item.last_seen_at = now.to_string();
-                outcome.updated += 1;
-            }
-            RawOp::Remove { id, .. } => {
-                let before = items.len();
-                items.retain(|item| item.id != *id);
-                if items.len() == before {
-                    outcome.ignored += 1;
-                } else {
-                    outcome.removed += 1;
-                }
-            }
+    for fact in &reply.facts {
+        let text = normalize_fact(&fact.text);
+        if !is_usable(&text) || fact.confidence < CONFIDENCE_FLOOR {
+            outcome.ignored += 1;
+            continue;
         }
+        let confidence = fact.confidence.clamp(CONFIDENCE_FLOOR, 1.0);
+        let section = Section::classify(&text);
+
+        // An addition that says what an existing row already says is an edit to
+        // that row. The longer wording wins because a model restating a fact
+        // usually does so with more context; confidence is the higher of the two,
+        // because neither statement weakens the other.
+        if let Some(index) = similar_index(items, &text) {
+            let existing = &mut items[index];
+            if text.chars().count() > existing.text.chars().count() {
+                existing.text = text;
+            }
+            existing.confidence = existing.confidence.max(confidence);
+            existing.updated_at = now.to_string();
+            existing.last_seen_at = now.to_string();
+            outcome.updated += 1;
+            continue;
+        }
+
+        items.push(TasteItemRow {
+            id: next_id,
+            section: section.as_str().to_string(),
+            text,
+            confidence,
+            created_at: now.to_string(),
+            updated_at: now.to_string(),
+            last_seen_at: now.to_string(),
+        });
+        next_id += 1;
+        outcome.added += 1;
     }
 
     trim_to_budget(items);
@@ -200,11 +184,17 @@ pub fn normalize(rows: Vec<TasteItemRow>) -> Vec<TasteItemRow> {
     let mut items: Vec<TasteItemRow> = rows
         .into_iter()
         .filter(|item| Section::parse(&item.section).is_some())
-        .filter(|item| is_usable(&clean_text(&item.text)))
-        .map(|mut item| {
-            item.text = clean_text(&item.text);
+        // The same voice and filters a new line goes through. A profile written by
+        // an older build can hold a first-person sentence or a request; rendering
+        // it unchanged would keep the very facts these rules exist to keep out.
+        .filter_map(|mut item| {
+            let text = normalize_fact(&item.text);
+            if !is_usable(&text) {
+                return None;
+            }
+            item.text = text;
             item.confidence = item.confidence.clamp(CONFIDENCE_FLOOR, 1.0);
-            item
+            Some(item)
         })
         .collect();
     items.sort_by_key(|item| item.id);
@@ -213,11 +203,13 @@ pub fn normalize(rows: Vec<TasteItemRow>) -> Vec<TasteItemRow> {
     // this is a short quadratic walk rather than a second index.
     let mut unique: Vec<TasteItemRow> = Vec::with_capacity(items.len());
     for item in items {
-        let section = Section::parse(&item.section).expect("filtered above");
-        match unique.iter().position(|existing| {
-            Section::parse(&existing.section) == Some(section)
-                && similarity(&existing.text, &item.text) >= SIMILARITY
-        }) {
+        // Across sections, not within one. The section is derived from keywords,
+        // and a restatement that introduces one ("...with markdown preview") moves
+        // category while saying exactly the same thing.
+        match unique
+            .iter()
+            .position(|existing| similarity(&existing.text, &item.text) >= SIMILARITY)
+        {
             Some(index) => {
                 let existing = &mut unique[index];
                 if item.text.chars().count() > existing.text.chars().count() {
@@ -235,81 +227,38 @@ pub fn normalize(rows: Vec<TasteItemRow>) -> Vec<TasteItemRow> {
     unique
 }
 
-/// The profile as it is sent to the model for editing.
+/// The profile as the chat receives it, and as the learner is shown it.
 ///
-/// Ids, confidence and age are included here and **not** in the chat block: the
-/// model needs them to address a row, while the chat needs stable bytes and none
-/// of the machinery.
-pub fn render_for_model(items: &[TasteItemRow], now: &str) -> String {
-    let now = parse_stamp(now);
-    let mut out = String::new();
-    for section in Section::ALL {
-        let mut first = true;
-        for item in items
-            .iter()
-            .filter(|item| Section::parse(&item.section) == Some(section))
-        {
-            if first {
-                if !out.is_empty() {
-                    out.push('\n');
-                }
-                out.push_str(&format!("[{}]\n", section.as_str()));
-                first = false;
-            }
-            // Compact on purpose: `id|confidence|last-seen|text` is read by the
-            // model the same way and costs a fraction of the prose form. The
-            // system prompt explains the shape once.
-            out.push_str(&format!(
-                "{}|{:.2}|{}|{}\n",
-                item.id,
-                item.confidence,
-                seen_label(now, &item.last_seen_at),
-                item.text
-            ));
-        }
-    }
-    out.trim_end().to_string()
-}
-
-/// The profile as the chat receives it.
-///
-/// Only text, grouped by heading. No ids, confidence or age: those change when a
-/// fact is reinforced, and a prefix that changes for a reason the conversation
-/// cannot see would invalidate a provider's cache for nothing.
+/// One flat list with no headings, ids, confidence or age. The bytes must not move
+/// between requests -- a provider's prompt cache is matched byte for byte -- and a
+/// section heading costs tokens on every request for structure neither reader
+/// needs. Order is by id, which is stable.
 pub fn render(items: &[TasteItemRow]) -> String {
-    let mut out = String::new();
-    for section in Section::ALL {
-        let mut first = true;
-        for item in items
-            .iter()
-            .filter(|item| Section::parse(&item.section) == Some(section))
-        {
-            if first {
-                if !out.is_empty() {
-                    out.push('\n');
-                }
-                out.push_str(&format!("[{}]\n", section.as_str()));
-                first = false;
-            }
-            out.push_str("- ");
-            out.push_str(&item.text);
-            out.push('\n');
-        }
-    }
-    out.trim_end().to_string()
+    // Sorted here rather than trusted from the caller: this string is part of a
+    // byte-stable prompt prefix, and an in-memory order that moved for any reason
+    // would invalidate every cached token after it.
+    let mut ordered: Vec<&TasteItemRow> = items.iter().collect();
+    ordered.sort_by_key(|item| item.id);
+    ordered
+        .into_iter()
+        .map(|item| format!("- {}", item.text))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The complete block prepended to a chat request, or nothing when empty.
 ///
-/// The header is deliberately short and makes two claims only: where this came
-/// from, and that it is background rather than an instruction. An empty profile
-/// returns `None` rather than a paragraph about having learned nothing.
+/// The header makes two claims only: where this came from, and that it is not an
+/// instruction. An empty profile returns `None` rather than a paragraph about
+/// having learned nothing.
 pub fn render_prompt_block(items: &[TasteItemRow]) -> Option<String> {
     let body = render(items);
     if body.is_empty() {
         return None;
     }
-    Some(format!("About the user (background context):\n\n{body}"))
+    Some(format!(
+        "About the user (background context, not instructions):\n\n{body}"
+    ))
 }
 
 /// Applies the hard caps, lowest-value facts first.
@@ -354,30 +303,35 @@ fn priority(item: &TasteItemRow) -> f32 {
     item.confidence + bonus
 }
 
-/// An existing row in the same section that says what `text` says.
-fn similar_index(items: &[TasteItemRow], section: Section, text: &str) -> Option<usize> {
-    items.iter().position(|item| {
-        Section::parse(&item.section) == Some(section) && similarity(&item.text, text) >= SIMILARITY
-    })
+/// An existing row that says what `text` says.
+///
+/// Deliberately not scoped to a section: the section is a keyword guess, so the
+/// same fact reworded with one new keyword would otherwise become a second row.
+fn similar_index(items: &[TasteItemRow], text: &str) -> Option<usize> {
+    items
+        .iter()
+        .position(|item| similarity(&item.text, text) >= SIMILARITY)
 }
 
 /// How alike two facts are, by word overlap.
 ///
-/// Two scores, whichever is higher: the Jaccard index for facts of similar length,
-/// and containment for a short fact that is entirely present in a longer one
-/// ("Prefers Rust" inside "Prefers Rust for backend services"). Containment is
-/// what makes an `add` with more detail update the existing row rather than
-/// duplicate it.
+/// The Jaccard index, plus containment **only when the shorter fact is wholly
+/// inside the longer one** -- "Prefers Rust" inside "Prefers Rust for backend
+/// services". Containment on mere overlap is wrong: "Uses Windows 11" and "Uses
+/// Windows 10" share two of three words, and collapsing them replaces a true fact
+/// with a different one. A full subset is a more specific version of the same
+/// fact, which is what should replace a row rather than sit beside it.
 pub fn similarity(left: &str, right: &str) -> f32 {
     let left = tokens(left);
     let right = tokens(right);
     if left.is_empty() || right.is_empty() {
         return 0.0;
     }
-    let intersection = left.intersection(&right).count() as f32;
+    let intersection = left.intersection(&right).count();
     let union = left.union(&right).count() as f32;
-    let jaccard = intersection / union;
-    let containment = intersection / left.len().min(right.len()) as f32;
+    let jaccard = intersection as f32 / union;
+    let shorter = left.len().min(right.len());
+    let containment = if intersection == shorter { 1.0 } else { 0.0 };
     jaccard.max(containment)
 }
 
@@ -401,32 +355,158 @@ fn tokens(text: &str) -> HashSet<String> {
         .collect()
 }
 
+/// One fact with its decoration removed, its whitespace collapsed and its voice
+/// made third person.
+fn normalize_fact(raw: &str) -> String {
+    let cleaned = clean_text(raw);
+    let sentence = third_person(&cleaned);
+    let sentence = ensure_period(sentence);
+    clip(sentence.trim())
+}
+
 /// One fact with its decoration removed and its whitespace collapsed.
 fn clean_text(raw: &str) -> String {
     let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
     let trimmed = collapsed
         .trim()
-        .trim_matches(|character: char| matches!(character, '-' | '*' | '`' | '"' | '\'' | '•'))
+        .trim_matches(|character: char| {
+            matches!(character, '-' | '*' | '`' | '"' | '\'' | '•' | '–' | '—')
+        })
         .trim();
     clip(trimmed)
 }
 
+/// Turns a first-person sentence into the third person the profile uses.
+///
+/// A small model ignores "no pronouns" more often than it gets anything else
+/// wrong, and a profile line reading "I use Rust" is ambiguous to a chat model
+/// reading it beside its own instructions. The mapping is a prefix table rather
+/// than a rewrite: it changes only what it recognises and leaves the rest alone,
+/// and a sentence it cannot convert is refused by [`is_usable`] rather than
+/// stored in the wrong voice.
+fn third_person(text: &str) -> String {
+    const PREFIXES: [(&str, &str); 27] = [
+        ("i am ", "Is "),
+        ("i'm ", "Is "),
+        ("i’m ", "Is "),
+        ("i use ", "Uses "),
+        ("i used ", "Used "),
+        ("i have ", "Has "),
+        ("i've ", "Has "),
+        ("i’ve ", "Has "),
+        ("i live ", "Lives "),
+        ("i work ", "Works "),
+        ("i prefer ", "Prefers "),
+        ("i like ", "Likes "),
+        ("i love ", "Loves "),
+        ("i hate ", "Hates "),
+        ("i dislike ", "Dislikes "),
+        ("i don't ", "Does not "),
+        ("i don’t ", "Does not "),
+        ("i do not ", "Does not "),
+        ("i want ", "Wants "),
+        ("i need ", "Needs "),
+        ("i know ", "Knows "),
+        ("i speak ", "Speaks "),
+        ("i play ", "Plays "),
+        ("i read ", "Reads "),
+        ("i build ", "Builds "),
+        ("i write ", "Writes "),
+        ("my name is ", "Name is "),
+    ];
+    let lower = text.to_lowercase();
+    for (from, to) in PREFIXES {
+        if lower.starts_with(from) {
+            return format!("{to}{}", &text[from.len()..]);
+        }
+    }
+    if lower.starts_with("my ") {
+        return format!("Their {}", &text[3..]);
+    }
+    text.to_string()
+}
+
+/// A fact reads as a sentence, so it ends like one.
+fn ensure_period(text: String) -> String {
+    let trimmed = text.trim_end();
+    if trimmed
+        .chars()
+        .last()
+        .is_some_and(|last| last.is_alphanumeric())
+    {
+        format!("{trimmed}.")
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Validates text a person typed into a fact.
 ///
-/// The same cleaning and floor the model's `add` goes through, so a manual edit
-/// cannot store a label or a paragraph that the profile's budget would then have
-/// to carry. `None` means the text is not usable; the caller reports that rather
-/// than saving it.
+/// The same cleaning, voice and filters the model's line goes through, so a
+/// manual edit cannot store a label, a question or a paragraph that the profile's
+/// budget would then have to carry. `None` means the text is not usable; the
+/// caller reports that rather than saving it.
 pub fn sanitize_user_text(raw: &str) -> Option<String> {
-    let cleaned = clean_text(raw);
+    let cleaned = normalize_fact(raw);
     is_usable(&cleaned).then_some(cleaned)
 }
 
-/// A fact is worth storing when it says something, not just names something.
+/// A fact is worth storing when it says something durable, not just names
+/// something or repeats a request.
 fn is_usable(text: &str) -> bool {
     let characters = text.chars().count();
     let words = text.split_whitespace().count();
-    characters >= MIN_ITEM_CHARS && characters <= MAX_ITEM_CHARS && words >= 2
+    if characters < MIN_ITEM_CHARS || characters > MAX_ITEM_CHARS {
+        return false;
+    }
+    // Same rule as the corpus: the word floor applies to space-separated text.
+    if words < 2 && text.is_ascii() {
+        return false;
+    }
+    if text.contains('?') {
+        return false;
+    }
+    let lower = text.to_lowercase();
+    // A sentence left in the first person was not converted, which means it is
+    // not the shape a profile line may take.
+    if lower.starts_with("i ") || lower.starts_with("my ") {
+        return false;
+    }
+    let first = lower
+        .split(|character: char| !character.is_alphanumeric())
+        .next()
+        .unwrap_or("");
+    if NOT_A_FACT_WORDS.contains(&first) {
+        return false;
+    }
+    if lower.starts_with("the user") || lower.contains("this conversation") {
+        return false;
+    }
+    if lower.contains("the assistant") || lower.contains("as an ai") {
+        return false;
+    }
+    !has_secret(&lower)
+}
+
+/// Whether a sentence looks like a credential rather than a fact about a person.
+///
+/// Deliberately narrow: "Uses a password manager" is a preference, while
+/// "Password: hunter2" is a leak. Matching the bare word would drop the first to
+/// catch the second.
+fn has_secret(lower: &str) -> bool {
+    // A credential, not the word. "Uses the API key from the environment" is a
+    // workflow fact, and dropping it to catch "API key: sk-..." loses more than it
+    // protects.
+    lower.contains("api key:")
+        || lower.contains("api key is")
+        || lower.contains("apikey=")
+        || lower.contains("api_key=")
+        || lower.contains("secret key:")
+        || lower.contains("private key:")
+        || lower.contains("access token:")
+        || lower.contains("password:")
+        || lower.contains("sk-proj-")
+        || lower.contains("sk-ant-")
 }
 
 /// Cuts at a character boundary, never inside a multi-byte character.
@@ -439,28 +519,10 @@ fn clip(text: &str) -> String {
     clipped
 }
 
-fn parse_stamp(text: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(text)
-        .ok()
-        .map(|at| at.with_timezone(&Utc))
-}
-
-/// How long ago a fact was last seen, in the model's own short form.
-fn seen_label(now: Option<DateTime<Utc>>, last_seen: &str) -> String {
-    let (Some(now), Some(last_seen)) = (now, parse_stamp(last_seen)) else {
-        return "recently".to_string();
-    };
-    let days = now.signed_duration_since(last_seen).num_days();
-    match days {
-        days if days <= 0 => "today".to_string(),
-        1 => "1d".to_string(),
-        days => format!("{days}d"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::taste::reply::RawFact;
 
     fn item(id: i64, section: Section, text: &str, confidence: f32) -> TasteItemRow {
         TasteItemRow {
@@ -474,18 +536,17 @@ mod tests {
         }
     }
 
-    fn add(section: Section, text: &str, confidence: f32) -> RawOp {
-        RawOp::Add {
-            section: section.as_str().to_string(),
+    fn fact(text: &str, confidence: f32) -> RawFact {
+        RawFact {
             text: text.to_string(),
-            confidence: Some(confidence),
+            confidence,
         }
     }
 
-    fn reply(ops: Vec<RawOp>) -> RawReply {
+    fn reply(facts: Vec<RawFact>) -> RawReply {
         RawReply {
-            ops,
-            report: String::new(),
+            facts,
+            declined: false,
             ignored: 0,
         }
     }
@@ -495,19 +556,32 @@ mod tests {
         let mut items = Vec::new();
         let outcome = merge(
             &mut items,
-            &reply(vec![add(
-                Section::Work,
-                "Prefers Rust (programming language) for backend services.",
+            &reply(vec![fact(
+                "Uses Rust (programming language) for backend services.",
                 0.9,
             )]),
             "2026-02-01T00:00:00.000Z",
         );
         assert_eq!(outcome.added, 1);
-        assert_eq!(
-            items[0].text,
-            "Prefers Rust (programming language) for backend services."
-        );
+        assert!(items[0].text.starts_with("Uses Rust"));
         assert_eq!(items[0].section, "work");
+        assert_eq!(items[0].confidence, 0.9);
+    }
+
+    #[test]
+    fn a_first_person_sentence_becomes_third_person() {
+        assert_eq!(
+            normalize_fact("i use Rust (programming language) for backend work"),
+            "Uses Rust (programming language) for backend work."
+        );
+        assert_eq!(
+            normalize_fact("I'm a backend developer"),
+            "Is a backend developer."
+        );
+        assert_eq!(
+            normalize_fact("My laptop is a MacBook Pro"),
+            "Their laptop is a MacBook Pro."
+        );
     }
 
     #[test]
@@ -520,8 +594,7 @@ mod tests {
         )];
         let outcome = merge(
             &mut items,
-            &reply(vec![add(
-                Section::Work,
+            &reply(vec![fact(
                 "Prefers Rust (programming language) for backend services and CLI tools.",
                 0.9,
             )]),
@@ -532,6 +605,15 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert!(items[0].text.ends_with("CLI tools."));
         assert_eq!(items[0].confidence, 0.9);
+    }
+
+    /// Containment on any short side would collapse these into one row and replace
+    /// a true fact with a different one.
+    #[test]
+    fn two_short_facts_with_one_different_word_are_not_restatements() {
+        assert!(similarity("Uses Windows 11.", "Uses Windows 10.") < SIMILARITY);
+        assert!(similarity("Uses a MacBook Pro.", "Uses a MacBook Air.") < SIMILARITY);
+        assert!(similarity("Dislikes loud music.", "Dislikes loud notifications.") < SIMILARITY);
     }
 
     /// The pair this rule exists for: same verb, opposite object.
@@ -545,8 +627,7 @@ mod tests {
         )];
         merge(
             &mut items,
-            &reply(vec![add(
-                Section::Work,
+            &reply(vec![fact(
                 "Prefers Python (programming language) for data analysis.",
                 0.8,
             )]),
@@ -556,94 +637,93 @@ mod tests {
     }
 
     #[test]
-    fn an_update_names_the_row_it_changes() {
-        let mut items = vec![item(
-            7,
-            Section::Preferences,
-            "Prefers light themes in every app.",
-            0.6,
-        )];
+    fn a_question_is_not_a_fact() {
+        let mut items = Vec::new();
         let outcome = merge(
             &mut items,
-            &reply(vec![RawOp::Update {
-                id: 7,
-                text: "Prefers dark themes in editors, light themes elsewhere.".into(),
-                confidence: Some(0.95),
-            }]),
+            &reply(vec![fact("Is a quiz page something they want?", 0.9)]),
             "2026-02-01T00:00:00.000Z",
         );
-        assert_eq!(outcome.updated, 1);
-        assert_eq!(
-            items[0].text,
-            "Prefers dark themes in editors, light themes elsewhere."
-        );
-        assert_eq!(items[0].confidence, 0.95);
-    }
-
-    #[test]
-    fn reinforce_raises_confidence_without_changing_the_wording() {
-        let mut items = vec![item(4, Section::Interests, "Draws regularly.", 0.7)];
-        let outcome = merge(
-            &mut items,
-            &reply(vec![RawOp::Reinforce {
-                id: 4,
-                confidence: None,
-            }]),
-            "2026-02-01T00:00:00.000Z",
-        );
-        assert_eq!(outcome.updated, 1);
-        assert_eq!(items[0].confidence, 0.75);
-        assert_eq!(items[0].text, "Draws regularly.");
-    }
-
-    #[test]
-    fn removing_and_unknown_ids_are_counted_correctly() {
-        let mut items = vec![item(
-            1,
-            Section::Dislikes,
-            "Dislikes loud notifications.",
-            0.8,
-        )];
-        let outcome = merge(
-            &mut items,
-            &reply(vec![
-                RawOp::Remove {
-                    id: 1,
-                    _reason: Some("contradicted".into()),
-                },
-                RawOp::Reinforce {
-                    id: 99,
-                    confidence: Some(0.9),
-                },
-            ]),
-            "2026-02-01T00:00:00.000Z",
-        );
-        assert_eq!(outcome.removed, 1);
         assert_eq!(outcome.ignored, 1);
         assert!(items.is_empty());
     }
 
     #[test]
-    fn an_unknown_section_or_a_label_is_ignored() {
+    fn a_request_is_not_a_fact() {
         let mut items = Vec::new();
         let outcome = merge(
             &mut items,
             &reply(vec![
-                RawOp::Add {
-                    section: "misc".into(),
-                    text: "Something true and long enough.".into(),
-                    confidence: Some(0.8),
-                },
-                add(Section::Work, "Rust", 0.9),
+                fact("Build me a quiz page for the history class.", 0.9),
+                fact("Explain how this app stores its settings.", 0.9),
+                fact("Wants a quiz page built for the history class.", 0.9),
+                fact("Asked for a quiz page about the history class.", 0.9),
             ]),
             "2026-02-01T00:00:00.000Z",
         );
-        assert_eq!(outcome.ignored, 2);
+        assert_eq!(outcome.ignored, 4);
         assert!(items.is_empty());
     }
 
     #[test]
-    fn the_rendered_profile_is_stable_and_carries_no_machinery() {
+    fn a_sentence_about_the_model_is_not_a_fact_about_the_user() {
+        let mut items = Vec::new();
+        merge(
+            &mut items,
+            &reply(vec![fact(
+                "The assistant prefers short answers in this conversation.",
+                0.9,
+            )]),
+            "2026-02-01T00:00:00.000Z",
+        );
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn a_credential_is_not_stored() {
+        let mut items = Vec::new();
+        merge(
+            &mut items,
+            &reply(vec![fact(
+                "Uses the API key sk-proj-abcdef for every request.",
+                0.9,
+            )]),
+            "2026-02-01T00:00:00.000Z",
+        );
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn a_fact_below_the_confidence_floor_is_dropped() {
+        let mut items = Vec::new();
+        let outcome = merge(
+            &mut items,
+            &reply(vec![fact("Might enjoy strategy games.", 0.3)]),
+            "2026-02-01T00:00:00.000Z",
+        );
+        assert_eq!(outcome.ignored, 1);
+        assert!(items.is_empty());
+    }
+
+    /// The section is chosen in code, so a model that only writes a line still
+    /// produces a grouped profile.
+    #[test]
+    fn the_section_is_chosen_from_the_fact() {
+        let mut items = Vec::new();
+        merge(
+            &mut items,
+            &reply(vec![
+                fact("Dislikes loud notifications.", 0.9),
+                fact("Plays chess on weekends.", 0.8),
+            ]),
+            "2026-02-01T00:00:00.000Z",
+        );
+        assert!(items.iter().any(|item| item.section == "dislikes"));
+        assert!(items.iter().any(|item| item.section == "interests"));
+    }
+
+    #[test]
+    fn the_rendered_profile_is_flat_stable_text() {
         let items = vec![
             item(
                 2,
@@ -661,27 +741,15 @@ mod tests {
         let rendered = render(&items);
         assert_eq!(
             rendered,
-            "[identity]\n- Uses Windows 11 with an RTX 5090 (GPU).\n\n[work]\n- Prefers Rust (programming language)."
+            "- Uses Windows 11 with an RTX 5090 (GPU).\n- Prefers Rust (programming language)."
         );
-        assert!(!rendered.contains("id "));
+        assert!(!rendered.contains('['));
         assert!(!rendered.contains("0.9"));
     }
 
     #[test]
-    fn the_model_sees_ids_confidence_and_age() {
-        let items = vec![item(
-            4,
-            Section::Work,
-            "Prefers Rust (programming language).",
-            0.9,
-        )];
-        let rendered = render_for_model(&items, "2026-01-03T00:00:00.000Z");
-        assert!(rendered.contains("4|0.90|2d|"), "{rendered}");
-    }
-
-    #[test]
     fn the_budget_drops_the_weakest_fact_first() {
-        let mut items: Vec<TasteItemRow> = (0..60)
+        let mut items: Vec<TasteItemRow> = (0..50)
             .map(|index| {
                 item(
                     index as i64 + 1,
@@ -693,7 +761,6 @@ mod tests {
                 )
             })
             .collect();
-        // The one strong fact must survive the trim.
         items.push(item(
             100,
             Section::Identity,
@@ -701,7 +768,7 @@ mod tests {
             0.99,
         ));
         let normalized = normalize(items);
-        assert!(normalized.len() < 61);
+        assert!(normalized.len() < 51);
         assert!(normalized.iter().any(|item| item.id == 100));
         assert!(render(&normalized).chars().count() <= MAX_DOCUMENT_CHARS);
     }
@@ -729,15 +796,16 @@ mod tests {
     }
 
     /// The manual editor uses the same floor as the model: a label is refused
-    /// and ordinary extra whitespace is cleaned before it is stored.
+    /// and a first-person sentence is normalized before it is stored.
     #[test]
     fn a_manually_typed_fact_is_cleaned_and_checked() {
         assert_eq!(
-            sanitize_user_text("  Prefers   Rust (programming language) for backend work.  "),
-            Some("Prefers Rust (programming language) for backend work.".to_string())
+            sanitize_user_text("  I   use Rust (programming language) for backend work  "),
+            Some("Uses Rust (programming language) for backend work.".to_string())
         );
         assert_eq!(sanitize_user_text("Rust"), None);
         assert_eq!(sanitize_user_text("   "), None);
+        assert_eq!(sanitize_user_text("Why does this happen?"), None);
     }
 
     #[test]

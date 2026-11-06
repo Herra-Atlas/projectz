@@ -149,7 +149,7 @@ impl ToolSummary {
 /// is missing.
 pub fn summarize(tool: &str, arguments: &Value, result: &str, succeeded: bool) -> ToolSummary {
     ToolSummary {
-        label: label_for(tool),
+        label: label_for_call(tool, arguments),
         detail: detail_for(tool, arguments),
         outcome: if succeeded {
             outcome_for(tool, result)
@@ -321,7 +321,12 @@ fn detail_for(tool: &str, arguments: &Value) -> String {
         let skill = string_at(arguments, "skill")
             .or_else(|| string_at(arguments, "existing_name"))
             .or_else(|| string_at(arguments, "name"));
-        let file = string_at(arguments, "path").or_else(|| string_at(arguments, "script"));
+        let file = string_at(arguments, "path")
+            .or_else(|| string_at(arguments, "script"))
+            // `skill_manage` writes `SKILL.md` and nothing else: its schema has
+            // no `path`, so the file is stated rather than left to be guessed
+            // from the tool's description.
+            .or_else(|| (tool == "skill_manage").then(|| "SKILL.md".to_string()));
         return match (skill, file) {
             (Some(skill), Some(file)) => format!("{skill} · {file}"),
             (Some(skill), None) => skill,
@@ -504,6 +509,26 @@ pub fn label_for(tool: &str) -> &'static str {
         "todo" => "Checklist",
         _ => "Tool call",
     }
+}
+
+/// The verb phrase for one call, where the tool's own arguments change it.
+///
+/// Only `skill_manage` needs this: it is one tool covering create, update and
+/// edit, and a row that says "Save skill" for a one-line correction names the
+/// wrong act. Everything else is named by [`label_for`] alone.
+///
+/// Static strings, like [`label_for`], so the summary shape and the cached
+/// `tools` array are untouched.
+pub fn label_for_call(tool: &str, arguments: &Value) -> &'static str {
+    if tool == "skill_manage" {
+        return match arguments.get("action").and_then(Value::as_str) {
+            Some("create") => "Create skill",
+            Some("update") => "Rewrite skill",
+            Some("edit") => "Edit skill",
+            _ => label_for(tool),
+        };
+    }
+    label_for(tool)
 }
 
 /// The short figure shown beside a successful call.
@@ -1034,6 +1059,38 @@ mod tests {
             .label,
             "Edit file"
         );
+    }
+
+    /// `skill_manage` is one tool covering three acts, so the row has to say
+    /// which one happened and which file it touched -- not "Save skill" for a
+    /// one-line correction.
+    #[test]
+    fn each_skill_action_is_named_for_what_it_did() {
+        let created = summarize(
+            "skill_manage",
+            &json!({ "action": "create", "name": "code-craft" }),
+            "Created the skill `code-craft`.",
+            true,
+        );
+        assert_eq!(created.label, "Create skill");
+        assert_eq!(created.detail, "code-craft · SKILL.md");
+
+        let edited = summarize(
+            "skill_manage",
+            &json!({ "action": "edit", "existing_name": "code-craft", "old_text": "a", "new_text": "b" }),
+            "Changed 1 of 1 in `code-craft`.",
+            true,
+        );
+        assert_eq!(edited.label, "Edit skill");
+        assert_eq!(edited.detail, "code-craft · SKILL.md");
+
+        let updated = summarize(
+            "skill_manage",
+            &json!({ "action": "update", "existing_name": "code-craft" }),
+            "Updated the skill `code-craft`.",
+            true,
+        );
+        assert_eq!(updated.label, "Rewrite skill");
     }
 
     /// A line edit is labelled apart from a text edit and names the range, so

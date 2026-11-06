@@ -37,7 +37,7 @@ export type PendingApproval = {
 
 type ToolApprovalProps = {
   request: PendingApproval;
-  onAnswer: (approvalId: string, allow: boolean) => void;
+  onAnswer: (approvalId: string, allow: boolean, remember?: boolean) => void;
   onCancel: () => void;
 };
 
@@ -138,6 +138,17 @@ export default function ToolApproval({ request, onAnswer, onCancel }: ToolApprov
         className="inline-flex h-7 shrink-0 items-center rounded-md border border-[var(--line)] px-2.5 text-[11px] text-[var(--muted)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
       >
         Decline
+      </button>
+      {/* A standing answer for this conversation only. It is a third button
+          rather than a checkbox hidden in Accept because the two mean different
+          things: Accept answers this call, and this answers every later one. */}
+      <button
+        type="button"
+        onClick={() => { onAnswer(request.approvalId, true, true); onCancel(); }}
+        title={`Allow ${label} for this conversation`}
+        className="inline-flex h-7 shrink-0 items-center rounded-md border border-[var(--line)] px-2.5 text-[11px] text-[var(--muted)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
+      >
+        Always
       </button>
       <button
         ref={acceptRef}

@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import AddressBar from "./AddressBar";
 import BrowserTabs from "./BrowserTabs";
 import { useBrowserView } from "./useBrowserView";
+import { PANEL_BROWSER_KEY, readPanelSetting, writePanelSetting } from "../../../features/rightPanel/panelMemory";
 
 /**
  * The Browser view: tabs over an address bar over a webview, and nothing else.
@@ -46,6 +47,49 @@ type BrowserTabProps = {
 export default function BrowserTab({ mounted, initialUrl, requestKey, onRequestHandled, onLastTabClosed, onNotify }: BrowserTabProps) {
   const browser = useBrowserView(mounted);
   const lastRequestRef = useRef<number | null>(null);
+  /** The page currently loaded, readable from the one-shot restore below. */
+  const latestUrlRef = useRef("");
+  latestUrlRef.current = browser.url;
+  /** True once this mount has decided whether to restore a page. */
+  const rememberedRef = useRef(false);
+  /** An explicit close of the last tab means "forget the page", not "remember". */
+  const closedRef = useRef(false);
+
+  /**
+   * Puts back the page this view was on.
+   *
+   * Once per mount, because choosing another panel view destroys the whole
+   * browser -- and putting the page back is what makes switching away and back
+   * feel like the same browser rather than a new one. An explicit request from
+   * Files wins: that names the page the user just asked for.
+   */
+  useEffect(() => {
+    if (!mounted || rememberedRef.current) return;
+    rememberedRef.current = true;
+    if (initialUrl && requestKey != null) return;
+    let live = true;
+    void readPanelSetting<{ url?: string }>(PANEL_BROWSER_KEY).then((saved) => {
+      // A page the user opened while this read was in flight is newer.
+      if (!live || !saved?.url || latestUrlRef.current) return;
+      void browser.navigate(saved.url).catch((reason: unknown) => onNotify?.("error", String(reason)));
+    });
+    return () => {
+      live = false;
+      // StrictMode runs every effect twice: the first run's read is cancelled
+      // with the cleanup, so the flag has to come back down or the second -- the
+      // real one -- would decide the page had already been restored and skip it.
+      rememberedRef.current = false;
+    };
+    // `browser` is a fresh object every render and `navigate` is stable; the
+    // restore is deliberately once per mount, keyed by `mounted` alone.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mounted]);
+
+  // The page currently loaded, remembered as it changes.
+  useEffect(() => {
+    if (!mounted || closedRef.current || !browser.url) return;
+    writePanelSetting(PANEL_BROWSER_KEY, { url: browser.url });
+  }, [mounted, browser.url]);
 
   // A file handed over from the Files view. Keyed so the same URL twice still
   // navigates, and guarded so it fires once per request rather than on every
@@ -72,7 +116,16 @@ export default function BrowserTab({ mounted, initialUrl, requestKey, onRequestH
         tabs={browser.tabs}
         activeTab={browser.activeTab}
         onSelect={(id) => void browser.selectTab(id).catch((reason: unknown) => onNotify?.("error", String(reason)))}
-        onClose={(id) => void browser.closeTab(id).then((lastClosed) => { if (lastClosed) onLastTabClosed?.(); }).catch((reason: unknown) => onNotify?.("error", String(reason)))}
+        onClose={(id) => void browser.closeTab(id).then((lastClosed) => {
+          if (lastClosed) {
+            // Closing the last tab is the one act that means "do not come back
+            // to this page", so it clears the remembered URL rather than saving
+            // the empty one the tab left behind.
+            closedRef.current = true;
+            writePanelSetting(PANEL_BROWSER_KEY, { url: "" });
+            onLastTabClosed?.();
+          }
+        }).catch((reason: unknown) => onNotify?.("error", String(reason)))}
         onNew={() => void browser.openTab().catch((reason: unknown) => onNotify?.("error", String(reason)))}
       />
       <AddressBar

@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ChartNoAxesColumn, ChartSpline, Check, ChevronLeft, ChevronRight, CircleDot, Clock, Database, LoaderCircle, MessageSquareText, MoreHorizontal, Pin, Pencil, Send, Settings2, Trash2, X } from "lucide-react";
 import type { ChatSessionHeader, SessionActivity, SessionRunStatus } from "../features/chat/types";
@@ -110,7 +110,7 @@ function NavButton({
   );
 }
 
-export default function Sidebar({
+export default memo(function Sidebar({
   sessions,
   activeId,
   activity,
@@ -272,8 +272,15 @@ export default function Sidebar({
    * outside the scrolling history on purpose -- its heading stays visible while
    * the list is long, and collapsing it leaves the chats above untouched.
    */
-  const telegramSessions = sessions.filter((session) => session.kind === "telegram");
-  const otherSessions = sessions.filter((session) => session.kind !== "telegram");
+  // Both lists are pure functions of `sessions`; rebuilding them on a render
+  // that did not change the list walked every conversation for nothing.
+  const [telegramSessions, otherSessions] = useMemo(
+    () => [
+      sessions.filter((session) => session.kind === "telegram"),
+      sessions.filter((session) => session.kind !== "telegram"),
+    ],
+    [sessions],
+  );
 
   const toggleTelegram = () => {
     setTelegramOpen((open) => {
@@ -495,4 +502,4 @@ export default function Sidebar({
           view through one path rather than each resolving a session itself. */}
     </>
   );
-}
+});

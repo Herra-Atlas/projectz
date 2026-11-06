@@ -242,6 +242,31 @@ export function useFileTree(skill?: string | null) {
   }, [childrenByPath, load]);
 
   /**
+   * Opens the folders above a path so a row deep in the tree is visible.
+   *
+   * A search result names a path, not a row: the folders above it may never
+   * have been expanded. Every ancestor is opened in order and fetched only when
+   * it is not already cached -- the same work as clicking down the tree, done
+   * once for the row a search chose.
+   */
+  const reveal = useCallback(async (relative: string) => {
+    const parts = normalizePath(relative).split("/").filter(Boolean);
+    const ancestors: string[] = [];
+    for (let index = 1; index < parts.length; index += 1) {
+      ancestors.push(parts.slice(0, index).join("/"));
+    }
+    if (ancestors.length === 0) return;
+    setExpanded((current) => {
+      const next = new Set(current);
+      for (const ancestor of ancestors) next.add(ancestor);
+      return next;
+    });
+    for (const ancestor of ancestors) {
+      if (!(ancestor in childrenByPath)) await load(ancestor);
+    }
+  }, [childrenByPath, load]);
+
+  /**
    * Discards the cache so the tree re-reads from disk.
    *
    * The `refreshKey` is bumped by the caller when it knows something changed --
@@ -405,8 +430,10 @@ export function useFileTree(skill?: string | null) {
     loadingPath, 
     isExpanded, 
     childrenOf, 
+    expanded,
     toggle, 
     expand,
+    reveal,
     collapseAll, 
     refresh,
     /**

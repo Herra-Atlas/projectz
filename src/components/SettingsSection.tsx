@@ -216,9 +216,20 @@ export function SettingRow({ label, anchor, description, hint, stacked, control 
   );
 }
 
-export function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (next: boolean) => void; label: string }) {
+export function Toggle({
+  checked,
+  onChange,
+  label,
+  disabled = false,
+}: {
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  label: string;
+  /** A switch that cannot be moved yet, e.g. a feature whose model is missing. */
+  disabled?: boolean;
+}) {
   return (
-    <button type="button" role="switch" aria-label={label} aria-checked={checked} onClick={() => onChange(!checked)} className={`relative inline-flex h-[22px] w-[38px] items-center rounded-full transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] ${checked ? "bg-[var(--accent)]" : "bg-[var(--raised)]"}`}>
+    <button type="button" role="switch" aria-label={label} aria-checked={checked} disabled={disabled} onClick={() => onChange(!checked)} className={`relative inline-flex h-[22px] w-[38px] items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-45 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] ${checked ? "bg-[var(--accent)]" : "bg-[var(--raised)]"}`}>
       <span className={`inline-block size-4 rounded-full bg-[var(--page)] transition-transform ${checked ? "translate-x-[20px]" : "translate-x-0.5"}`} />
     </button>
   );

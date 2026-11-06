@@ -124,13 +124,14 @@ export default function StatisticsPage({
           {/* What the agent did, which no other panel answers. The old three bars
               here repeated the cards above and counted a message role the app
               never writes, so the panel is now the tool calls themselves. */}
-          <Panel title="Tools">
+          <Panel title="Tools" className="lg:h-[400px]">
             {report
-              ? <ToolBars tools={report.tools} empty="No tool calls in this period." />
+              ? <div className="min-h-0 flex-1 overflow-y-auto"><ToolBars tools={report.tools} empty="No tool calls in this period." /></div>
               : <p className="px-4 py-12 text-center text-sm text-[var(--muted)]">Loading…</p>}
           </Panel>
           <Panel
             title="Models"
+            className="lg:h-[400px]"
             tabs={
               <PanelTabs
                 what="model view"

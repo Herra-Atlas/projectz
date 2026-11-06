@@ -280,8 +280,14 @@ fn tick(app: &AppHandle, runtime: &AiRuntime, state: &Arc<State>) {
     // Which jobs the machine is clear for, refreshed once per tick. Recorded for
     // every enabled job rather than only the ones that are due, so a job whose time
     // arrives while the machine is already calm has that evidence waiting.
+    //
+    // Only a local-model job ever reads this evidence (the confirm step below),
+    // so a provider job was paying a condition evaluation and a mutex lock every
+    // fifteen seconds to record a value nothing could ask for.
     for job in runtime.database().list_jobs().unwrap_or_default() {
-        if !job.enabled {
+        if !job.enabled
+            || !matches!(job.model, crate::database::jobs::JobModel::Local { .. })
+        {
             continue;
         }
         let clear = conditions::start_blocked_by(&machine, &job.conditions).is_none();

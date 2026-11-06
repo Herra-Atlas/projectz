@@ -1,4 +1,4 @@
-import { Bot, ChartNoAxesColumn, FileText, Globe2, Terminal, X, type LucideIcon } from "lucide-react";
+import { Bot, ChartNoAxesColumn, FileText, Globe2, Sparkles, Terminal, X, type LucideIcon } from "lucide-react";
 import type { PanelViewId } from "../../features/rightPanel/usePanelViews";
 
 /**
@@ -23,6 +23,7 @@ const TABS: Record<PanelViewId, { label: string; icon: LucideIcon }> = {
   // Overview shares its mark with the sidebar's menu item, so the view looks
   // the same whether it is being asked for or already open.
   overview: { label: "Overview", icon: ChartNoAxesColumn },
+  taste: { label: "Taste", icon: Sparkles },
 };
 
 type PanelTabsProps = {

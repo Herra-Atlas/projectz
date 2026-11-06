@@ -27,7 +27,7 @@ pub struct Database {
 /// both refer to this, so adding a migration is one edit here plus one in
 /// `migrate`. Before this existed, each new migration silently broke a test that
 /// had hardcoded the old number.
-pub const LATEST_SCHEMA_VERSION: i64 = 19;
+pub const LATEST_SCHEMA_VERSION: i64 = 20;
 
 /// The current time as UTC ISO-8601, the format every timestamp uses.
 ///
@@ -68,6 +68,23 @@ impl Database {
         let connection = Connection::open(path).map_err(|error| error.to_string())?;
         connection
             .pragma_update(None, "journal_mode", "WAL")
+            .map_err(|error| error.to_string())?;
+        // WAL pairs with NORMAL: the journal is written on every commit but only
+        // fsynced at checkpoints, which is what makes a tool-heavy run stop paying
+        // a disk flush per cached result. A crash can lose the last commits; it
+        // cannot corrupt the database, which is the trade WAL documents.
+        connection
+            .pragma_update(None, "synchronous", "NORMAL")
+            .map_err(|error| error.to_string())?;
+        // The statistics report groups and sorts over the whole history; keeping
+        // its temporary B-trees in memory keeps it from writing them to disk.
+        connection
+            .pragma_update(None, "temp_store", "MEMORY")
+            .map_err(|error| error.to_string())?;
+        // ~16 MB of page cache instead of SQLite's 2 MB default, so a list that
+        // walks several tables does not re-read the same pages from the file.
+        connection
+            .pragma_update(None, "cache_size", -16000)
             .map_err(|error| error.to_string())?;
         connection
             .pragma_update(None, "foreign_keys", "ON")
@@ -680,6 +697,13 @@ impl Database {
                      has a stored transcript. A save must carry the conversation's messages."
                 ));
             }
+            // Prepared once for the whole loop: the SQL is identical for every
+            // message, so compiling it per row made a long conversation's save
+            // quadratic in its own length. The cache is per connection and the
+            // statement is dropped before the transaction commits.
+            let mut save_message = tx
+                .prepare_cached("INSERT INTO messages (id,session_id,ordinal,role,content,created_at,model_id,provider_id,metrics_json,prompt_tokens,completion_tokens,cached_tokens,ttft_ms,total_latency_ms,reasoning,tool_json,generation_seconds,prompt_seconds,generation_rate_estimated,activity_json,hidden,used_prompt_tokens,used_completion_tokens) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23) ON CONFLICT(id) DO UPDATE SET content=excluded.content,model_id=excluded.model_id,provider_id=excluded.provider_id,metrics_json=excluded.metrics_json,prompt_tokens=excluded.prompt_tokens,completion_tokens=excluded.completion_tokens,cached_tokens=excluded.cached_tokens,ttft_ms=excluded.ttft_ms,total_latency_ms=excluded.total_latency_ms,reasoning=excluded.reasoning,tool_json=excluded.tool_json,generation_seconds=excluded.generation_seconds,prompt_seconds=excluded.prompt_seconds,generation_rate_estimated=excluded.generation_rate_estimated,activity_json=excluded.activity_json,hidden=excluded.hidden,used_prompt_tokens=excluded.used_prompt_tokens,used_completion_tokens=excluded.used_completion_tokens")
+                .map_err(|error| error.to_string())?;
             for (index, message) in messages.iter().enumerate() {
                 let mut metrics = message["metrics"].clone();
                 if let Some(values) = metrics.as_object_mut() {
@@ -726,7 +750,7 @@ impl Database {
                         json(&stored)
                     })
                     .transpose()?;
-                tx.execute("INSERT INTO messages (id,session_id,ordinal,role,content,created_at,model_id,provider_id,metrics_json,prompt_tokens,completion_tokens,cached_tokens,ttft_ms,total_latency_ms,reasoning,tool_json,generation_seconds,prompt_seconds,generation_rate_estimated,activity_json,hidden,used_prompt_tokens,used_completion_tokens) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23) ON CONFLICT(id) DO UPDATE SET content=excluded.content,model_id=excluded.model_id,provider_id=excluded.provider_id,metrics_json=excluded.metrics_json,prompt_tokens=excluded.prompt_tokens,completion_tokens=excluded.completion_tokens,cached_tokens=excluded.cached_tokens,ttft_ms=excluded.ttft_ms,total_latency_ms=excluded.total_latency_ms,reasoning=excluded.reasoning,tool_json=excluded.tool_json,generation_seconds=excluded.generation_seconds,prompt_seconds=excluded.prompt_seconds,generation_rate_estimated=excluded.generation_rate_estimated,activity_json=excluded.activity_json,hidden=excluded.hidden,used_prompt_tokens=excluded.used_prompt_tokens,used_completion_tokens=excluded.used_completion_tokens", params![
+                save_message.execute(params![
                     format!("{id}:{index}"),
                     id,
                     index as i64,
@@ -756,6 +780,7 @@ impl Database {
                     used_completion_tokens,
                 ]).map_err(|error| error.to_string())?;
             }
+            drop(save_message);
             // A conversation can shrink (a cleared or edited transcript). Rows
             // past the end of the array no longer exist, so remove just those
             // rather than every row in the session.
@@ -1727,6 +1752,19 @@ fn migrate(connection: &mut Connection) -> Result<(), String> {
                  completion_tokens = (SELECT COALESCE(SUM(COALESCE(used_completion_tokens, completion_tokens)), 0) FROM messages WHERE session_id = sessions.id);",
         )
         .map_err(|error| error.to_string())?;
+        tx.execute_batch(&format!("PRAGMA user_version={LATEST_SCHEMA_VERSION};"))
+            .map_err(|error| error.to_string())?;
+        tx.commit().map_err(|error| error.to_string())?;
+    }
+    // 20: the statistics report filters `sessions` by `created_at` and had no
+    // index behind it -- `messages` has carried one since migration 6. Additive
+    // and idempotent, so an existing database gains the index in place.
+    if version < 20 {
+        let tx = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        tx.execute_batch("CREATE INDEX IF NOT EXISTS idx_sessions_created_at ON sessions(created_at);")
+            .map_err(|error| error.to_string())?;
         tx.execute_batch(&format!("PRAGMA user_version={LATEST_SCHEMA_VERSION};"))
             .map_err(|error| error.to_string())?;
         tx.commit().map_err(|error| error.to_string())?;

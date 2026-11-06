@@ -1,6 +1,6 @@
 [package]
 name = "projectz"
-version = "0.7.3"
+version = "0.7.4"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -110,6 +110,14 @@ webview2-com = "0.39"
 # interface that `CoreWebView2::Settings` hands back. The same version
 # webview2-com is built against, so the two share one crate instance.
 windows-core = "0.62"
+# The Recycle Bin, so a Delete in the Files panel is undoable. `SHFileOperationW`
+# is the shell's own delete entry point: one call removes a whole tree, and the
+# double-NUL wide path form in `src/panel/fs.rs` is what it requires.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_Shell",
+    "Win32_System_Com",
+] }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

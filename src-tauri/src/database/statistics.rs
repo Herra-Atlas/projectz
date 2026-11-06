@@ -220,7 +220,7 @@ fn previous_usage(
     let sessions = connection
         .query_row(
             "SELECT COUNT(*) FROM sessions
-             WHERE substr(created_at,1,10) >= ?1 AND substr(created_at,1,10) < ?2",
+             WHERE created_at >= ?1 AND created_at < ?2",
             params![previous_since, since],
             |row| row.get::<_, i64>(0),
         )
@@ -250,7 +250,7 @@ fn previous_usage(
                      COALESCE(SUM(CASE WHEN cached_tokens IS NOT NULL THEN prompt_tokens ELSE 0 END), 0),
                      COALESCE(SUM(cached_tokens IS NOT NULL), 0)
                  FROM messages
-                 WHERE substr(created_at,1,10) >= ?1 AND substr(created_at,1,10) < ?2"
+                 WHERE created_at >= ?1 AND created_at < ?2"
             ),
             params![previous_since, since],
             |row| {
@@ -276,7 +276,7 @@ fn previous_usage(
         .query_row(
             "SELECT COUNT(*) FROM (
                  SELECT 1 FROM messages
-                 WHERE substr(created_at,1,10) >= ?1 AND substr(created_at,1,10) < ?2
+                 WHERE created_at >= ?1 AND created_at < ?2
                        AND model_id IS NOT NULL AND role = 'assistant'
                  GROUP BY model_id, provider_id
              )",
@@ -289,7 +289,7 @@ fn previous_usage(
         .query_row(
             "SELECT COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0)
              FROM taste_runs
-             WHERE substr(started_at,1,10) >= ?1 AND substr(started_at,1,10) < ?2",
+             WHERE started_at >= ?1 AND started_at < ?2",
             params![previous_since, since],
             |row| Ok((sum_or_zero(row, 0)?, sum_or_zero(row, 1)?)),
         )
@@ -341,7 +341,7 @@ pub fn build_report(
 ) -> Result<UsageReport, String> {
     let sessions = connection
         .query_row(
-            "SELECT COUNT(*) FROM sessions WHERE substr(created_at,1,10) >= ?1",
+            "SELECT COUNT(*) FROM sessions WHERE created_at >= ?1",
             params![since],
             |row| row.get::<_, i64>(0),
         )
@@ -355,7 +355,7 @@ pub fn build_report(
                  COALESCE(SUM(role = 'user'), 0),
                  COALESCE(SUM(role = 'assistant'), 0),
                  COALESCE(SUM(role = 'tool'), 0)
-             FROM messages WHERE substr(created_at,1,10) >= ?1",
+             FROM messages WHERE created_at >= ?1",
             params![since],
             |row| {
                 Ok((
@@ -375,7 +375,7 @@ pub fn build_report(
                 "SELECT COALESCE(SUM({REPLY_PROMPT_TOKENS}), 0),
                         COALESCE(SUM({REPLY_COMPLETION_TOKENS}), 0),
                         COALESCE(SUM(CASE WHEN role = 'assistant' THEN {REPLY_REQUESTS} ELSE 0 END), 0)
-                 FROM messages WHERE substr(created_at,1,10) >= ?1"
+                 FROM messages WHERE created_at >= ?1"
             ),
             params![since],
             |row| {
@@ -401,7 +401,7 @@ pub fn build_report(
                     COALESCE(SUM({REPLY_COMPLETION_TOKENS}), 0),
                     COALESCE(SUM(CASE WHEN role = 'assistant' THEN {REPLY_REQUESTS} ELSE 0 END), 0)
              FROM messages
-             WHERE substr(created_at,1,10) >= ?1 AND {REPLY_COMPLETION_TOKENS} IS NOT NULL
+             WHERE created_at >= ?1 AND {REPLY_COMPLETION_TOKENS} IS NOT NULL
              GROUP BY bucket ORDER BY bucket ASC"
         ))
         .map_err(|error| error.to_string())?;
@@ -434,7 +434,7 @@ pub fn build_report(
                     COALESCE(SUM(prompt_tokens), 0),
                     COUNT(*)
              FROM messages
-             WHERE substr(created_at,1,10) >= ?1 AND cached_tokens IS NOT NULL",
+             WHERE created_at >= ?1 AND cached_tokens IS NOT NULL",
             params![since],
             |row| {
                 Ok((
@@ -456,7 +456,7 @@ pub fn build_report(
                     COALESCE(s.prompt_tokens, 0),
                     COALESCE(s.completion_tokens, 0)
              FROM sessions s
-             WHERE substr(s.created_at,1,10) >= ?1
+             WHERE s.created_at >= ?1
              ORDER BY s.created_at DESC",
         )
         .map_err(|error| error.to_string())?;
@@ -482,7 +482,7 @@ pub fn build_report(
                     COALESCE(SUM({REPLY_PROMPT_TOKENS}), 0),
                     COALESCE(SUM({REPLY_COMPLETION_TOKENS}), 0)
              FROM messages
-             WHERE substr(created_at,1,10) >= ?1 AND model_id IS NOT NULL AND role = 'assistant'
+             WHERE created_at >= ?1 AND model_id IS NOT NULL AND role = 'assistant'
              GROUP BY model_id, provider_id
              ORDER BY COUNT(*) DESC"
         ))
@@ -516,13 +516,13 @@ pub fn build_report(
                     COALESCE(SUM({REPLY_PROMPT_TOKENS}), 0),
                     COALESCE(SUM({REPLY_COMPLETION_TOKENS}), 0)
              FROM messages
-             WHERE substr(created_at,1,10) >= ?1
+             WHERE created_at >= ?1
                    AND model_id IS NOT NULL
                    AND role = 'assistant'
                    AND {REPLY_COMPLETION_TOKENS} IS NOT NULL
                    AND model_id IN (
                        SELECT model_id FROM messages
-                       WHERE substr(created_at,1,10) >= ?1
+                       WHERE created_at >= ?1
                              AND model_id IS NOT NULL AND role = 'assistant'
                        GROUP BY model_id
                        ORDER BY SUM(COALESCE({REPLY_COMPLETION_TOKENS}, 0)) DESC
@@ -557,7 +557,7 @@ pub fn build_report(
             "SELECT COALESCE(SUM(prompt_tokens), 0),
                     COALESCE(SUM(completion_tokens), 0),
                     COUNT(*)
-             FROM taste_runs WHERE substr(started_at,1,10) >= ?1",
+             FROM taste_runs WHERE started_at >= ?1",
             params![since],
             |row| {
                 Ok((
@@ -575,7 +575,7 @@ pub fn build_report(
                     COALESCE(SUM(prompt_tokens), 0),
                     COALESCE(SUM(completion_tokens), 0)
              FROM taste_runs
-             WHERE substr(started_at,1,10) >= ?1 AND model_id IS NOT NULL
+             WHERE started_at >= ?1 AND model_id IS NOT NULL
              GROUP BY model_id, provider_id
              ORDER BY COUNT(*) DESC",
         )
@@ -611,7 +611,7 @@ pub fn build_report(
                  SELECT started_at AS created_at, model_id, provider_id,
                         prompt_tokens, completion_tokens
                  FROM taste_runs
-                 WHERE substr(started_at,1,10) >= ?1 AND model_id IS NOT NULL
+                 WHERE started_at >= ?1 AND model_id IS NOT NULL
              )
              GROUP BY bucket, model_id, provider_id
              ORDER BY bucket ASC"
@@ -649,7 +649,7 @@ pub fn build_report(
                     COALESCE(SUM(json_extract(step.value, '$.cached') = 1), 0),
                     COALESCE(SUM(json_extract(step.value, '$.failed') = 1), 0)
              FROM messages AS message, json_each(message.activity_json) AS step
-             WHERE substr(message.created_at,1,10) >= ?1
+             WHERE message.created_at >= ?1
                    AND json_extract(step.value, '$.kind') = 'tool'
                    AND json_extract(step.value, '$.tool') IS NOT NULL
              GROUP BY tool

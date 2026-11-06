@@ -35,7 +35,7 @@ mod subagent_wait;
 mod terminal;
 mod todo;
 mod vision;
-mod walk;
+pub(crate) mod walk;
 mod websearch;
 pub(crate) mod write;
 

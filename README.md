@@ -72,6 +72,6 @@ npm run tauri build   # installer
 
 <div align="center">
 
-<sub>Version 0.7.3 · Windows</sub>
+<sub>Version 0.7.4 · Windows</sub>
 
 </div>

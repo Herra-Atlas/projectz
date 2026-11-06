@@ -20,8 +20,11 @@ import { EFFORT_PROVIDER_DEFAULT } from "../../../features/models/modelCapabilit
  * and it needs a word of its own rather than an empty space, because a control
  * reading only "Effort" looks like it failed to load a value.
  */
-const label = (value: string) =>
-  value === EFFORT_PROVIDER_DEFAULT ? "Default" : value.charAt(0).toUpperCase() + value.slice(1);
+const label = (value: string) => {
+  if (value === EFFORT_PROVIDER_DEFAULT) return "Default";
+  if (value === "xhigh") return "Xhigh";
+  return value.charAt(0).toUpperCase() + value.slice(1);
+};
 
 /** One line about the empty entry, since "Default" alone does not say whose. */
 const DEFAULT_HINT = "Let the provider choose";

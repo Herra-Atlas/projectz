@@ -50,44 +50,51 @@ export function ModelModalityToggle({
       .finally(() => setBusy(false));
   };
 
+  // One icon weight for the whole row: the two that can be pressed and the two
+  // that only report a fact were drawn at different sizes and opacities, which
+  // made vision and audio look like lesser facts than reasoning and tools.
+  const mark = { size: 13, strokeWidth: 2.25 } as const;
+
   return (
-    <span className="flex shrink-0 items-center gap-1">
-      <Mark
-        on={images}
-        label={images ? "Treat as able to read images" : "Treat as able to read images"}
-        title={
-          images
-            ? "Reads images — click to stop treating it that way"
-            : "Click if this model can read images"
-        }
-        disabled={disabled || busy}
-        onClick={() => flip("image", !images)}
-      >
-        <ImageIcon size={12} />
-      </Mark>
-      <Mark
-        on={audio}
-        label="Treat as able to read audio"
-        title={
-          audio
-            ? "Reads audio — click to stop treating it that way"
-            : "Click if this model can read audio"
-        }
-        disabled={disabled || busy}
-        onClick={() => flip("audio", !audio)}
-      >
-        <Ear size={12} />
-      </Mark>
-      {capabilities?.supports_reasoning === true && (
-        <span className="inline-flex items-center text-[var(--quiet)]" title="Reports reasoning support">
-          <Brain size={12} aria-hidden="true" />
-        </span>
-      )}
-      {capabilities?.supports_tools === true && (
-        <span className="inline-flex items-center text-[var(--quiet)]" title="Supports tool calls">
-          <Wrench size={12} aria-hidden="true" />
-        </span>
-      )}
+    <span className="flex shrink-0 items-center gap-2.5">
+      <span className="flex items-center gap-1">
+        <Mark
+          on={images}
+          label="Treat as able to read images"
+          title={
+            images
+              ? "Reads images — click to stop treating it that way"
+              : "Click if this model can read images"
+          }
+          disabled={disabled || busy}
+          onClick={() => flip("image", !images)}
+        >
+          <ImageIcon {...mark} />
+        </Mark>
+        <Mark
+          on={audio}
+          label="Treat as able to read audio"
+          title={
+            audio
+              ? "Reads audio — click to stop treating it that way"
+              : "Click if this model can read audio"
+          }
+          disabled={disabled || busy}
+          onClick={() => flip("audio", !audio)}
+        >
+          <Ear {...mark} />
+        </Mark>
+        {capabilities?.supports_reasoning === true && (
+          <span className="grid size-5 place-items-center text-[var(--quiet)]" title="Reports reasoning support">
+            <Brain {...mark} aria-hidden="true" />
+          </span>
+        )}
+        {capabilities?.supports_tools === true && (
+          <span className="grid size-5 place-items-center text-[var(--quiet)]" title="Supports tool calls">
+            <Wrench {...mark} aria-hidden="true" />
+          </span>
+        )}
+      </span>
       {typeof capabilities?.context_length === "number" && capabilities.context_length > 0 && (
         <span className="shrink-0 text-[10px] tabular-nums text-[var(--quiet)]" title="Declared context window">
           {compactContext(capabilities.context_length)}
@@ -121,10 +128,13 @@ function Mark({
       title={title}
       disabled={disabled}
       onClick={onClick}
-      className={`grid size-6 place-items-center rounded transition-colors focus-visible:outline-2 focus-visible:outline-[var(--accent)] disabled:opacity-40 ${
+      // Full contrast in both states. The off state used to be 60% opacity, which
+      // read as a disabled control rather than "not claimed yet" and left these
+      // two looking weaker than the read-only marks beside them.
+      className={`grid size-5 place-items-center rounded transition-colors focus-visible:outline-2 focus-visible:outline-[var(--accent)] disabled:opacity-40 ${
         on
           ? "text-[var(--accent)] hover:bg-[var(--raised)]"
-          : "text-[var(--quiet)] opacity-60 hover:bg-[var(--raised)] hover:text-[var(--text)] hover:opacity-100"
+          : "text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]"
       }`}
     >
       {children}

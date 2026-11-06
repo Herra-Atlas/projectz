@@ -68,6 +68,39 @@ pub fn extract(path: &Path) -> Option<Result<String, String>> {
     }
 }
 
+/// Extracts a document's text from bytes a caller already holds.
+///
+/// A file pasted into the composer arrives as bytes and a name, with no path:
+/// the webview is not given one. Every reader here streams from a path, so the
+/// bytes are written to a short-lived temp file carrying the name's extension --
+/// which is what tells `extract` which format it has -- and removed either way.
+///
+/// `None` means the name is not a document, so the caller can pass the bytes on
+/// as text instead. The temp file never outlives the call, and its name is
+/// unique, so two pastes of the same document cannot read each other's bytes.
+pub fn extract_bytes(name: &str, bytes: &[u8]) -> Option<Result<String, String>> {
+    let extension = extension(Path::new(name))?;
+    if !matches!(extension.as_str(), "pdf" | "docx" | "xlsx") {
+        return None;
+    }
+    let path = std::env::temp_dir().join(format!(
+        "projectz-attachment-{}.{extension}",
+        uuid::Uuid::new_v4()
+    ));
+    if let Err(error) = std::fs::write(&path, bytes) {
+        return Some(Err(format!(
+            "Could not read {name}: the pasted bytes could not be staged ({error})."
+        )));
+    }
+    let result = extract(&path).unwrap_or_else(|| {
+        Err(format!(
+            "{name} is not a document that can be read as text."
+        ))
+    });
+    let _ = std::fs::remove_file(&path);
+    Some(result)
+}
+
 /// The sheets of a spreadsheet, as grids rather than as text.
 ///
 /// The panel's view of the same reader `extract` uses: a model wants the values
@@ -93,4 +126,36 @@ pub(crate) fn too_big(path: &Path) -> Option<String> {
             MAX_DOCUMENT_BYTES / (1024 * 1024)
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::documents::test_support::{temp, write_zip};
+
+    /// Bytes reach the same reader a path does, which is what makes a pasted
+    /// document identical to a dropped one.
+    #[test]
+    fn bytes_are_extracted_through_the_document_reader() {
+        let path = temp("pasted.docx");
+        let body = "<w:document><w:body>\
+            <w:p><w:r><w:t>Pasted paragraph.</w:t></w:r></w:p>\
+            </w:body></w:document>";
+        write_zip(&path, &[("word/document.xml", body)]);
+        let bytes = std::fs::read(&path).expect("read fixture");
+        let _ = std::fs::remove_file(&path);
+
+        let text = extract_bytes("notes.docx", &bytes)
+            .expect("a .docx is a document")
+            .expect("extracted");
+        assert_eq!(text, "Pasted paragraph.");
+    }
+
+    /// Anything that is not a document is left to the text path, which is what
+    /// keeps a pasted `.txt` from being written to disk and read back.
+    #[test]
+    fn a_name_that_is_not_a_document_is_not_claimed() {
+        assert!(extract_bytes("notes.txt", b"hello").is_none());
+        assert!(extract_bytes("README", b"hello").is_none());
+    }
 }

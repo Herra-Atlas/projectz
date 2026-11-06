@@ -1,3 +1,4 @@
+import { AlertCircle } from "lucide-react";
 import type { TasteRun } from "../../features/taste/types";
 import { dateTime } from "../../features/taste/tasteFormat";
 
@@ -28,7 +29,21 @@ export default function TasteRunReport({ run }: { run: TasteRun }) {
   return (
     <div className="px-4 py-4">
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <span className={`text-[12px] font-semibold capitalize ${tone}`}>{run.status}</span>
+        {/* The reason is a hover fact, not a paragraph: a failed run row is a
+            summary like every other row, and a full error sentence under it made
+            the latest run taller than the list it belongs to. The dotted
+            underline is the affordance that says there is more on hover. */}
+        <span
+          className={`text-[12px] font-semibold capitalize ${tone} ${
+            run.reason ? "cursor-help underline decoration-dotted underline-offset-2" : ""
+          }`}
+          title={run.reason ?? undefined}
+        >
+          {run.status}
+        </span>
+        {run.reason && run.status === "failed" && (
+          <AlertCircle size={12} className="shrink-0 self-center text-[var(--danger)]" aria-hidden />
+        )}
         <span className="text-[11px] text-[var(--quiet)]">{dateTime(run.startedAt)}</span>
         <span className="text-[11px] text-[var(--quiet)]">
           {run.sessionsRead} {run.sessionsRead === 1 ? "conversation" : "conversations"} ·{" "}
@@ -39,14 +54,11 @@ export default function TasteRunReport({ run }: { run: TasteRun }) {
             {run.promptTokens ?? "?"} in · {run.completionTokens ?? "?"} out
           </span>
         )}
+        {/* The same right-aligned change count the history rows use. It belongs on
+            the summary line, not a line of its own. */}
+        <span className="ml-auto shrink-0 text-[12px] text-[var(--muted)]">{changeSummary(run)}</span>
       </div>
 
-      <p className="mt-2 text-[12px] text-[var(--muted)]">{changeSummary(run)}</p>
-      {run.reason && (
-        <p className={`mt-1 text-[12px] leading-5 ${run.status === "failed" ? "text-[var(--danger)]" : "text-[var(--muted)]"}`}>
-          {run.reason}
-        </p>
-      )}
       {run.report && (
         <p className="mt-2 whitespace-pre-wrap text-[12px] leading-5 text-[var(--text)]">{run.report}</p>
       )}

@@ -28,8 +28,13 @@ export type ModelCapabilities = {
  * assume is a decision made when the window is drawn, not when it is parsed. */
 export const DEFAULT_CONTEXT_LENGTH = 200_000;
 
-/** The effort levels offered when nothing is known about the model. */
-export const DEFAULT_EFFORT_VALUES = ["none", "low", "medium", "high"];
+/** The effort levels offered when nothing is known about the model.
+ *
+ * `xhigh` and `ultra` are included because providers that take them do not all
+ * report a capability list -- the Rust side names `xhigh` as a real value one
+ * provider lists. A model whose provider *does* report levels still offers only
+ * those: this list is the fallback for an unknown model, not an override. */
+export const DEFAULT_EFFORT_VALUES = ["none", "low", "medium", "high", "xhigh", "ultra"];
 
 /**
  * The value meaning "send no reasoning level at all, let the provider decide".
@@ -92,7 +97,13 @@ export function contextLengthFor(capabilities: ModelCapabilities | null): number
 export function effortValuesFor(capabilities: ModelCapabilities | null): string[] {
   const reported = capabilities?.reasoning_values;
   const levels = reported && reported.length > 0 ? reported : DEFAULT_EFFORT_VALUES;
-  return [EFFORT_PROVIDER_DEFAULT, ...levels];
+  // The extended tiers are offered on top of whatever the provider listed. They
+  // are sent verbatim like every other level, so a provider that does not accept
+  // one answers with an error -- and Default sends no field at all, which is the
+  // way back. This is deliberate: the two levels are wanted on gateways whose
+  // capability list does not mention them.
+  const extended = ["xhigh", "ultra"].filter((level) => !levels.includes(level));
+  return [EFFORT_PROVIDER_DEFAULT, ...levels, ...extended];
 }
 
 /** True when the model takes no reasoning control at all.

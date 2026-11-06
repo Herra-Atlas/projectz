@@ -10,6 +10,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 /** The ring's circumference at r=8.5, used to turn a percentage into a dash. */
 const RING_CIRCUMFERENCE = 53.4;
@@ -37,12 +38,40 @@ type ContextRingProps = {
   estimated: boolean;
   /** A local model uses its configured window, so the caveat differs. */
   isLocal: boolean;
+  /** Which prompt is being measured: a Chat run carries no tools or catalogue. */
+  mode: "chat" | "agent";
 };
 
-export default function ContextRing({ tokens, limit, estimated, isLocal }: ContextRingProps) {
+/** One part of the leading system block, in characters. */
+type PromptSection = { label: string; characters: number };
+
+/** The same four characters per token `contextUsage` estimates with. */
+const CHARS_PER_TOKEN = 4;
+
+export default function ContextRing({ tokens, limit, estimated, isLocal, mode }: ContextRingProps) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const usage = Math.min(100, (tokens / limit) * 100);
+  /**
+   * What the system block is made of, read when the popover first opens.
+   *
+   * Not part of the usage event: the provider reports one number, and splitting
+   * it is the app's own reading of what it sent. `null` means not asked yet, so
+   * a ring that is never opened costs nothing.
+   */
+  const [breakdown, setBreakdown] = useState<PromptSection[] | null>(null);
+  const systemTokens = (breakdown ?? []).reduce(
+    (sum, section) => sum + Math.ceil(section.characters / CHARS_PER_TOKEN),
+    0,
+  );
+  useEffect(() => {
+    if (!open || breakdown !== null) return;
+    let live = true;
+    invoke<PromptSection[]>("ai_prompt_breakdown", { mode })
+      .then((sections) => { if (live) setBreakdown(sections); })
+      .catch(() => { if (live) setBreakdown([]); });
+    return () => { live = false; };
+  }, [open, breakdown, mode]);
 
   useEffect(() => {
     if (!open) return;
@@ -80,6 +109,24 @@ export default function ContextRing({ tokens, limit, estimated, isLocal }: Conte
           <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--raised)]">
             <div className="h-full rounded-full bg-[var(--accent)] transition-[width]" style={{ width: `${usage}%` }} />
           </div>
+          {breakdown !== null && breakdown.length > 0 && (
+            <div className="mt-3 space-y-1 border-t border-[var(--line)] pt-2 text-[11px]">
+              {breakdown.map((section) => (
+                <div key={section.label} className="flex items-baseline justify-between gap-2">
+                  <span className="truncate text-[var(--muted)]">{section.label}</span>
+                  <span className="shrink-0 tabular-nums text-[var(--quiet)]">
+                    {compactTokenCount(Math.ceil(section.characters / CHARS_PER_TOKEN))} tokens
+                  </span>
+                </div>
+              ))}
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="truncate text-[var(--muted)]">Conversation and tools</span>
+                <span className="shrink-0 tabular-nums text-[var(--quiet)]">
+                  {compactTokenCount(Math.max(0, tokens - systemTokens))} tokens
+                </span>
+              </div>
+            </div>
+          )}
           <p className="mt-2 text-[11px] leading-5 text-[var(--quiet)]">
             {estimated ? "Estimated from conversation text." : "From the provider's reported prompt tokens."}
             {isLocal ? " Limit is the configured local context window." : " Remote model limits may differ."}

@@ -1,19 +1,22 @@
 /**
  * Attachment handling for the composer.
  *
- * All three entry points -- the file picker, files dropped on the window by the
- * OS, and files dropped into the browser DOM -- converge on one `add`, so the
- * capability check and the de-duplication by path are stated once. Having a
- * second path that skipped either would let an image reach a model that cannot
- * read it, which fails silently at the provider rather than visibly here.
+ * All four entry points -- the file picker, files dropped on the window by the
+ * OS, files dropped into the browser DOM, and files pasted from the clipboard --
+ * converge on one `add`, so the capability check and the de-duplication by path
+ * are stated once. Having a second path that skipped either would let an image
+ * reach a model that cannot read it, which fails silently at the provider rather
+ * than visibly here.
  *
- * The two drop routes are genuinely different and stay separate:
+ * The two routes are genuinely different and stay separate:
  *
  * - `addPaths` goes through Rust (`read_chat_attachment`), because a dropped
  *   path is on disk and reading it in the webview would need the filesystem
  *   permission this app deliberately does not hold in the frontend.
  * - `addBrowserFiles` has only a browser `File`, so it reads the bytes here and
- *   hands them over already base64'd.
+ *   hands them over already base64'd. A document is extracted by the backend's
+ *   own reader (`extract_document_attachment`), so a pasted `.docx` reaches the
+ *   model as the same text a dropped one would.
  */
 
 import { useCallback, useState } from "react";
@@ -34,7 +37,10 @@ const MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024;
  * rejects it; the extension alone would accept anything renamed `.txt`.
  */
 const SUPPORTED_TYPE = /^(image\/(png|jpeg|webp|gif)|text\/.*|application\/(json|xml|pdf))$/;
-const SUPPORTED_NAME = /\.(pdf|txt|md|markdown|log|json|csv|html?|xml|ya?ml|rs|py|js|jsx|ts|tsx|css|toml|sql|sh)$/i;
+const SUPPORTED_NAME = /\.(pdf|docx|xlsx|txt|md|markdown|log|json|csv|html?|xml|ya?ml|rs|py|js|jsx|ts|tsx|css|toml|sql|sh)$/i;
+
+/** A document the backend pulls text out of, rather than passing its bytes on. */
+const DOCUMENT_NAME = /\.(pdf|docx|xlsx)$/i;
 
 /**
  * Reads bytes without blowing the argument limit of `String.fromCharCode`.
@@ -99,11 +105,14 @@ export function useAttachments({ capabilities, onNotify }: UseAttachmentsOptions
   }, [add, onNotify]);
 
   /**
-   * Files dropped into the page DOM, which arrive as browser `File` objects.
+   * Files dropped into the page or pasted from the clipboard, which arrive as
+   * browser `File` objects.
    *
-   * Read here rather than in Rust because there is no path to hand over, and the
-   * PDF case needs `extract_pdf_attachment` in the backend either way -- that one
-   * takes bytes precisely because a browser drop has nothing else to give.
+   * Read here rather than in Rust because there is no path to hand over, and a
+   * document needs the backend's own reader either way -- `extract_document_attachment`
+   * takes bytes precisely because a browser drop has nothing else to give. Every
+   * format it extracts reaches the model as text; images are passed through as
+   * bytes for the provider to see.
    */
   const addBrowserFiles = useCallback(async (files: File[]) => {
     const results = await Promise.all(files.map(async (file) => {
@@ -116,10 +125,9 @@ export function useAttachments({ capabilities, onNotify }: UseAttachmentsOptions
         return null;
       }
       try {
-        const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
         const dataBase64 = toBase64(new Uint8Array(await file.arrayBuffer()));
-        if (isPdf) {
-          return await invoke<AttachedFile>("extract_pdf_attachment", { name: file.name, dataBase64 });
+        if (DOCUMENT_NAME.test(file.name)) {
+          return await invoke<AttachedFile>("extract_document_attachment", { name: file.name, dataBase64 });
         }
         // `lastModified` in the synthetic path is what makes a re-dropped file
         // replace its earlier chip instead of stacking a second copy.

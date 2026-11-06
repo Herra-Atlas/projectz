@@ -2,7 +2,14 @@ import { useState } from "react";
 import { LoaderCircle, Trash2 } from "lucide-react";
 
 import { HoldToDelete } from "../HoldToDelete";
-import { SettingRow, SettingsSection, Toggle } from "../SettingsSection";
+import {
+  ANCHOR_ATTRIBUTE,
+  FlashHighlight,
+  MARKABLE_ATTRIBUTE,
+  SettingRow,
+  SettingsSection,
+  Toggle,
+} from "../SettingsSection";
 import type { MessagingStore } from "../../features/communications/useMessaging";
 import type { Notify } from "../../features/notifications/types";
 import {
@@ -69,8 +76,46 @@ export function TelegramSettingsPage({
 
   return (
     <>
-      <CommunicationsTitle title="Telegram" settings={settings} store={store} />
+      <CommunicationsTitle
+        title="Telegram"
+        // The bot's handle is the identity the user is checking for, so it sits
+        // beside the page's own name. Its dot carries the same three states the
+        // old status row drew, and the full sentence is the tooltip -- a row that
+        // repeated both spent a whole line on two words.
+        aside={
+          identity ? (
+            <span
+              className="inline-flex min-w-0 items-center gap-1.5 rounded-full border border-[var(--line)] bg-[var(--panel)] px-2 py-0.5 text-[11px] text-[var(--muted)]"
+              title={status}
+              // The bot status is no longer a row, so the search index's entry
+              // points here -- the handle is where that fact now lives.
+              {...{
+                [ANCHOR_ATTRIBUTE]: "communications.telegram.status",
+                [MARKABLE_ATTRIBUTE]: "",
+              }}
+            >
+              <FlashHighlight anchor="communications.telegram.status" />
+              <span
+                aria-hidden="true"
+                className={`size-1.5 shrink-0 rounded-full ${
+                  channel?.error
+                    ? "bg-[var(--danger)]"
+                    : channel?.running
+                      ? "bg-[var(--accent)]"
+                      : "bg-[var(--quiet)]"
+                }`}
+              />
+              <span className="truncate">{identity}</span>
+            </span>
+          ) : undefined
+        }
+        settings={settings}
+        store={store}
+      />
       <SettingsSection title="Connection">
+        {channel?.error && (
+          <p className="px-4 py-2 text-xs text-[var(--danger)]">{channel.error}</p>
+        )}
         <SettingRow
           anchor="communications.telegram.enabled"
           label="Telegram"
@@ -100,25 +145,6 @@ export function TelegramSettingsPage({
         />
 
         <SettingRow
-          anchor="communications.telegram.status"
-          label={identity ? `Connected as ${identity}` : "Bot status"}
-          description={status}
-          control={
-            <span
-              aria-hidden="true"
-              className={`size-2 rounded-full ${
-                channel?.error
-                  ? "bg-[var(--danger)]"
-                  : channel?.running
-                    ? "bg-[var(--accent)]"
-                    : "bg-[var(--quiet)]"
-              }`}
-            />
-          }
-          hint="Create a bot with @BotFather in Telegram, paste the token here, then message the bot to link your id."
-        />
-
-        <SettingRow
           anchor="communications.telegram.token"
           label="Bot token"
           description={
@@ -126,6 +152,7 @@ export function TelegramSettingsPage({
               ? "A token is saved. Pasting a new one replaces it."
               : "From @BotFather. It is stored in this app's database and never shown again."
           }
+          hint="Create a bot with @BotFather in Telegram, paste the token here, then message the bot to link your id."
           stacked
           control={
             <div className="flex items-center gap-2">

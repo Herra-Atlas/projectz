@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { Search } from "lucide-react";
+import { ChevronRight, FileText, Folder, Search } from "lucide-react";
 import FileTreeRow from "./FileTreeRow";
 import FilePreview from "./FilePreview";
 import { CreateNameRow } from "./NameInput";
 import ContextMenu from "../menu/ContextMenu";
 import { buildFileMenuItems } from "../menu/fileMenu";
-import { absolutePath, useFileTree, type TreeEntry } from "../../../features/rightPanel/useFileTree";
+import { useFileTree, type TreeEntry } from "../../../features/rightPanel/useFileTree";
+import { PANEL_FILES_KEY, readPanelSetting, writePanelSetting, type FilesMemory, type FilesMemoryEntry } from "../../../features/rightPanel/panelMemory";
 import type { FileEdit } from "../../../features/rightPanel/fileEdit";
 import { useTreeDrag } from "../../../features/rightPanel/fileTreeDrag";
 import { folderAtDropPoint } from "../../../features/rightPanel/externalDrop";
@@ -70,10 +71,54 @@ type FilesTabProps = {
   onNotify?: (tone: "success" | "error", message: string) => void;
 };
 
+/**
+ * The folder a search result sits in, for the row's secondary line.
+ *
+ * The empty string is the workspace root, which the row names explicitly rather
+ * than leaving a blank: a file at the top of the project is not a file with no
+ * location.
+ */
+function parentLabel(path: string): string {
+  const cut = path.lastIndexOf("/");
+  return cut < 0 ? "" : path.slice(0, cut);
+}
+
 export default function FilesTab({ workspace, skill = null, onCloseSkill, requestedPath, onRequestHandled, onPreviewInBrowser, onNotify }: FilesTabProps) {
   const [preview, setPreview] = useState<TreeEntry | null>(null);
   const [query, setQuery] = useState("");
-  const { root, error, loadingPath, isExpanded, childrenOf, toggle, expand, openAt, create, moveMany, removeMany, rename, reload } = useFileTree(skill);
+  // `null` means no search is in force and the tree draws what has been
+  // expanded; an array replaces it with matches from the whole tree, because a
+  // filter over the open folders could not find a file nobody had opened.
+  const [searchHits, setSearchHits] = useState<TreeEntry[] | null>(null);
+  const [searching, setSearching] = useState(false);
+  useEffect(() => {
+    const needle = query.trim();
+    if (!needle) {
+      setSearchHits(null);
+      setSearching(false);
+      return;
+    }
+    let cancelled = false;
+    setSearching(true);
+    const timer = window.setTimeout(() => {
+      invoke<TreeEntry[]>("panel_search_paths", { query: needle, skill })
+        .then((hits) => {
+          if (cancelled) return;
+          setSearchHits(hits);
+          setSearching(false);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setSearchHits([]);
+          setSearching(false);
+        });
+    }, 150);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [query, skill]);
+  const { root, error, loadingPath, isExpanded, childrenOf, expanded, toggle, expand, reveal: revealInTree, openAt, create, moveMany, removeMany, rename, reload } = useFileTree(skill);
 
   /**
    * Which tree the previewed file was opened under.
@@ -108,6 +153,25 @@ export default function FilesTab({ workspace, skill = null, onCloseSkill, reques
     const name = path.slice(path.lastIndexOf("/") + 1);
     showPreview({ name, path, isDir: false, hasChildren: false });
   }, [showPreview]);
+
+  /**
+   * Puts a search result where it lives: the tree opens down to it.
+   *
+   * The search list is a way in, not a second tree. Clearing the query first
+   * brings the real tree back, then every folder above the result is opened so
+   * the row is visible in context; a file is also previewed, and a folder is
+   * opened one level further. Without this, choosing a result left a flat list
+   * of names and no way to see where any of them were.
+   */
+  const openHit = useCallback(async (entry: TreeEntry) => {
+    setQuery("");
+    await revealInTree(entry.path);
+    if (entry.isDir) {
+      await expand(entry.path);
+      return;
+    }
+    showPreview(entry);
+  }, [expand, revealInTree, showPreview]);
 
   /** The right-click being answered, or null. `target: null` is the blank space. */
   const [menu, setMenu] = useState<{ point: { x: number; y: number }; target: TreeEntry | null } | null>(null);
@@ -170,14 +234,26 @@ export default function FilesTab({ workspace, skill = null, onCloseSkill, reques
   // while its siblings stay listed, because the skills root is a folder like any
   // other and a person may well want the neighbouring one.
   const loadedRootRef = useRef<string | null | undefined>(undefined);
+  /** What the tree has remembered for every root it has been shown on. */
+  const filesMemoryRef = useRef<FilesMemory>({});
+  /** True once this root's saved state has been read and applied. */
+  const restoredRef = useRef(false);
+  // `expand` is rebuilt whenever the tree's cache changes, and the mount effect
+  // must not re-run for that -- it reads the current one through a ref instead.
+  const expandRef = useRef(expand);
+  expandRef.current = expand;
+
+  const saveFilesState = useCallback((key: string, entry: FilesMemoryEntry) => {
+    filesMemoryRef.current = { ...filesMemoryRef.current, [key]: entry };
+    writePanelSetting(PANEL_FILES_KEY, filesMemoryRef.current);
+  }, []);
 
   useEffect(() => {
     const previous = loadedRootRef.current;
     loadedRootRef.current = rootKey;
-    if (previous !== undefined) {
+    if (previous !== undefined && previous !== rootKey) {
       // A genuine switch: anything open against the old folder is stale, so the
       // preview and the filter go and the tree is read again for the new one.
-      if (previous === rootKey) return;
       // ...unless the preview was opened under the root being switched *to*.
       // That is a file requested from a reply while a skill was showing: the
       // request and the root change arrive in one commit, and clearing here
@@ -192,11 +268,51 @@ export default function FilesTab({ workspace, skill = null, onCloseSkill, reques
       // can mean anything in the one arriving.
       setSelected(new Set());
     }
-    // First run: read the tree, but leave a requested file alone. It is on its way
-    // in from the click that opened this panel, and clearing it here is what made
-    // the first click on a changed file look lost.
-    void openAt(skill ?? null);
+    // The root's own read, then the state this tree had the last time it was
+    // shown. Restoring after `openAt` matters: it deliberately collapses every
+    // folder, and applying the saved set before it would be undone by it.
+    restoredRef.current = false;
+    let cancelled = false;
+    void (async () => {
+      await openAt(skill ?? null);
+      if (cancelled) return;
+      const saved = await readPanelSetting<FilesMemory>(PANEL_FILES_KEY);
+      if (cancelled) return;
+      const memory = saved && typeof saved === "object" ? saved : {};
+      filesMemoryRef.current = memory;
+      const entry = memory[rootKey];
+      for (const folder of entry?.folders ?? []) {
+        if (cancelled) break;
+        await expandRef.current(folder);
+      }
+      if (cancelled) return;
+      // A file requested from a reply or a document card wins over the one this
+      // tree last showed: `showPreview` stamped its root before this read
+      // resolved, and the click is newer than the memory.
+      if (entry?.file && previewRootRef.current !== rootKey) {
+        previewRootRef.current = rootKey;
+        setPreview({
+          name: entry.file.slice(entry.file.lastIndexOf("/") + 1),
+          path: entry.file,
+          isDir: false,
+          hasChildren: false,
+        });
+      }
+      restoredRef.current = true;
+    })();
+    return () => { cancelled = true; };
   }, [rootKey, skill, openAt, closePreview]);
+
+  // Written on every change rather than on a timer: a click is the unit here,
+  // and choosing another view unmounts the whole tree -- a pending timer would
+  // be cleared with it and the last folder would be forgotten.
+  useEffect(() => {
+    if (!restoredRef.current) return;
+    saveFilesState(rootKey, {
+      folders: Array.from(expanded),
+      file: preview && previewRootRef.current === rootKey ? preview.path : null,
+    });
+  }, [expanded, preview, rootKey, saveFilesState]);
 
   const closeMenu = useCallback(() => setMenu(null), []);
 
@@ -300,14 +416,18 @@ export default function FilesTab({ workspace, skill = null, onCloseSkill, reques
    * window -- and the tree-relative form is only meaningful back inside it.
    */
   const copyPath = useCallback(async (entry: TreeEntry) => {
-    if (!workspace) return;
     try {
-      await navigator.clipboard.writeText(absolutePath(workspace, entry.path));
+      // Resolved by the backend, against the root this tree is actually showing:
+      // the workspace, or the skills root. The frontend knows only the relative
+      // path, and joining the workspace to a skill path named a folder under the
+      // project that does not exist.
+      const path = await invoke<string>("panel_absolute_path", { relative: entry.path, skill });
+      await navigator.clipboard.writeText(path);
       onNotify?.("success", "Path copied");
     } catch {
       onNotify?.("error", "Could not copy the path");
     }
-  }, [workspace, onNotify]);
+  }, [skill, onNotify]);
 
   /**
    * Applies the open field.
@@ -532,10 +652,6 @@ export default function FilesTab({ workspace, skill = null, onCloseSkill, reques
     );
   }
 
-  const filtered = query.trim()
-    ? (root ?? []).filter((entry) => entry.name.toLowerCase().includes(query.trim().toLowerCase()))
-    : root;
-
   // Two drags, one highlight: a row being carried to another folder, and a file
   // arriving from outside the app. `??` rather than `||`, because the empty
   // string is the root and is a real target.
@@ -553,18 +669,24 @@ export default function FilesTab({ workspace, skill = null, onCloseSkill, reques
           would look like it had lost the project. */}
       <div className="flex min-h-10 shrink-0 items-center gap-2 border-b border-[var(--line)] px-3">
         {skill ? (
-          <>
-            <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--accent)]" title="skills">
-              skills
-            </span>
+          // A breadcrumb rather than a bare label and a Close button: the tree
+          // replaced the workspace's, so the way back has to say *where* it
+          // leads. The workspace's own name is the door, which is also what the
+          // header showed before a skill was opened.
+          <div className="flex min-w-0 flex-1 items-center gap-0.5 text-[13px]">
             <button
               type="button"
               onClick={onCloseSkill}
-              className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-[var(--muted)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-[var(--accent)]"
+              title={workspace ? `Back to ${workspace}` : "Back to the workspace"}
+              className="min-w-0 max-w-[55%] truncate rounded px-1 py-0.5 text-[var(--muted)] transition-colors hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-[var(--accent)]"
             >
-              Close
+              {workspace ? workspaceLabel(workspace) : "Workspace"}
             </button>
-          </>
+            <ChevronRight size={12} aria-hidden className="shrink-0 text-[var(--quiet)]" />
+            <span className="min-w-0 flex-1 truncate font-medium text-[var(--accent)]" title="skills">
+              skills
+            </span>
+          </div>
         ) : (
           <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--accent)]" title={workspace ?? undefined}>{workspace ? workspaceLabel(workspace) : ""}</span>
         )}
@@ -572,9 +694,9 @@ export default function FilesTab({ workspace, skill = null, onCloseSkill, reques
         <input
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Filter"
-          aria-label="Filter files"
-          className="w-16 shrink-0 rounded bg-transparent text-right text-xs text-[var(--text)] outline-none placeholder:text-[var(--quiet)] focus:w-28 focus:text-left"
+          placeholder="Find file"
+          aria-label="Find file"
+          className="w-28 shrink-0 rounded bg-transparent text-left text-xs text-[var(--text)] outline-none placeholder:text-[var(--quiet)]"
         />
       </div>
 
@@ -601,31 +723,55 @@ export default function FilesTab({ workspace, skill = null, onCloseSkill, reques
         onClick={(event) => { if (event.target === event.currentTarget) setSelected(new Set()); }}
       >
         {error && <p className="px-3 py-2 text-xs text-[var(--danger)]">{error}</p>}
-        {filtered === null && !error && <p className="px-3 py-2 text-xs text-[var(--quiet)]">Reading…</p>}
-        {filtered?.length === 0 && <p className="px-3 py-2 text-xs text-[var(--quiet)]">Nothing here.</p>}
-        {/* A create aimed at the root has no row to hang off, so it is drawn as
-            the first thing in the list. */}
-        {edit?.kind === "create" && edit.parent === "" && (
-          <CreateNameRow depth={0} isDir={edit.isDir} onCommit={commitEdit} onCancel={cancelEdit} />
+        {query.trim() ? (
+          <>
+            {searchHits === null && <p className="px-3 py-2 text-xs text-[var(--quiet)]">{searching ? "Searching…" : "Reading…"}</p>}
+            {searchHits?.length === 0 && <p className="px-3 py-2 text-xs text-[var(--quiet)]">No matching files or folders.</p>}
+            {searchHits?.map((entry) => (
+              <button
+                key={entry.path}
+                type="button"
+                onClick={() => void openHit(entry)}
+                title={entry.path}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] transition-colors hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--accent)]"
+              >
+                {entry.isDir
+                  ? <Folder size={13} className="shrink-0 text-[var(--quiet)]" aria-hidden />
+                  : <FileText size={13} className="shrink-0 text-[var(--quiet)]" aria-hidden />}
+                <span className="min-w-0 max-w-[45%] shrink-0 truncate text-[var(--text)]">{entry.name}</span>
+                <span className="min-w-0 flex-1 truncate text-right text-[11px] text-[var(--quiet)]">{parentLabel(entry.path) || "workspace root"}</span>
+              </button>
+            ))}
+          </>
+        ) : (
+          <>
+            {root === null && !error && <p className="px-3 py-2 text-xs text-[var(--quiet)]">Reading…</p>}
+            {root?.length === 0 && <p className="px-3 py-2 text-xs text-[var(--quiet)]">Nothing here.</p>}
+            {/* A create aimed at the root has no row to hang off, so it is drawn as
+                the first thing in the list. */}
+            {edit?.kind === "create" && edit.parent === "" && (
+              <CreateNameRow depth={0} isDir={edit.isDir} onCommit={commitEdit} onCancel={cancelEdit} />
+            )}
+            {root?.map((entry) => (
+                <FileTreeRow
+                  key={entry.path}
+                  entry={entry}
+                  depth={0}
+                  isExpanded={isExpanded}
+                  childrenOf={childrenOf}
+                  loadingPath={loadingPath}
+                  onToggle={toggleEntry}
+                  onActivate={activateEntry}
+                  onContextMenu={openRowMenu}
+                  selection={selected}
+                  edit={edit}
+                  onCommitEdit={commitEdit}
+                  onCancelEdit={cancelEdit}
+                  drag={{ ...treeDrag, target: dropTarget }}
+                />
+              ))}
+          </>
         )}
-        {filtered?.map((entry) => (
-            <FileTreeRow
-              key={entry.path}
-              entry={entry}
-              depth={0}
-              isExpanded={isExpanded}
-              childrenOf={childrenOf}
-              loadingPath={loadingPath}
-              onToggle={toggleEntry}
-              onActivate={activateEntry}
-              onContextMenu={openRowMenu}
-              selection={selected}
-              edit={edit}
-              onCommitEdit={commitEdit}
-              onCancelEdit={cancelEdit}
-              drag={{ ...treeDrag, target: dropTarget }}
-            />
-          ))}
       </div>
 
       {menu && (

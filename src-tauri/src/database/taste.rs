@@ -10,8 +10,8 @@
 //!   and what it wrote. A report is worth keeping even when the profile did not
 //!   change, because "nothing was learned" is a result.
 //!
-//! Nothing here renders or interprets a fact. The section names, operation rules
-//! and prompt rendering live in `taste/`, so the database stays a store and the
+//! Nothing here renders or interprets a fact. The section rules, fact filters and
+//! prompt rendering live in `taste/`, so the database stays a store and the
 //! learner stays the only place with an opinion about meaning.
 
 use rusqlite::{params, OptionalExtension};
@@ -35,15 +35,13 @@ pub struct TasteItemRow {
 }
 
 /// One conversation that still has unread turns.
+///
+/// Only what the learner asks with: the text comes from a second read, and the
+/// title, kind and timestamp are not sent. Sub-agent transcripts are excluded by
+/// the query, because they are the model talking to itself rather than the user.
 #[derive(Clone, Debug)]
 pub struct TasteSessionRow {
     pub id: String,
-    pub title: String,
-    pub updated_at: String,
-    /// `chat`, `agent` or `job`. Stored only so the prompt can say what kind of
-    /// conversation a turn came from; sub-agent transcripts are excluded by the
-    /// query, because they are the model talking to itself rather than the user.
-    pub kind: String,
     /// The last ordinal already learned from this conversation.
     pub last_ordinal: i64,
 }
@@ -247,9 +245,7 @@ impl Database {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let mut statement = connection
             .prepare(
-                "SELECT s.id, s.title, s.updated_at,
-                        COALESCE(json_extract(s.metadata_json, '$.kind'), 'chat'),
-                        COALESCE(t.last_ordinal, -1)
+                "SELECT s.id, COALESCE(t.last_ordinal, -1)
                  FROM sessions s
                  LEFT JOIN taste_sessions t ON t.session_id = s.id
                  WHERE COALESCE(json_extract(s.metadata_json, '$.kind'), 'chat') <> 'subagent'
@@ -270,10 +266,7 @@ impl Database {
             .query_map([limit as i64], |row| {
                 Ok(TasteSessionRow {
                     id: row.get(0)?,
-                    title: row.get(1)?,
-                    updated_at: row.get(2)?,
-                    kind: row.get(3)?,
-                    last_ordinal: row.get(4)?,
+                    last_ordinal: row.get(1)?,
                 })
             })
             .map_err(|error| error.to_string())?
@@ -636,7 +629,7 @@ mod tests {
                 updated: 1,
                 removed: 1,
                 report: Some("Learned three facts.".into()),
-                document: Some("[work]\n- Prefers Rust.".into()),
+                document: Some("- Prefers Rust.".into()),
             })
             .expect("record");
         let latest = database.latest_taste_run().expect("latest").expect("row");
@@ -644,10 +637,7 @@ mod tests {
         assert_eq!(latest.status, "completed");
         assert_eq!(latest.added, 3);
         assert_eq!(latest.messages_read, 12);
-        assert_eq!(
-            latest.document.as_deref(),
-            Some("[work]\n- Prefers Rust.".into())
-        );
+        assert_eq!(latest.document.as_deref(), Some("- Prefers Rust.".into()));
         assert!(latest.finished_at.is_some());
     }
 

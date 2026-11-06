@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen } from "@tauri-apps/api/event";
@@ -56,6 +56,7 @@ import { hasPartialReply, partialReplyMessage } from "./partialReply";
 import { chatRepository } from "../../features/chat/chatRepository";
 import { MARKDOWN_STYLES } from "./markdownStyles";
 import { useAttachments } from "./useAttachments";
+import { clipboardFiles } from "./clipboardFiles";
 import ContextRing from "./composer/ContextRing";
 import { contextUsage } from "./composer/contextUsage";
 import EffortControl from "./composer/EffortControl";
@@ -142,6 +143,44 @@ function subagentStats(metrics: AiEvent["metrics"]): ToolStepStats | undefined {
     turns: stats.turns ?? 0,
     seconds: stats.seconds ?? 0,
   };
+}
+
+/**
+ * The empty step list, shared by every row that has none.
+ *
+ * `message.activity ?? []` allocated a fresh array per row per render, which made
+ * the step-drawing components' own memos miss on every frame of a streaming
+ * reply even though nothing about those messages had changed.
+ */
+const NO_STEPS: ActivityStep[] = [];
+
+/**
+ * Tools allowed for one conversation, so the same prompt does not return on
+ * every call. Keyed by session id: a grant is about the conversation it was
+ * given in, and another chat starts with nothing.
+ */
+const APPROVAL_GRANTS_KEY = "projectz.approvals.v1";
+type ApprovalGrants = Record<string, string[]>;
+
+function loadApprovalGrants(): ApprovalGrants {
+  try {
+    const stored = localStorage.getItem(APPROVAL_GRANTS_KEY);
+    if (!stored) return {};
+    const parsed: unknown = JSON.parse(stored);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return parsed as ApprovalGrants;
+  } catch {
+    return {};
+  }
+}
+
+function saveApprovalGrants(grants: ApprovalGrants) {
+  try {
+    localStorage.setItem(APPROVAL_GRANTS_KEY, JSON.stringify(grants));
+  } catch {
+    // A full or unavailable store is not a reason to refuse the call the user
+    // just allowed; the grant only fails to survive the next launch.
+  }
 }
 
 /**
@@ -371,6 +410,13 @@ function playAlertIfUnseen(kind: AlertKind, isActive = true) {
 
 export default function ChatPage({ endpointId, model, localModelId, session, sessionLoading = false, activeId = null, onEnsureSession, onFirstSend, onActivity, onModelSelect, onLocalModelSelect, modelRefreshKey, onMessagesChange, onWorkingModeChange, onNotify, onNotifyAction, onClearNotification, onOpenUrl, onOpenFile, onOpenSubAgent, titleModels, onAutoTitle, workspaceRoot, onWorkspaceSelect, defaultEffort }: ChatPageProps) {
   const [messages, setMessages] = useState<ChatMessage[]>(session?.messages ?? []);
+  // Derived once per transcript change instead of once per hidden notice per
+  // render: the lookup walks every earlier message and string-compares each
+  // sub-agent report, and a streaming reply re-renders the list every frame.
+  const noticeAgentIds = useMemo(
+    () => messages.map((message, index) => (message.hidden ? noticeAgentId(messages, index) : null)),
+    [messages],
+  );
   // The latest transcript, for the run listener (a mount-time effect) to build on
   // when something arrives outside the current render -- a background sub-agent's
   // report is dispatched from there.
@@ -473,6 +519,11 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
    * cancelled. The oldest is shown; the rest follow as they are answered.
    */
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([]);
+  // Read once per mount; the map is mutated and written back when a grant is
+  // given. A lazy ref rather than `useState`, because granting one must not
+  // re-render the transcript.
+  const approvalGrantsRef = useRef<ApprovalGrants | null>(null);
+  if (approvalGrantsRef.current === null) approvalGrantsRef.current = loadApprovalGrants();
   /**
    * Questions the agent is waiting on, queued for the same reason approvals are:
    * concurrent runs can each be parked on one at the same moment.
@@ -551,7 +602,13 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
   const queuedMessagesRef = useRef<
     { sessionId: string; text: string; attachments: AttachedFile[]; hidden?: boolean }[]
   >([]);
-  const [queuedCount, setQueuedCount] = useState(0);
+  const [queuedMessages, setQueuedMessages] = useState<{ sessionId: string; text: string }[]>([]);
+  // The ref stays authoritative because the mount-time listener drains it; this
+  // mirror is what lets the composer draw a row per waiting message instead of a
+  // number. A mirror bug can show a stale row, never lose or double-send one.
+  const syncQueued = useCallback(() => {
+    setQueuedMessages(queuedMessagesRef.current.map((item) => ({ sessionId: item.sessionId, text: item.text })));
+  }, []);
   /** A retry the backend is waiting out: the composer counts it down. */
   const [retryWait, setRetryWait] = useState<{ seconds: number; attempt: number; total: number } | null>(null);
   // One tick a second, and no interval left running when there is nothing to count.
@@ -592,9 +649,15 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     const index = queuedMessagesRef.current.findIndex((item) => item.sessionId === sessionId);
     if (index === -1) return;
     const [item] = queuedMessagesRef.current.splice(index, 1);
-    setQueuedCount(queuedMessagesRef.current.length);
+    syncQueued();
     void dispatchRef.current(item.text, item.attachments, base, sessionId, false, item.hidden ?? false);
-  }, []);
+  }, [syncQueued]);
+  /** Drops one waiting message, by its index in the ref. */
+  const cancelQueued = useCallback((index: number) => {
+    if (index < 0 || index >= queuedMessagesRef.current.length) return;
+    queuedMessagesRef.current.splice(index, 1);
+    syncQueued();
+  }, [syncQueued]);
   const [startingModel, setStartingModel] = useState(false);
   const pendingChatRef = useRef<PendingChat | null>(null);
   /**
@@ -1097,6 +1160,31 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     setPendingApprovals((current) => current.filter((approval) => approval.approvalId !== approvalId));
   };
 
+  /**
+   * Answers one approval, and optionally records the tool for this conversation.
+   *
+   * `remember` comes from the card's third button. The grant is written only
+   * after the user pressed it, never inferred from a plain Accept, so the usual
+   * answer stays a one-off.
+   */
+  const answerApproval = (approvalId: string, allow: boolean, remember = false) => {
+    if (remember && allow) {
+      const request = pendingApprovals.find((entry) => entry.approvalId === approvalId);
+      if (request?.sessionId) {
+        const grants = approvalGrantsRef.current ?? (approvalGrantsRef.current = {});
+        const tools = new Set(grants[request.sessionId] ?? []);
+        tools.add(request.tool);
+        grants[request.sessionId] = Array.from(tools);
+        saveApprovalGrants(grants);
+      }
+    }
+    void invoke("ai_answer_approval", { approvalId, allow }).catch(() => {
+      // The run was already stopped, so there was nothing to answer. Closing
+      // the prompt is the right outcome either way.
+    });
+    dismissApproval(approvalId);
+  };
+
   useEffect(() => {
     const unlistenPromise = getCurrentWebview().onDragDropEvent((event) => {
       const payload = event.payload;
@@ -1223,7 +1311,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         if (sessionRunIdsRef.current.has(reportSession)) {
           // Still answering: deliver it the moment this reply ends.
           queuedMessagesRef.current.push({ sessionId: reportSession, text: content, attachments: [], hidden: true });
-          setQueuedCount(queuedMessagesRef.current.length);
+          syncQueued();
         } else {
           // The turn is over, so the report starts its own. `clearDraft` is false
           // because this is not the user's message -- it must not wipe a draft.
@@ -1253,6 +1341,16 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
         };
         // Guarded against a repeat of the same id, which a re-emitted event would
         // otherwise queue twice and then answer with one click.
+        // A tool already allowed for this conversation is answered without a
+        // card. The backend still asked, which is the point: the gate is what
+        // says the call needs permission, and this is the standing answer the
+        // user gave to exactly that question.
+        const granted = approval.sessionId !== null
+          && (approvalGrantsRef.current?.[approval.sessionId] ?? []).includes(approval.tool);
+        if (granted) {
+          void invoke("ai_answer_approval", { approvalId: approval.approvalId, allow: true }).catch(() => undefined);
+          return;
+        }
         setPendingApprovals((current) => current.some((entry) => entry.approvalId === approval.approvalId) ? current : [...current, approval]);
         playAlertIfUnseen("approval");
         return;
@@ -2224,7 +2322,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     // -- so a user can keep typing without waiting for the model to stop.
     if (activeSession && sessionRunIdsRef.current.has(activeSession)) {
       queuedMessagesRef.current.push({ sessionId: activeSession, text: messageText, attachments: requestAttachments });
-      setQueuedCount(queuedMessagesRef.current.length);
+      syncQueued();
       setInput("");
       removeSentAttachments(requestAttachments);
       return;
@@ -2660,9 +2758,26 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
     });
   };
 
+  /**
+   * Attaches files pasted onto the page.
+   *
+   * A pasted screenshot or a file copied in Explorer carries no text, so the
+   * composer's own paste handler (which shortens workspace paths) has nothing to
+   * do with it. Handled on the page rather than the field because a screenshot is
+   * often pasted while the transcript, not the composer, has focus -- and the
+   * event bubbles here from the field as well, so there is one door either way.
+   */
+  const handleFilePaste = (event: React.ClipboardEvent<HTMLElement>) => {
+    const files = clipboardFiles(event.clipboardData);
+    if (files.length === 0) return;
+    event.preventDefault();
+    void addBrowserFiles(files);
+  };
+
   return (
     <main
       className="relative flex min-h-0 flex-1 flex-col"
+      onPaste={handleFilePaste}
       onDragEnter={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); setDraggingFiles(true); } }}
       onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; setDraggingFiles(true); } }}
       onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDraggingFiles(false); }}
@@ -2716,7 +2831,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
                 // that agent in the Sub agents panel. It stays a plain marker for a
                 // transcript whose row predates the id being carried.
                 (() => {
-                  const agentId = onOpenSubAgent ? noticeAgentId(messages, index) : null;
+                  const agentId = onOpenSubAgent ? noticeAgentIds[index] : null;
                   const body = (
                     <>
                       <span className="h-px flex-1 bg-[var(--line)]" />
@@ -2749,7 +2864,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
                         separate steps, which a single pre-rendered `reasoning`
                         string cannot express — it has no way to say where the
                         thinking was interrupted. */}
-                    <ActivityPanel steps={message.activity ?? []} live={false} renderMarkdown={renderMarkdown} totalSeconds={message.metrics?.elapsed_seconds} />
+                    <ActivityPanel steps={message.activity ?? NO_STEPS} live={false} renderMarkdown={renderMarkdown} totalSeconds={message.metrics?.elapsed_seconds} />
                     <div className="markdown-content">{renderMarkdown(message.content)}</div>
                     {/* After the text, not above it and not inside the panel. The
                         panel is what the agent did, in order; this is what it added
@@ -2757,11 +2872,11 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
                         in it. Above the answer it competed with the answer, and
                         inside the panel you had to open it to learn anything was
                         written at all. */}
-                    <FileChanges steps={message.activity ?? []} live={false} onOpenFile={onOpenFile} />
+                    <FileChanges steps={message.activity ?? NO_STEPS} live={false} onOpenFile={onOpenFile} />
                     {/* A document the reply produced gets its own card, because a
                         `.docx`/`.xlsx`/`.pdf` has no line diff for the row above
                         to report. Each card opens the file in the panel. */}
-                    <DocumentCards steps={message.activity ?? []} onOpenFile={onOpenFile} />
+                    <DocumentCards steps={message.activity ?? NO_STEPS} onOpenFile={onOpenFile} />
                     {/* Metadata and actions stay hidden until the message is hovered. `group-focus-within` keeps
                         them reachable for keyboard users, and the `min-h-8` row reserves the space up front so
                         revealing the bar never reflows the message text. */}
@@ -2857,20 +2972,20 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
               it is plainly a question about the run, and the composer stays
               exactly as it was. The gap is one `mb` because it belongs to the
               transcript above, not to the control below. */}
-          {todoList && todoList.sessionId === (session?.id ?? null) && todoList.items.length > 0 && (
+          {todoList
+            && todoList.sessionId === (session?.id ?? null)
+            && todoList.items.length > 0
+            // A finished checklist has nothing left to say. It is hidden rather
+            // than cleared: the list is still the agent's record for this turn,
+            // and a later `todo` call that adds a step brings the strip back.
+            && todoList.items.some((item) => item.status !== "completed") && (
             <TodoStrip items={todoList.items} onDelete={removeTodoItem} />
           )}
           {visibleApprovals.length > 0 && (
             <div className="mb-2">
               <ToolApproval
                 request={visibleApprovals[0]}
-                onAnswer={(approvalId, allow) => {
-                  void invoke("ai_answer_approval", { approvalId, allow }).catch(() => {
-                    // The run was already stopped, so there was nothing to answer.
-                    // Closing the prompt is the right outcome either way.
-                  });
-                  dismissApproval(approvalId);
-                }}
+                onAnswer={(approvalId, allow, remember) => answerApproval(approvalId, allow, remember)}
                 onCancel={() => dismissApproval(visibleApprovals[0].approvalId)}
               />
             </div>
@@ -2928,9 +3043,15 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
                 Retrying{retryWait.seconds > 0 ? ` in ${retryWait.seconds}s` : "…"} (attempt {retryWait.attempt} of {retryWait.total})
               </div>
             )}
-            {queuedCount > 0 && (
-              <div className="px-2.5 pt-2 text-[11px] text-[var(--quiet)]">
-                {queuedCount} {queuedCount === 1 ? "message" : "messages"} queued — sent when this reply ends
+            {queuedMessages.some((item) => item.sessionId === activeSessionId) && (
+              <div className="space-y-1 px-2 pt-2">
+                {queuedMessages.map((item, index) => item.sessionId === activeSessionId && (
+                  <div key={index} className="flex items-center gap-2 rounded-md border border-[var(--line)] bg-[var(--rail)] px-2 py-1 text-[11px] text-[var(--quiet)]">
+                    <span className="shrink-0 uppercase tracking-wide">Queued</span>
+                    <span className="min-w-0 flex-1 truncate" title={item.text}>{item.text || "Attachment"}</span>
+                    <button type="button" onClick={() => cancelQueued(index)} aria-label="Cancel queued message" className="grid size-5 shrink-0 place-items-center rounded text-[var(--quiet)] hover:bg-[var(--raised)] hover:text-[var(--text)] focus-visible:outline-2 focus-visible:outline-[var(--accent)]"><X size={12} /></button>
+                  </div>
+                ))}
               </div>
             )}
             {attachments.length > 0 && <div className="flex flex-wrap gap-2 px-2 pt-2">
@@ -3047,7 +3168,7 @@ const [mode, setMode] = useState<ChatMode>(session?.mode ?? "chat");
             <div className="flex min-h-8 items-center gap-2">
             <ModelSwitcher selectedEndpoint={endpointId} selectedModel={model} localModelId={localModelId} refreshKey={modelRefreshKey} onSelect={onModelSelect} onSelectLocal={(selected) => { onModelSelect("", ""); onLocalModelSelect(selected.id); }} />
             {canSetEffort && <EffortControl values={effortValues} value={effort} onChange={setEffort} />}
-            <ContextRing tokens={contextTokens} limit={displayedContextLimit} estimated={contextIsEstimated} isLocal={Boolean(localModelId)} />
+            <ContextRing tokens={contextTokens} limit={displayedContextLimit} estimated={contextIsEstimated} isLocal={Boolean(localModelId)} mode={mode} />
             </div>
           </div>
         </form>

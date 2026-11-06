@@ -8,6 +8,7 @@ import BrowserTab from "./browser/BrowserTab";
 import FilesTab from "./tabs/FilesTab";
 import TerminalTab from "./tabs/TerminalTab";
 import SubAgentsTab from "./tabs/SubAgentsTab";
+import TasteTab from "./tabs/TasteTab";
 import { useSubAgents } from "../../features/subagents/useSubAgents";
 import SessionOverviewTab from "./tabs/SessionOverviewTab";
 import type { ChatSession } from "../../features/chat/types";
@@ -228,6 +229,15 @@ type RightPanelProps = {
    */
   subagentRequest?: { id: string; key: number } | null;
   /**
+   * Opens the Taste transcript.
+   *
+   * Raised by the settings page's Run now button, never by the scheduler: a
+   * scheduled run is background work and must not pull the panel over what the
+   * user is reading. The nonce makes a second Run now open it again even if the
+   * view was closed in between.
+   */
+  tasteRequest?: { key: number } | null;
+  /**
    * Raises the Overview view for one conversation or run.
    *
    * The Sub agents list reaches it from its row menu, the same action the
@@ -259,7 +269,7 @@ type RightPanelProps = {
  * rather than a view: it is what lets a run keep streaming, or be re-read after
  * it finished, while the reader was somewhere else.
  */
-export default function RightPanel({ open, width, workspace, skill = null, onCloseSkill, sessionId = null, loadedModelId = null, loadingModelId = null, terminalRequest = null, requestedPath, requestedUrl, onUrlRequestHandled, onRequestHandled, overviewRequest = null, subagentRequest = null, onOpenOverview, loadSession, onClose, onOpen, onResize, onNotify }: RightPanelProps) {
+export default function RightPanel({ open, width, workspace, skill = null, onCloseSkill, sessionId = null, loadedModelId = null, loadingModelId = null, terminalRequest = null, requestedPath, requestedUrl, onUrlRequestHandled, onRequestHandled, overviewRequest = null, subagentRequest = null, tasteRequest = null, onOpenOverview, loadSession, onClose, onOpen, onResize, onNotify }: RightPanelProps) {
   const panelRef = useRef<HTMLElement>(null);
   /**
    * The Sub agents session, owned here rather than by the tab.
@@ -520,9 +530,14 @@ export default function RightPanel({ open, width, workspace, skill = null, onClo
     setBrowserRequest(null);
     onUrlRequestHandled?.();
     onRequestHandled?.();
+    // A skill folder is a detour into Settings' own tree, not a place the panel
+    // should still be sitting when it is reopened to look at a project file.
+    // Clearing it here is what makes the next open start at the workspace; the
+    // × inside the Files view still does the same thing without closing the dock.
+    onCloseSkill?.();
     onClose();
     void invoke("panel_browser_close").catch(() => undefined);
-  }, [onClose, onRequestHandled, onUrlRequestHandled]);
+  }, [onClose, onCloseSkill, onRequestHandled, onUrlRequestHandled]);
 
   /**
    * Closing the Terminal view closes its server rows too.
@@ -620,6 +635,20 @@ export default function RightPanel({ open, width, workspace, skill = null, onClo
     openView("subagents");
     onOpen();
   }, [subagentRequest, openView, onOpen]);
+
+  /**
+   * Opens the panel and brings Taste forward when Run now was pressed.
+   *
+   * Same shape as the two requests above, and the same reason for the nonce.
+   * There is no id: the view always shows the latest run (or the one in flight).
+   */
+  const handledTasteKeyRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!tasteRequest || handledTasteKeyRef.current === tasteRequest.key) return;
+    handledTasteKeyRef.current = tasteRequest.key;
+    openView("taste");
+    onOpen();
+  }, [tasteRequest, openView, onOpen]);
 
   /**
    * Opens the panel and brings Files forward when a file is asked for.
@@ -775,6 +804,8 @@ export default function RightPanel({ open, width, workspace, skill = null, onClo
               // place a link from the chat opens -- both are the same act, so they
               // share one handler rather than growing a second way to open a page.
               <SubAgentsTab subagents={subagents} onOpenUrl={handlePreviewInBrowser} requestedAgent={subagentRequest} onOpenOverview={onOpenOverview} />
+            ) : activeView === "taste" ? (
+              <TasteTab />
             ) : (
               <RightPanelEmpty onOpen={openView} hasWorkspace={Boolean(workspace)} />
             )}

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::ai::tools::{require_workspace, resolve_within};
+use crate::ai::tools::{require_workspace, resolve_within, walk};
 
 /// One entry in a listing.
 ///
@@ -25,6 +25,9 @@ pub struct TreeEntry {
 
 /// Entries returned for one folder, before the cap.
 const MAX_ENTRIES: usize = 500;
+
+/// Hits returned by a whole-tree search, before the cap.
+const MAX_SEARCH_HITS: usize = 200;
 
 /// The folder a panel command acts inside.
 ///
@@ -141,8 +144,113 @@ pub fn list_in(root: &Path, relative: &str) -> Result<Vec<TreeEntry>, String> {
 /// to guess, and a silently truncated folder looks exactly like a folder that
 /// genuinely has 500 entries.
 #[tauri::command]
-pub fn panel_fs_list(relative: String, skill: Option<String>) -> Result<Vec<TreeEntry>, String> {
-    list(&relative, skill.as_deref())
+pub async fn panel_fs_list(
+    relative: String,
+    skill: Option<String>,
+) -> Result<Vec<TreeEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || list(&relative, skill.as_deref()))
+        .await
+        .map_err(|error| format!("The folder read stopped unexpectedly: {error}"))?
+}
+
+/// Files under the open root whose name contains `query`, for the panel's search.
+///
+/// The tree only holds the folders somebody has expanded, so filtering it
+/// answered a question about the open tree rather than about the workspace. This
+/// walks the disk through the same bounds the agent's tools use -- symlinks never
+/// followed, build and dependency folders skipped, a deadline at the end -- so a
+/// search over a large or pathological tree is bounded by the same rule.
+#[tauri::command]
+pub async fn panel_search_paths(
+    query: String,
+    skill: Option<String>,
+) -> Result<Vec<TreeEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || search(&query, skill.as_deref()))
+        .await
+        .map_err(|error| format!("The search stopped unexpectedly: {error}"))?
+}
+
+fn search(query: &str, skill: Option<&str>) -> Result<Vec<TreeEntry>, String> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Ok(Vec::new());
+    }
+    let root = root_for(skill)?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(walk::MAX_WALK_SECS);
+    let mut hits = Vec::new();
+    search_dir(&root, &root, &needle, deadline, &mut hits);
+    // Folders first, then by the path the reader sees: a folder result is a
+    // place the tree can open to, and mixing them into a name-sorted list made
+    // the two kinds indistinguishable.
+    hits.sort_by(|left, right| {
+        right
+            .is_dir
+            .cmp(&left.is_dir)
+            .then_with(|| left.path.to_lowercase().cmp(&right.path.to_lowercase()))
+    });
+    Ok(hits)
+}
+
+/// Walks one folder, collecting names that contain `needle`.
+///
+/// Hand-written rather than `walk_files` because a name search is about
+/// *folders* as much as files: the tree needs a folder row to open, and the
+/// walker the agent's tools use only reports files.
+fn search_dir(
+    root: &Path,
+    from: &Path,
+    needle: &str,
+    deadline: std::time::Instant,
+    hits: &mut Vec<TreeEntry>,
+) {
+    if hits.len() >= MAX_SEARCH_HITS || std::time::Instant::now() > deadline {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(from) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if hits.len() >= MAX_SEARCH_HITS || std::time::Instant::now() > deadline {
+            return;
+        }
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        // Never followed: a symlink can leave the root after containment has
+        // already passed, which is the same rule the agent's walker follows.
+        if kind.is_symlink() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(root)
+            .map(|rest| rest.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        if kind.is_dir() {
+            // Build output and vendored dependencies are never what a name
+            // search means, and descending into them dwarfs the real tree.
+            if walk::SKIPPED_DIRECTORIES.contains(&name.as_str()) {
+                continue;
+            }
+            if name.to_lowercase().contains(needle) {
+                hits.push(TreeEntry {
+                    name: name.clone(),
+                    path: relative.clone(),
+                    is_dir: true,
+                    has_children: true,
+                });
+            }
+            search_dir(root, &path, needle, deadline, hits);
+        } else if name.to_lowercase().contains(needle) {
+            hits.push(TreeEntry {
+                name,
+                path: relative,
+                is_dir: false,
+                has_children: false,
+            });
+        }
+    }
 }
 
 /// Reading a file for the panel's preview.
@@ -152,11 +260,18 @@ pub fn panel_fs_list(relative: String, skill: Option<String>) -> Result<Vec<Tree
 /// about what is sensible to draw, and a 200,000-line minified bundle is not a
 /// file anyone reads in a side panel.
 #[tauri::command]
-pub fn panel_read_preview(relative: String, skill: Option<String>) -> Result<String, String> {
+pub async fn panel_read_preview(
+    relative: String,
+    skill: Option<String>,
+) -> Result<String, String> {
     const MAX_PREVIEW_BYTES: u64 = 2 * 1024 * 1024;
-    let resolved = resolve_preview_file(&relative, MAX_PREVIEW_BYTES, skill.as_deref())?;
-    std::fs::read_to_string(&resolved)
-        .map_err(|error| format!("Could not read {}: {error}", resolved.display()))
+    tauri::async_runtime::spawn_blocking(move || {
+        let resolved = resolve_preview_file(&relative, MAX_PREVIEW_BYTES, skill.as_deref())?;
+        std::fs::read_to_string(&resolved)
+            .map_err(|error| format!("Could not read {}: {error}", resolved.display()))
+    })
+    .await
+    .map_err(|error| format!("The preview read stopped unexpectedly: {error}"))?
 }
 
 /// Reading a file's bytes, for the previews that cannot be text.
@@ -174,15 +289,19 @@ pub fn panel_read_preview(relative: String, skill: Option<String>) -> Result<Str
 /// legitimately megabytes, where a source file that large is not -- and it is
 /// still a *view*: the bytes are handed back to be drawn, not edited.
 #[tauri::command]
-pub fn panel_read_bytes(
+pub async fn panel_read_bytes(
     relative: String,
     skill: Option<String>,
 ) -> Result<tauri::ipc::Response, String> {
     const MAX_PREVIEW_BYTES: u64 = 25 * 1024 * 1024;
-    let resolved = resolve_preview_file(&relative, MAX_PREVIEW_BYTES, skill.as_deref())?;
-    let bytes = std::fs::read(&resolved)
-        .map_err(|error| format!("Could not read {}: {error}", resolved.display()))?;
-    Ok(tauri::ipc::Response::new(bytes))
+    tauri::async_runtime::spawn_blocking(move || {
+        let resolved = resolve_preview_file(&relative, MAX_PREVIEW_BYTES, skill.as_deref())?;
+        let bytes = std::fs::read(&resolved)
+            .map_err(|error| format!("Could not read {}: {error}", resolved.display()))?;
+        Ok(tauri::ipc::Response::new(bytes))
+    })
+    .await
+    .map_err(|error| format!("The file read stopped unexpectedly: {error}"))?
 }
 
 /// A spreadsheet's sheets, for the panel's grid view.
@@ -191,13 +310,17 @@ pub fn panel_read_bytes(
 /// this is `documents::spreadsheet`, the same reader `read_file` uses on a sheet,
 /// so a model and the panel cannot disagree about what a `.xlsx` contains.
 #[tauri::command]
-pub fn panel_sheet_grid(
+pub async fn panel_sheet_grid(
     relative: String,
     skill: Option<String>,
 ) -> Result<Vec<crate::documents::SheetGrid>, String> {
     const MAX_SHEET_BYTES: u64 = 25 * 1024 * 1024;
-    let resolved = resolve_preview_file(&relative, MAX_SHEET_BYTES, skill.as_deref())?;
-    crate::documents::spreadsheet(&resolved)
+    tauri::async_runtime::spawn_blocking(move || {
+        let resolved = resolve_preview_file(&relative, MAX_SHEET_BYTES, skill.as_deref())?;
+        crate::documents::spreadsheet(&resolved)
+    })
+    .await
+    .map_err(|error| format!("The sheet read stopped unexpectedly: {error}"))?
 }
 
 /// The file a preview command was asked for, checked and bounded.
@@ -455,7 +578,25 @@ pub fn panel_delete_file(relative: String, skill: Option<String>) -> Result<(), 
 
 /// The delete, against an explicit root so a test can point it at a temporary
 /// folder without touching the process-global -- the same split as [`move_in`].
+///
+/// **The Recycle Bin first.** This is the user's own door, and a delete here
+/// should be undoable from Explorer. A folder too large for the bin, a volume
+/// with none (a network share, some removable media), or a shell that declines
+/// falls through to the permanent removal this panel did before, so the tree
+/// still ends up matching what the user asked for.
 fn delete_in(root: &Path, relative: &str) -> Result<(), String> {
+    let target_resolved = delete_target(root, relative)?;
+
+    let fits = bytes_within(&target_resolved, MAX_RECYCLE_BYTES) <= MAX_RECYCLE_BYTES;
+    if fits && send_to_bin(&target_resolved).is_ok() {
+        return Ok(());
+    }
+
+    remove_in(&target_resolved)
+}
+
+/// The path a delete names, refusing the workspace root.
+fn delete_target(root: &Path, relative: &str) -> Result<PathBuf, String> {
     let target = if relative.is_empty() { "." } else { relative };
     // The tree never offers a delete on the root, and no caller has a reason to
     // name it -- but `"."` resolves to the whole workspace, and one stray empty
@@ -463,23 +604,136 @@ fn delete_in(root: &Path, relative: &str) -> Result<(), String> {
     if target == "." {
         return Err("The workspace root cannot be deleted".to_string());
     }
-    let target_resolved = resolve_within(root, target)?;
+    resolve_within(root, target)
+}
 
+/// Removes one entry for good: the fallback, and what the tests exercise.
+fn remove_in(target_resolved: &Path) -> Result<(), String> {
     if target_resolved.is_dir() {
-        std::fs::remove_dir_all(&target_resolved).map_err(|error| {
+        std::fs::remove_dir_all(target_resolved).map_err(|error| {
             format!(
                 "Could not delete directory {}: {error}",
                 target_resolved.display()
             )
         })
     } else {
-        std::fs::remove_file(&target_resolved).map_err(|error| {
+        std::fs::remove_file(target_resolved).map_err(|error| {
             format!(
                 "Could not delete file {}: {error}",
                 target_resolved.display()
             )
         })
     }
+}
+
+/// How large one entry may be and still be put in the Recycle Bin.
+///
+/// The shell gives no way to ask "did this fit?": with `FOF_NOCONFIRMATION`, an
+/// item it cannot recycle is destroyed and `SHFileOperationW` still returns zero.
+/// The decision therefore has to be made before the call, and this is it. 2 GiB
+/// is above any source file a panel row can name and below the default bin quota
+/// of any drive this app runs on.
+const MAX_RECYCLE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// How much disk one entry occupies, stopping as soon as `budget` is exceeded.
+///
+/// Short-circuited rather than summed exactly: the only question is whether it
+/// fits, and a folder of a million files should not be walked to answer it.
+/// Symlinks count as nothing rather than being followed -- a link leading out of
+/// the workspace must not decide whether its target goes to the bin.
+fn bytes_within(path: &Path, budget: u64) -> u64 {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if metadata.is_file() {
+        return metadata.len();
+    }
+    if !metadata.is_dir() {
+        return 0;
+    }
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for entry in entries.flatten() {
+        total = total.saturating_add(bytes_within(&entry.path(), budget.saturating_sub(total)));
+        if total > budget {
+            return total;
+        }
+    }
+    total
+}
+
+/// Puts one entry in the Recycle Bin, with everything inside it if it is a folder.
+///
+/// `FOF_ALLOWUNDO` is the recycle flag; `FOF_NOCONFIRMATION` and `FOF_SILENT`
+/// keep the shell's own dialogs out of an app that has already asked its own
+/// question; `FOF_NOERRORUI` keeps a modal error box from appearing behind a
+/// window the user is not looking at. `FOF_WANTNUKEWARNING` is deliberately not
+/// set: it is the only thing that would warn "too big to recycle", and it does so
+/// with a dialog -- which is why the size gate above exists instead.
+///
+/// **A unit test never touches the user's bin.** The permanent fallback is what
+/// the delete tests exercise; filling a real Recycle Bin with temp folders on
+/// every `cargo test` is a side effect a test suite should not have.
+#[cfg(windows)]
+fn send_to_bin(path: &Path) -> Result<(), String> {
+    #[cfg(test)]
+    {
+        let _ = path;
+        return Err("unit tests do not use the Recycle Bin".to_string());
+    }
+
+    #[cfg(not(test))]
+    {
+        use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+        use windows_sys::Win32::UI::Shell::{
+            SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
+            FO_DELETE, SHFILEOPSTRUCTW,
+        };
+
+        // `FOF_ALLOWUNDO` refuses an extended-length path, and `resolve_within`
+        // hands back `root.join(relative)` exactly as the workspace was opened --
+        // so the one form the shell cannot take is stripped here, once.
+        let text = path.to_string_lossy();
+        let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
+
+        // A file operation takes a list of NUL-separated paths ended by a second NUL.
+        let mut from: Vec<u16> = text.encode_utf16().collect();
+        from.push(0);
+        from.push(0);
+
+        // The shell is COM and `SHFileOperationW` wants an apartment on its
+        // thread. `RPC_E_CHANGED_MODE` means one already exists in another model,
+        // which is fine -- nothing here keeps an interface across the call.
+        unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+
+        let mut operation: SHFILEOPSTRUCTW = unsafe { std::mem::zeroed() };
+        operation.wFunc = FO_DELETE as u32;
+        operation.pFrom = from.as_ptr();
+        operation.fFlags =
+            (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI) as u16;
+
+        // SAFETY: `operation` is zeroed and fully populated above, `from` is a
+        // live double-NUL-terminated wide buffer that outlives the call, and the
+        // struct is the shell's own definition. The result is a `DE_*` code, not
+        // an errno, and `GetLastError` is documented as meaningless for it.
+        let code = unsafe { SHFileOperationW(&mut operation) };
+        if code != 0 {
+            return Err(format!("the shell refused it (0x{code:02X})"));
+        }
+        if operation.fAnyOperationsAborted != 0 {
+            return Err("the shell cancelled it".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// The Recycle Bin is a Windows feature; elsewhere the delete is permanent, as
+/// it always was.
+#[cfg(not(windows))]
+fn send_to_bin(_path: &Path) -> Result<(), String> {
+    Err("the Recycle Bin is a Windows feature".to_string())
 }
 
 /// The outcome of acting on several selected rows at once.
@@ -558,6 +812,23 @@ fn delete_many_in(root: &Path, paths: &[String]) -> Result<BatchSummary, String>
         }
     }
     Ok(summary)
+}
+
+/// The absolute path one row names, for the clipboard.
+///
+/// Resolved against whichever root the tree is showing: the workspace, or the
+/// skills root when a skill's folder is open. The frontend holds only the
+/// relative path, and joining the workspace there is what made a copied skill
+/// path name a folder under the project that does not exist.
+#[tauri::command]
+pub fn panel_absolute_path(relative: String, skill: Option<String>) -> Result<String, String> {
+    let root = root_for(skill.as_deref())?;
+    let requested = if relative.is_empty() {
+        "."
+    } else {
+        relative.as_str()
+    };
+    Ok(resolve_within(&root, requested)?.display().to_string())
 }
 
 /// Reveals an entry in the OS file manager, with the file selected.
@@ -1062,6 +1333,24 @@ mod tests {
         assert!(
             !root.join("to_delete_dir").exists(),
             "directory still exists after delete"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The bin gate measures a tree and stops once the budget is passed: the
+    /// only question it answers is "does this fit", and a folder is not walked
+    /// in full to answer it.
+    #[test]
+    fn a_delete_measures_the_tree_without_walking_all_of_it() {
+        let root = temp_dir("panel-delete-size");
+        write(&root, "small.txt");
+        std::fs::create_dir_all(root.join("nested")).expect("create dir");
+        write(&root.join("nested"), "also.txt");
+
+        assert!(bytes_within(&root, MAX_RECYCLE_BYTES) >= 2);
+        assert!(
+            bytes_within(&root, 0) > 0,
+            "a non-empty folder must exceed a zero budget"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

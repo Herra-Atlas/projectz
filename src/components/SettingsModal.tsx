@@ -80,6 +80,14 @@ type EndpointDraft = { id: string; name: string; base_url: string; api_key: stri
 type LocalModelAddProgress = { index: number; total: number; name: string; done: boolean; error: string | null };
 type SettingsModalProps = { open: boolean; onClose: () => void; onEndpointsChanged: () => void; preferences: Preferences; onPreferencesChange: (preferences: Preferences) => void; appearance: Appearance; onAppearanceChange: (appearance: Appearance) => void; notify: Notify;
   /**
+   * A settings row the command palette chose.
+   *
+   * The palette ranks the same index this window's search does, so a result is
+   * handled exactly like a click on that search: the modal owns its own
+   * navigation and visit history rather than being told a page id from outside.
+   */
+  request?: { anchor: string; token: number } | null;
+  /**
    * Opens a skill's folder in the right panel's Files view.
    *
    * The dialog closes itself as it calls this: editing a skill is browsing its
@@ -87,7 +95,14 @@ type SettingsModalProps = { open: boolean; onClose: () => void; onEndpointsChang
    * inside a modal. The outer `App` owns both, which is why this is a callback
    * rather than a fetch of its own.
    */
-  onOpenSkill: (slug: string) => void };
+  onOpenSkill: (slug: string) => void;
+  /**
+   * Opens the right panel's Taste transcript for a manual run.
+   *
+   * The Taste page calls this from Run now only. The scheduler never does: a
+   * background run must not pull a panel over the chat.
+   */
+  onTasteRun?: () => void };
 // The page union lives in `settings/settingsPages.ts` so the search index can name a page
 // without importing this modal. Re-exported here for the components that already imported it.
 export type { SettingsPage } from "./settings/settingsPages";
@@ -119,7 +134,7 @@ const DRAG_THRESHOLD = 4;
  */
 const HIGHLIGHT_MS = 2000;
 
-export default function SettingsModal({ open, onClose, onEndpointsChanged, preferences, onPreferencesChange, appearance, onAppearanceChange, notify, onOpenSkill }: SettingsModalProps) {
+export default function SettingsModal({ open, request, onClose, onEndpointsChanged, preferences, onPreferencesChange, appearance, onAppearanceChange, notify, onOpenSkill, onTasteRun }: SettingsModalProps) {
   // This dialog is the app's only `showModal()` window, and the browser paints
   // that in the top layer -- above any z-index on the page. Claiming the host
   // while it is open is what puts the notification stack on top of it rather
@@ -335,6 +350,24 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
     setPage(pageForEntry(entry));
     setHighlight({ anchor: entry.anchor, token: Date.now() });
   };
+
+  /**
+   * A row the command palette asked for.
+   *
+   * The token from the request is used as the highlight token, so choosing the
+   * same row twice starts the mark again rather than comparing equal and
+   * looking like a click that did nothing.
+   */
+  useEffect(() => {
+    if (!open || !request) return;
+    const entry = buildSettingsIndex().find((candidate) => candidate.anchor === request.anchor);
+    if (!entry) {
+      setPage({ view: "general" });
+      return;
+    }
+    setPage(pageForEntry(entry));
+    setHighlight({ anchor: entry.anchor, token: request.token });
+  }, [open, request]);
 
   // The mark is drawn by the page, not here: `FlashHighlight` listens for this event and
   // sets the attribute that the stylesheet animates. Announcing it after paint is what
@@ -569,9 +602,13 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
   };
 
   useEffect(() => {
+    // The placeholder this rotates belongs to one field on one page. The dialog
+    // stays mounted for the whole session, so an ungated timer re-rendered every
+    // settings page every seven seconds while the window was shut.
+    if (!open) return;
     const timer = window.setInterval(() => setInstructionExampleIndex((index) => (index + 1) % INSTRUCTION_EXAMPLES.length), 7000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [open]);
 
   /**
    * Persists one model's runtime settings.
@@ -1029,7 +1066,7 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
               {/* No `key`: a search result on the page already open must not remount the
                   scope, or the dim it is about to set is thrown away with the old node. */}
               <SettingsSearchScope>
-              {page.view === "communicationsTelegram" ? <TelegramSettingsPage notify={notify} store={messagingStore} /> : page.view === "communicationsSettings" ? <CommunicationSettingsPage notify={notify} store={messagingStore} /> : page.view === "communicationsSecurity" ? <CommunicationSecurityPage notify={notify} store={messagingStore} /> : page.view === "taste" ? <TasteSettingsPage notify={notify} store={tasteStore} groups={providerModelGroups} localModels={localModels} /> : page.view === "providers" ? <>
+              {page.view === "communicationsTelegram" ? <TelegramSettingsPage notify={notify} store={messagingStore} /> : page.view === "communicationsSettings" ? <CommunicationSettingsPage notify={notify} store={messagingStore} /> : page.view === "communicationsSecurity" ? <CommunicationSecurityPage notify={notify} store={messagingStore} /> : page.view === "taste" ? <TasteSettingsPage notify={notify} store={tasteStore} onTasteRun={onTasteRun} groups={providerModelGroups} localModels={localModels} /> : page.view === "providers" ? <>
                 <SettingsPageTitle>
                   <h2 className="text-[17px] font-semibold tracking-tight"><FlashHighlight anchor="providers.list" />Providers</h2>
                   <button type="button" {...{ [ANCHOR_ATTRIBUTE]: "providers.add" }} onClick={openAdd} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 text-[13px] font-medium text-[var(--text)] transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"><FlashHighlight anchor="providers.add" /><Plus size={15} />Add provider</button>
@@ -1070,7 +1107,21 @@ export default function SettingsModal({ open, onClose, onEndpointsChanged, prefe
                                   file the model takes, and this is where the
                                   user corrects it. */}
                               <ModelModalityToggle endpointId={endpoint.id} model={model} capabilities={capabilitiesByModel[key]} disabled={loading} onChange={(next) => setCapabilitiesByModel((current) => ({ ...current, [key]: next }))} />
-                              <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] ${enabled ? "text-[var(--accent)]" : "text-[var(--quiet)]"}`}>{enabled ? "Enabled" : "Disabled"}</span>
+                              {/* The status word is the other half of the same
+                                  switch. Pressing the name was the only way to
+                                  flip a model, which is not where a reader who
+                                  is looking at "Disabled" reaches first. */}
+                              <button
+                                type="button"
+                                disabled={loading}
+                                aria-pressed={enabled}
+                                aria-label={`${enabled ? "Disable" : "Enable"} ${model}`}
+                                title={enabled ? "Click to disable this model" : "Click to enable this model"}
+                                onClick={() => setProviderModelEnabled(endpoint, model, !enabled)}
+                                className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] transition-colors hover:bg-[var(--raised)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] disabled:opacity-50 ${enabled ? "text-[var(--accent)]" : "text-[var(--quiet)] hover:text-[var(--text)]"}`}
+                              >
+                                {enabled ? "Enabled" : "Disabled"}
+                              </button>
                             </div>;
                           })}
                         </div>}

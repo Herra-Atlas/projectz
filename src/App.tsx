@@ -10,6 +10,7 @@ import { useCopiedNotification, useNotifications } from "./features/notification
 import Sidebar from "./components/Sidebar";
 import TooltipLayer from "./components/TooltipLayer";
 import FindBar from "./components/find/FindBar";
+import CommandPalette from "./components/CommandPalette";
 import ChatPage from "./pages/chat/ChatPage";
 import SettingsModal from "./components/SettingsModal";
 import StartupScreen from "./components/StartupScreen";
@@ -90,6 +91,16 @@ export default function App() {
 
 function AppShell() {
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Ctrl+K: one box for conversations, settings rows and files.
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  /**
+   * A settings row the palette asked for.
+   *
+   * A request with a token rather than a page id: the modal owns its navigation
+   * and its visit history, so it treats this exactly like a click on its own
+   * search result. The token is what makes choosing the same row twice work.
+   */
+  const [settingsRequest, setSettingsRequest] = useState<{ anchor: string; token: number } | null>(null);
   const [startupDone, setStartupDone] = useState(false);
   const [startupError, setStartupError] = useState("");
   const [sessionReloadKey, setSessionReloadKey] = useState(0);
@@ -131,6 +142,13 @@ function AppShell() {
    * a nonce -- asking for the same run twice is two requests.
    */
   const [subagentRequest, setSubagentRequest] = useState<{ id: string; key: number } | null>(null);
+  /**
+   * A request to open the panel's Taste transcript.
+   *
+   * Raised only by the settings page's Run now button, never by the scheduler:
+   * a background run must not pull the panel over what the user is reading.
+   */
+  const [tasteRequest, setTasteRequest] = useState<{ key: number } | null>(null);
   const chat = useChatSessions(startupDone, sessionReloadKey, localModelId || model, endpointId);
   // Preferences live here so the chat view and the settings modal always agree
   // on the title-model choice without one re-reading a stale copy.
@@ -260,6 +278,43 @@ function AppShell() {
     setOverviewRequest({ id, key: Date.now() });
   }, []);
 
+  // Stable so the memoised Sidebar can actually skip a render: an inline arrow
+  // here was a new prop on every App render, which defeats the comparison.
+  const handleNewChat = useCallback(() => chat.selectSession(null), [chat.selectSession]);
+  const handleOpenSettings = useCallback(() => setSettingsOpen(true), []);
+
+  // Stable because they are props of memoised chat components: `renderMarkdown`
+  // depends on `onOpenUrl`, so a new arrow here re-created the renderer and
+  // invalidated every stored reply's memo on each App render.
+  const handleOpenUrl = useCallback((url: string) => setRequestedUrl({ url, key: Date.now() }), []);
+  const handleOpenFile = useCallback((path: string) => {
+    // A file clicked in a reply belongs to the workspace. If the panel is still
+    // showing a skill folder from Settings, the request would be resolved
+    // against the skills root -- which is how a document named `NOTES.xlsx` came
+    // back as a missing file under `skills/`.
+    setOpenSkill(null);
+    setRequestedFile(path);
+  }, []);
+  const handleOpenSubAgent = useCallback((agentId: string) => {
+    setSubagentRequest({ id: agentId, key: Date.now() });
+  }, []);
+
+  // Ctrl+K is the app's own accelerator, like Ctrl+F. The webview's browser
+  // accelerators are already off, so nothing else claims it. A native dialog
+  // owns the keyboard while it is open, so the palette stays out of its way.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
+      if (event.key.toLowerCase() !== "k" && event.code !== "KeyK") return;
+      if (document.querySelector("dialog[open]")) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setPaletteOpen(true);
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, []);
+
   /**
    * Copies a notification's text and flags the row for a moment.
    *
@@ -316,8 +371,15 @@ function AppShell() {
       // is the only word the sidebar gets that a conversation it has never heard of
       // now exists. Without it a finished job appears to have produced nothing until
       // something else happens to reload the list.
-      listen("job-event", () => {
-        if (mounted) setSessionReloadKey((key) => key + 1);
+      listen<{ status?: string }>("job-event", (event) => {
+        // Only a run that starts or finishes writes a transcript. A job parked
+        // on its conditions re-announces "waiting" every fifteen seconds, and a
+        // confirmed start pings again, so reloading the whole session list for
+        // every ping spent a full header scan on news that changed nothing.
+        const status = event.payload?.status;
+        if (mounted && (status === "running" || status === "completed" || status === "failed")) {
+          setSessionReloadKey((key) => key + 1);
+        }
       }).then((unlisten) => {
         if (mounted) unlistenJob = unlisten;
         else unlisten();
@@ -503,7 +565,17 @@ function AppShell() {
   const modelNamesRef = useRef<Record<string, string>>({});
   useEffect(() => {
     let live = true;
+    // Two resident rows of the same shape, compared field by field: the poll
+    // builds fresh objects, so an identity check would always say "changed".
+    const sameResident = (
+      a: { model: string | null; startedAt: number | null } | null,
+      b: { model: string | null; startedAt: number | null } | null,
+    ) => a === b || (a !== null && b !== null && a.model === b.model && a.startedAt === b.startedAt);
     const poll = async () => {
+      // A hidden window cannot see the chip, so the three round trips and the
+      // two recursive scans behind `audio_status` were being spent to repaint
+      // something nobody is looking at.
+      if (document.visibilityState === "hidden") return;
       // Each side answers independently; a failure on one must not blank the
       // other, so the last known figures stay.
       const [llama, speech, wake] = await Promise.allSettled([
@@ -543,18 +615,39 @@ function AppShell() {
         result.status === "fulfilled" && result.value.running
           ? { model: result.value.loaded, startedAt: result.value.startedAt }
           : null;
-      setResidentServers((current) => ({
-        llama: llamaName ?? (llamaId ? current.llama : null),
-        llamaStartedAt: llama.status === "fulfilled" && llamaId ? llama.value.started_at : null,
-        speech: speech.status === "fulfilled" ? resident(speech) : current.speech,
-        wake: wake.status === "fulfilled" ? resident(wake) : current.wake,
-      }));
+      setResidentServers((current) => {
+        const next = {
+          llama: llamaName ?? (llamaId ? current.llama : null),
+          llamaStartedAt: llama.status === "fulfilled" && llamaId ? llama.value.started_at : null,
+          speech: speech.status === "fulfilled" ? resident(speech) : current.speech,
+          wake: wake.status === "fulfilled" ? resident(wake) : current.wake,
+        };
+        // An unchanged poll must not allocate: a new object here re-rendered the
+        // whole shell -- transcript and sidebar included -- every four seconds
+        // whether or not anything had started or stopped.
+        if (
+          next.llama === current.llama
+          && next.llamaStartedAt === current.llamaStartedAt
+          && sameResident(next.speech, current.speech)
+          && sameResident(next.wake, current.wake)
+        ) {
+          return current;
+        }
+        return next;
+      });
     };
     void poll();
-    const timer = window.setInterval(() => { void poll(); }, 4000);
+    // Fifteen seconds is enough for a chip that is a glance, not a monitor, and
+    // becoming visible asks again at once so the first look is never stale.
+    const timer = window.setInterval(() => { void poll(); }, 15000);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") void poll();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       live = false;
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
 
@@ -586,13 +679,13 @@ function AppShell() {
         activeId={chat.activeId}
         activity={sessionActivity}
         onSelectSession={handleSelectSession}
-        onNewChat={() => chat.selectSession(null)}
+        onNewChat={handleNewChat}
         onDeleteSession={chat.deleteSession}
         onRenameSession={chat.renameSession}
         onSetDotColor={chat.setSessionDotColor}
         onTogglePinned={chat.togglePinned}
         onOpenOverview={handleOpenOverview}
-        onSettings={() => setSettingsOpen(true)}
+        onSettings={handleOpenSettings}
         view={view}
         onViewChange={setView}
       />
@@ -613,6 +706,11 @@ function AppShell() {
               <button
                 type="button"
                 onClick={() => setWorkspaceMenuOpen((open) => !open)}
+                // The picker closes itself on any pointerdown outside its own
+                // box, and this trigger is outside it -- so a second click
+                // dismissed and then toggled it back open. The press must not
+                // reach the document listener; the click still toggles.
+                onPointerDown={(event) => event.stopPropagation()}
                 aria-expanded={workspaceMenuOpen}
                 aria-haspopup="menu"
                 aria-label={workspaces.selected ? `Workspace: ${workspaceLabel(workspaces.selected)}. Change folder` : "Choose a workspace folder"}
@@ -755,20 +853,12 @@ function AppShell() {
           onNotify={notify}
           onNotifyAction={notifyAction}
           onClearNotification={clearNotification}
-          onOpenUrl={(url) => setRequestedUrl({ url, key: Date.now() })}
-          onOpenFile={(path) => {
-            // A file clicked in a reply belongs to the workspace. If the panel is
-            // still showing a skill folder from Settings, the request would be
-            // resolved against the skills root -- which is how a document named
-            // `NOTES.xlsx` came back as a missing file under `skills/`. Clearing
-            // the skill is the same switch the × in that header performs.
-            setOpenSkill(null);
-            setRequestedFile(path);
-          }}
+          onOpenUrl={handleOpenUrl}
+          onOpenFile={handleOpenFile}
           // The centred notice in the transcript opens the run it announces. The
           // panel is told which run and opens itself; the id travels as a request
           // rather than as a second piece of panel state held here.
-          onOpenSubAgent={(agentId) => setSubagentRequest({ id: agentId, key: Date.now() })}
+          onOpenSubAgent={handleOpenSubAgent}
           titleModels={titleModels}
           onAutoTitle={chat.setAutoTitle}
           workspaceRoot={workspaces.selected}
@@ -800,6 +890,7 @@ function AppShell() {
         onRequestHandled={() => setRequestedFile(null)}
         overviewRequest={overviewRequest}
         subagentRequest={subagentRequest}
+        tasteRequest={tasteRequest}
         onOpenOverview={handleOpenOverview}
         loadSession={chat.loadSessionForOverview}
         onClose={() => rightPanel.setOpen(false)}
@@ -813,7 +904,27 @@ function AppShell() {
           dialog when that is open, and searches whichever surfaces declared
           themselves scopes -- so Ctrl+F means the same thing on every view. */}
       <FindBar />
-      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} onEndpointsChanged={() => setEndpointRefreshKey((key) => key + 1)} preferences={preferences} onPreferencesChange={savePreferences} appearance={appearance} onAppearanceChange={saveAppearance} notify={notify} onOpenSkill={(slug) => { setOpenSkill(slug); setSettingsOpen(false); }} />
+      {paletteOpen && (
+        <CommandPalette
+          sessions={chat.sessions}
+          onSelectSession={(id) => { setPaletteOpen(false); handleSelectSession(id); }}
+          onOpenSettingsEntry={(entry) => {
+            setPaletteOpen(false);
+            setSettingsOpen(true);
+            setSettingsRequest({ anchor: entry.anchor, token: Date.now() });
+          }}
+          onOpenFile={(path) => {
+            setPaletteOpen(false);
+            // A file chosen here is a workspace file, whatever the panel was
+            // showing -- the same rule a document card in a reply follows.
+            setOpenSkill(null);
+            rightPanel.setOpen(true);
+            setRequestedFile(path);
+          }}
+          onClose={() => setPaletteOpen(false)}
+        />
+      )}
+      <SettingsModal request={settingsRequest} open={settingsOpen} onClose={() => { setSettingsOpen(false); setSettingsRequest(null); }} onEndpointsChanged={() => setEndpointRefreshKey((key) => key + 1)} preferences={preferences} onPreferencesChange={savePreferences} appearance={appearance} onAppearanceChange={saveAppearance} notify={notify} onOpenSkill={(slug) => { setOpenSkill(slug); setSettingsOpen(false); }} onTasteRun={() => { setTasteRequest({ key: Date.now() }); setSettingsOpen(false); }} />
       <TooltipLayer />
     </div>
   );

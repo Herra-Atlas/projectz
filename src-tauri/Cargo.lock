@@ -4359,7 +4359,7 @@ dependencies = [
 
 [[package]]
 name = "projectz"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "ash",
  "base64 0.22.1",
@@ -4395,6 +4395,7 @@ dependencies = [
  "uuid",
  "webview2-com",
  "windows-core 0.62.2",
+ "windows-sys 0.61.2",
  "winreg",
  "zip",
 ]

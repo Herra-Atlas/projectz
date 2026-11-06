@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 import {
   ANCHOR_ATTRIBUTE,
   FlashHighlight,
@@ -31,19 +33,31 @@ export async function saveSettings(
   return next;
 }
 
-/** The title band every Communications page shares, including the master switch. */
+/**
+ * The title band every Communications page shares, including the master switch.
+ *
+ * `aside` is for a fact about the transport that belongs beside its name rather
+ * than on a row of its own -- Telegram's bot handle, which is what the user is
+ * looking for the moment the page opens and which used to spend a whole row
+ * saying "Connected as …".
+ */
 export function CommunicationsTitle({
   title,
+  aside,
   settings,
   store,
 }: {
   title: string;
+  aside?: ReactNode;
   settings: MessagingSettings;
   store: MessagingStore;
 }) {
   return (
     <SettingsPageTitle>
-      <h2 className="text-[17px] font-semibold tracking-tight">{title}</h2>
+      <div className="flex min-w-0 items-center gap-2.5">
+        <h2 className="truncate text-[17px] font-semibold tracking-tight">{title}</h2>
+        {aside}
+      </div>
       <div
         className="flex items-center gap-2.5"
         {...{

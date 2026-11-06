@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { ArrowUpRight, FileSpreadsheet, FileText, FileType } from "lucide-react";
 import type { ActivityStep } from "../../features/chat/types";
 import { collectDocuments, type ChatDocument } from "../../features/chat/documents";
@@ -28,7 +29,7 @@ type DocumentCardsProps = {
  * there rather than a hover reward. Only the border, the icon and the arrow
  * move on hover -- the surface stays exactly as it is.
  */
-export default function DocumentCards({ steps, onOpenFile }: DocumentCardsProps) {
+function DocumentCards({ steps, onOpenFile }: DocumentCardsProps) {
   const documents = collectDocuments(steps);
   if (documents.length === 0) return null;
 
@@ -82,3 +83,5 @@ function DocumentIcon({ document }: { document: ChatDocument }) {
       return <FileText size={16} aria-hidden />;
   }
 }
+
+export default memo(DocumentCards);

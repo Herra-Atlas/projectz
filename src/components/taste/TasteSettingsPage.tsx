@@ -3,6 +3,7 @@ import { ChevronRight, LoaderCircle, Play } from "lucide-react";
 import HelpMark from "../HelpMark";
 import { ANCHOR_ATTRIBUTE, FlashHighlight, MARKABLE_ATTRIBUTE, SettingRow, SettingsPageTitle, SettingsSection, Toggle } from "../SettingsSection";
 import TitleModelPicker from "../TitleModelPicker";
+import { selectionId, useModelOptions } from "../ModelSelectionPicker";
 import TasteDocument from "./TasteDocument";
 import TasteRunReport from "./TasteRunReport";
 import { dateTime } from "../../features/taste/tasteFormat";
@@ -21,6 +22,13 @@ type TasteSettingsPageProps = {
   /** The provider groups the settings modal already loaded, for the model picker. */
   groups: ModelGroup[];
   localModels: LocalModel[];
+  /**
+   * Opens the right panel's Taste transcript.
+   *
+   * Called only from the Run now button; a scheduled run never opens a panel on
+   * its own. The panel is where a run is watched, so a manual run should show it.
+   */
+  onTasteRun?: () => void;
 };
 
 /**
@@ -32,10 +40,14 @@ type TasteSettingsPageProps = {
  * A fact is editable and deletable in place -- an inference about someone should
  * never be something they cannot correct.
  */
-export default function TasteSettingsPage({ notify, store, groups, localModels }: TasteSettingsPageProps) {
+export default function TasteSettingsPage({ notify, store, groups, localModels, onTasteRun }: TasteSettingsPageProps) {
   const { status, history, error, busy, save, runNow, updateItem, deleteItem } = store;
   const [days, setDays] = useState("4");
   const [runsOpen, setRunsOpen] = useState(false);
+  // The same option list the picker draws. A model that was removed, deleted or
+  // disabled is absent from it, so a stored selection can be checked against it
+  // without a second source of truth.
+  const options = useModelOptions(groups, localModels);
 
   // The backend clamps the interval and moves the next run when the cadence
   // changes, so the field follows the stored value after every read rather than
@@ -55,6 +67,8 @@ export default function TasteSettingsPage({ notify, store, groups, localModels }
 
   const settings = status.settings;
   const running = status.running;
+  const available = new Set(options.map((option) => selectionId(option.selection)));
+  const hasUsableModel = settings.models.some((selection) => available.has(selectionId(selection)));
 
   const saveInterval = () => {
     const parsed = Number.parseInt(days, 10);
@@ -66,6 +80,9 @@ export default function TasteSettingsPage({ notify, store, groups, localModels }
   };
 
   const run = async () => {
+    // Only a manual run opens the panel. A scheduled run is background work and
+    // must never pull a panel over what the user is reading.
+    onTasteRun?.();
     const result = await runNow();
     if (!result) {
       notify("error", "Taste could not run.");
@@ -75,11 +92,10 @@ export default function TasteSettingsPage({ notify, store, groups, localModels }
       notify("error", `Taste failed: ${result.reason ?? "The run did not finish."}`);
     } else if (result.status === "skipped") {
       notify("success", "Nothing new to learn");
+    } else if (result.added + result.updated === 0) {
+      notify("success", "Nothing new to learn");
     } else {
-      notify(
-        "success",
-        `Taste updated · ${result.added} added, ${result.updated} updated, ${result.removed} removed`,
-      );
+      notify("success", `Taste updated · ${result.added} added, ${result.updated} reinforced`);
     }
   };
 
@@ -115,32 +131,46 @@ export default function TasteSettingsPage({ notify, store, groups, localModels }
 
   return (
     <>
-      <div className="mb-6 flex flex-wrap items-start justify-between gap-3 border-b border-[var(--line)] pb-5">
-        <div className="min-w-0">
+      {/* One line, like every other settings page: the title, the question mark and
+          the switch. The old subtitle was a second row for a fact the switch already
+          states, and it made this page's header taller than its neighbours'. */}
+      <SettingsPageTitle>
+        <div className="flex min-w-0 items-center gap-1.5">
           <h2 className="text-[17px] font-semibold tracking-tight">Taste</h2>
-          {/* Only the on state: the switch says what off means. */}
-          {settings.enabled && (
-            <p className="mt-1 flex items-center gap-1.5 text-[12px] text-[var(--muted)]">
-              <span>On. Learned facts ride with every chat.</span>
-              <HelpMark hint="A run reads only user and assistant text from conversations it has not read yet. Reasoning, tool output and sub-agent transcripts are never used. Off, no new conversation is read and no learned context is sent with chats." />
-            </p>
-          )}
+          <HelpMark hint="A run reads only text you wrote in conversations it has not read yet — never assistant replies, reasoning, tool output or sub-agent transcripts. Each stored fact carries the model's confidence. Off, nothing new is read and no learned context is sent with chats. On, learned facts ride with every chat. Taste needs an enabled model to turn on." />
         </div>
-        <div className="shrink-0 pt-0.5" {...{ [ANCHOR_ATTRIBUTE]: "taste.enabled", [MARKABLE_ATTRIBUTE]: "" }}>
+        <div
+          className="shrink-0"
+          title={!settings.enabled && !hasUsableModel ? "Choose an enabled taste model first." : undefined}
+          {...{ [ANCHOR_ATTRIBUTE]: "taste.enabled", [MARKABLE_ATTRIBUTE]: "" }}
+        >
           <FlashHighlight anchor="taste.enabled" />
           <Toggle
             label="Learn about you"
             checked={settings.enabled}
-            onChange={(enabled) => void save({ ...settings, enabled })}
+            disabled={!settings.enabled && !hasUsableModel}
+            onChange={(enabled) => {
+              if (enabled && !hasUsableModel) {
+                notify("error", "Choose an enabled taste model first.");
+                return;
+              }
+              void save({ ...settings, enabled });
+            }}
           />
         </div>
-      </div>
+      </SettingsPageTitle>
 
       <SettingsSection title="Model">
         <TitleModelPicker
           anchor="taste.models"
           label="Taste model"
-          description="Reads new conversations and edits the profile."
+          description={
+            hasUsableModel
+              ? "Extracts short facts from your own messages."
+              : settings.models.length > 0
+                ? "The selected model is no longer available. Choose an enabled model to turn Taste on."
+                : "Choose an enabled model to turn Taste on."
+          }
           models={settings.models}
           onChange={(models) => void save({ ...settings, models })}
           groups={groups}
@@ -184,7 +214,8 @@ export default function TasteSettingsPage({ notify, store, groups, localModels }
             <button
               type="button"
               onClick={() => void run()}
-              disabled={busy || running || settings.models.length === 0}
+              disabled={busy || running || !hasUsableModel}
+              title={!hasUsableModel ? "Choose an enabled taste model first." : undefined}
               className="inline-flex min-h-9 shrink-0 items-center gap-1.5 rounded-lg border border-[var(--line)] px-3 text-[13px] text-[var(--text)] transition-colors hover:bg-[var(--raised)] disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]"
             >
               {running ? <LoaderCircle size={14} className="animate-spin" /> : <Play size={14} />}

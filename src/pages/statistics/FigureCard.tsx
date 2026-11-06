@@ -85,11 +85,11 @@ function ChangePill({ change }: { change: FigureChange }) {
  * one whose tabs are short labels — the models' `All`, `Local`, a provider —
  * still needs the noun they belong to. `action` sits at the right, so a loading
  * note does not stand among the buttons. */
-type PanelProps = { title?: string; tabs?: ReactNode; children: ReactNode; action?: ReactNode };
+type PanelProps = { title?: string; tabs?: ReactNode; children: ReactNode; action?: ReactNode; className?: string };
 
-export function Panel({ title, tabs, children, action }: PanelProps) {
+export function Panel({ title, tabs, children, action, className }: PanelProps) {
   return (
-    <section className="flex min-w-0 flex-col rounded-lg border border-[var(--line)] bg-[var(--panel)]">
+    <section className={`flex min-w-0 flex-col rounded-lg border border-[var(--line)] bg-[var(--panel)] ${className ?? ""}`}>
       <div className="flex min-h-[38px] items-center gap-3 border-b border-[var(--line)] px-4 py-1.5">
         {title && <h2 className="shrink-0 truncate text-[13px] font-medium text-[var(--text)]">{title}</h2>}
         {tabs && <div className="min-w-0 flex-1">{tabs}</div>}

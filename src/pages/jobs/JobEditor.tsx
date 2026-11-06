@@ -11,6 +11,27 @@ import { ALL_ACCESS } from "../../features/chat/access";
 import { DEFAULT_CONDITIONS, draftJob, toDraft, type Job, type JobSchedule, type NewJob } from "../../features/jobs/types";
 
 /**
+ * Whether any of `start` reaches `target` by following `depends_on`.
+ *
+ * Two jobs that wait for each other wait forever, and the runtime has no cycle
+ * check and no way to say so -- it just never starts. The editor is the last
+ * place the mistake is still visible, so it is checked here before saving.
+ */
+function reachesTarget(start: string[], target: string, jobs: Job[]): boolean {
+  const byId = new Map(jobs.map((entry) => [entry.id, entry]));
+  const seen = new Set<string>();
+  const stack = [...start];
+  while (stack.length > 0) {
+    const id = stack.pop() as string;
+    if (id === target) return true;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    stack.push(...(byId.get(id)?.depends_on ?? []));
+  }
+  return false;
+}
+
+/**
  * The job editor.
  *
  * One form for create and edit, because they are the same form with a different
@@ -42,6 +63,9 @@ export default function JobEditor({
   const { workspaces } = useWorkspaces(true);
   const [draft, setDraft] = useState<NewJob>(() => (job ? toDraft(job) : draftJob()));
   const [saving, setSaving] = useState(false);
+  // Only an existing job can be part of a cycle; a new one has no id for
+  // anything to wait on yet.
+  const dependencyCycle = job !== null && reachesTarget(draft.depends_on, job.id, jobs);
 
   // The schedule is one choice from two families -- once, or repeatedly -- and the
   // editor keeps the sub-choice and the values for each. "Once, at 15:00 today" and
@@ -109,7 +133,7 @@ export default function JobEditor({
           <h2 className="text-[15px] font-semibold">{job ? "Edit job" : "New job"}</h2>
           <div className="flex items-center gap-2">
             <button type="button" onClick={onCancel} className="min-h-9 rounded-lg border border-[var(--line)] px-3 text-[13px] text-[var(--muted)] hover:bg-[var(--raised)] hover:text-[var(--text)]">Cancel</button>
-            <button type="button" onClick={() => void save()} disabled={saving || !draft.name.trim() || !draft.prompt.trim()} className="min-h-9 rounded-lg bg-[var(--accent)] px-3 text-[13px] font-medium text-[var(--accent-ink)] disabled:opacity-40">{saving ? "Saving…" : "Save"}</button>
+            <button type="button" onClick={() => void save()} disabled={saving || dependencyCycle || !draft.name.trim() || !draft.prompt.trim()} className="min-h-9 rounded-lg bg-[var(--accent)] px-3 text-[13px] font-medium text-[var(--accent-ink)] disabled:opacity-40">{saving ? "Saving…" : "Save"}</button>
           </div>
         </header>
 
@@ -306,6 +330,11 @@ export default function JobEditor({
                 </label>
               ))}
             </div>
+            {dependencyCycle && (
+              <p className="mt-2 rounded-md border border-[color-mix(in_srgb,var(--danger)_35%,var(--line))] px-3 py-2 text-[12px] text-[var(--danger)]">
+                This job would end up waiting for itself: one of the jobs selected here already waits for it. A cycle never starts, so remove one of them.
+              </p>
+            )}
           </Field>
         )}
 
